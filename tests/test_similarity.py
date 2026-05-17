@@ -73,3 +73,32 @@ def test_search_excludes_target_symbol_and_reports_skip_reasons() -> None:
     assert result.results.empty
     assert result.skipped["symbol"].tolist() == ["000002.SZ"]
     assert "区间数据不足" in result.skipped["原因"].iloc[0]
+
+
+def test_search_uses_same_window_semantics_after_grouped_filtering() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [99, 10, 11, 12, 11, 13, 98]),
+            _bars("000002.SZ", [88, 20, 22, 24, 22, 26, 87]),
+            _bars("000003.SZ", [77, 10, 9, 8, 7, 6, 76]),
+            _bars("000004.SZ", [66, 10, 11, 65, 64, 63, 62]),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=("000002.SZ", "000003.SZ", "000004.SZ"),
+            start="2024-01-02",
+            end="2024-01-06",
+            top_n=3,
+            min_coverage=1.0,
+        ),
+    )
+
+    assert result.window_size == 5
+    assert result.results["symbol"].tolist() == ["000002.SZ", "000004.SZ", "000003.SZ"]
+    assert result.results["区间开始"].tolist() == [pd.Timestamp("2024-01-02")] * 3
+    assert result.results["区间结束"].tolist() == [pd.Timestamp("2024-01-06")] * 3

@@ -133,7 +133,7 @@ def data_check(
             rows.append(_check_row(symbol, "missing_file", 0, None, None, "本地 parquet 不存在"))
             continue
         try:
-            frame = pd.read_parquet(file_path)
+            frame = pd.read_parquet(file_path, columns=["date"])
             frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
             window = frame.loc[frame["date"].between(start_ts, end_ts)]
             status = "available" if not window.empty else "missing_window"

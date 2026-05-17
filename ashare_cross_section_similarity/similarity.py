@@ -50,8 +50,9 @@ def search_cross_section(
     target_symbol = normalize_symbol(config.target_symbol)
     start = pd.Timestamp(config.start)
     end = inclusive_end_timestamp(config.end)
-    target_window = _window_for_symbol(prepared, target_symbol, start, end)
-    if target_window.empty:
+    windows = _windows_by_symbol(prepared, start, end)
+    target_window = windows.get(target_symbol)
+    if target_window is None or target_window.empty:
         raise ValueError(f"目标标的 {target_symbol} 在所选区间没有行情数据。")
 
     target_length = len(target_window)
@@ -64,12 +65,13 @@ def search_cross_section(
     for symbol in unique_symbols(config.universe_symbols):
         if symbol == target_symbol:
             continue
-        candidate = _window_for_symbol(prepared, symbol, start, end)
-        if len(candidate) < minimum_rows:
+        candidate = windows.get(symbol)
+        candidate_rows = 0 if candidate is None else len(candidate)
+        if candidate_rows < minimum_rows:
             skipped.append(
                 {
                     "symbol": symbol,
-                    "原因": f"区间数据不足：{len(candidate)} / {target_length}",
+                    "原因": f"区间数据不足：{candidate_rows} / {target_length}",
                 }
             )
             continue
@@ -132,7 +134,7 @@ def _score_results(frame: pd.DataFrame, path_weight: float) -> pd.DataFrame:
 
 def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     if bars.empty:
-        return pd.DataFrame(columns=["date", "stock_code", "open", "high", "low", "close", "volume", "amount"])
+        return _empty_bars()
     frame = bars.copy()
     if "stock_code" not in frame.columns and "symbol" in frame.columns:
         frame = frame.rename(columns={"symbol": "stock_code"})
@@ -146,14 +148,23 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values(["stock_code", "date"]).reset_index(drop=True)
 
 
-def _window_for_symbol(
+def _windows_by_symbol(
     bars: pd.DataFrame,
-    symbol: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
-) -> pd.DataFrame:
-    return bars.loc[
-        (bars["stock_code"] == symbol)
-        & (bars["date"] >= start)
-        & (bars["date"] <= end)
-    ].sort_values("date")
+) -> dict[str, pd.DataFrame]:
+    if bars.empty:
+        return {}
+    window = bars.loc[bars["date"].between(start, end)]
+    if window.empty:
+        return {}
+    return {
+        symbol: group.sort_values("date").reset_index(drop=True)
+        for symbol, group in window.groupby("stock_code", sort=False)
+    }
+
+
+def _empty_bars() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["date", "stock_code", "open", "high", "low", "close", "volume", "amount"]
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from ashare_cross_section_similarity.universe import normalize_symbol
 
@@ -52,7 +53,7 @@ def load_local_bars(
         file_path = root / f"{symbol}.parquet"
         if not file_path.exists():
             continue
-        frame = _normalize_bars(pd.read_parquet(file_path), symbol)
+        frame = _normalize_bars(_read_bars_parquet(file_path), symbol)
         frame = frame.loc[frame["date"].between(start_ts, end_ts)]
         if not frame.empty:
             frames.append(frame)
@@ -85,3 +86,13 @@ def _normalize_bars(frame: pd.DataFrame, fallback_symbol: str) -> pd.DataFrame:
     result = result.dropna(subset=["date", "open", "high", "low", "close"])
     result = result[CANONICAL_COLUMNS].drop_duplicates(subset=["stock_code", "date"], keep="last")
     return result.sort_values(["stock_code", "date"]).reset_index(drop=True)
+
+
+def _read_bars_parquet(file_path: Path) -> pd.DataFrame:
+    available_columns = set(pq.read_schema(file_path).names)
+    columns = [
+        column
+        for column in CANONICAL_COLUMNS + ["symbol"]
+        if column in available_columns
+    ]
+    return pd.read_parquet(file_path, columns=columns)

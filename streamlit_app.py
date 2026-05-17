@@ -7,11 +7,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ashare_cross_section_similarity.cli import _resolve_universe
-from ashare_cross_section_similarity.data import load_local_bars
+from ashare_cross_section_similarity.data import inclusive_end_timestamp, load_local_bars
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
-from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
+from ashare_cross_section_similarity.features import normalized_close_path, resample_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
-from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
+from ashare_cross_section_similarity.similarity import (
+    CrossSectionSearchConfig,
+    CrossSectionSearchResult,
+    search_cross_section,
+)
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤"]
@@ -176,70 +180,78 @@ def _render_cross_section_tab(
     universe_industry = col9.text_input("行业板块", value="", help="如 半导体，需要 akshare。")
     universe_concept = st.text_input("概念板块", value="", help="如 融资融券，需要 akshare。")
 
-    args = _Args(
-        data_root=data_root,
-        timeframe=timeframe,
-        adjust=adjust,
-        target_symbol=target_symbol,
-        start=start,
-        end=end,
-        universe_symbols=universe_symbols,
-        universe_file=universe_file,
-        universe_index=universe_index,
-        universe_industry=universe_industry,
-        universe_concept=universe_concept,
-    )
     try:
-        universe = _resolve_universe(args)
+        universe = _cached_resolve_universe(
+            data_root,
+            timeframe,
+            adjust,
+            universe_symbols,
+            universe_file,
+            universe_index,
+            universe_industry,
+            universe_concept,
+        )
     except Exception as exc:  # noqa: BLE001
         st.error(f"搜索范围解析失败：{exc}")
         return
     symbols = [target_symbol, *universe]
     st.markdown("**1. 数据检查**")
-    try:
-        check = data_check(
-            symbols=symbols,
-            data_root=Path(data_root),
-            timeframe=timeframe,
-            adjust=adjust,
-            start=start,
-            end=end,
-        )
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"数据检查失败：{exc}")
-        return
-    cols = st.columns(4)
-    cols[0].metric("搜索范围", f"{len(universe):,}")
-    cols[1].metric("可用标的", f"{int((check['status'] == 'available').sum()):,}")
-    cols[2].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
-    cols[3].metric("区间缺失", f"{int((check['status'] == 'missing_window').sum()):,}")
-    st.dataframe(_centered(_format_status(check.head(200))), use_container_width=True, hide_index=True)
+    st.caption("点击后检查目标和搜索范围在所选区间内是否已有本地行情；缺数据时可直接在本页下载。")
+    check_key = (tuple(symbols), data_root, timeframe, adjust, start, end)
+    if st.button("检查本地数据覆盖", key="cross_check"):
+        try:
+            st.session_state["cross_data_check_key"] = check_key
+            st.session_state["cross_data_check"] = _cached_data_check(
+                tuple(symbols),
+                data_root,
+                timeframe,
+                adjust,
+                start,
+                end,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"数据检查失败：{exc}")
+            return
+    check = st.session_state.get("cross_data_check")
+    if check is not None and st.session_state.get("cross_data_check_key") == check_key:
+        cols = st.columns(4)
+        cols[0].metric("搜索范围", f"{len(universe):,}")
+        cols[1].metric("可用标的", f"{int((check['status'] == 'available').sum()):,}")
+        cols[2].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
+        cols[3].metric("区间缺失", f"{int((check['status'] == 'missing_window').sum()):,}")
+        st.dataframe(_centered(_format_status(check.head(200))), use_container_width=True, hide_index=True)
+    else:
+        st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
-    with st.expander("缺数据时下载或更新"):
-        if st.button("下载或更新当前目标与搜索范围行情", key="cross_download"):
-            with st.spinner("正在调用原 trend-backtest 更新行情..."):
-                update_result = update_local_bars(
-                    symbols=symbols,
-                    timeframe=timeframe,
-                    adjust=adjust,
-                    start=start,
-                    end=end,
-                    trend_repo=Path(trend_repo),
-                    provider=provider,
-                )
-            st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
+    st.markdown("**2. 数据抓取 / 更新**")
+    st.caption("日线和近端分钟线使用 AkShare 写入本地 parquet；30m 长历史建议提前准备本地数据。")
+    if st.button("下载或更新当前目标与搜索范围行情", key="cross_download"):
+        with st.spinner("正在抓取行情并写入本地 parquet..."):
+            update_result = update_local_bars(
+                symbols=symbols,
+                timeframe=timeframe,
+                adjust=adjust,
+                start=start,
+                end=end,
+                trend_repo=Path(trend_repo),
+                provider=provider,
+            )
+        st.cache_data.clear()
+        st.session_state.pop("cross_data_check", None)
+        st.session_state.pop("cross_data_check_key", None)
+        st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
 
-    st.markdown("**2. 运行横截面搜索**")
+    st.markdown("**3. 运行横截面搜索**")
     if not st.button("运行横截面搜索", type="primary", key="cross_run"):
         st.info("检查数据后，缺失则先下载；数据可用后点击运行横截面搜索。")
         return
 
     try:
-        bars = load_local_bars(
-            data_root=Path(data_root),
+        bars = _cached_load_local_bars(
+            data_root=data_root,
             timeframe=timeframe,
             adjust=adjust,
-            symbols=symbols,
+            symbols=tuple(symbols),
             start=start,
             end=end,
         )
@@ -259,7 +271,7 @@ def _render_cross_section_tab(
         st.error(str(exc))
         return
 
-    st.markdown("**3. 搜索结果**")
+    st.markdown("**4. 搜索结果**")
     st.metric("目标窗口 K 线数", result.window_size)
     st.metric("有效结果数", len(result.results))
     if result.results.empty:
@@ -268,6 +280,7 @@ def _render_cross_section_tab(
 
     st.dataframe(_centered(_format_results(result.results)), use_container_width=True, hide_index=True)
     st.plotly_chart(_score_chart(result.results), use_container_width=True)
+    st.plotly_chart(_path_comparison_chart(bars, result), use_container_width=True)
     if not result.skipped.empty:
         with st.expander("查看跳过的标的"):
             st.dataframe(_centered(result.skipped), use_container_width=True, hide_index=True)
@@ -283,6 +296,70 @@ def _render_cross_section_tab(
 class _Args:
     def __init__(self, **kwargs: object) -> None:
         self.__dict__.update(kwargs)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_resolve_universe(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    universe_symbols: str,
+    universe_file: str,
+    universe_index: str,
+    universe_industry: str,
+    universe_concept: str,
+) -> list[str]:
+    return _resolve_universe(
+        _Args(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            universe_symbols=universe_symbols,
+            universe_file=universe_file,
+            universe_index=universe_index,
+            universe_industry=universe_industry,
+            universe_concept=universe_concept,
+        )
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_data_check(
+    symbols: tuple[str, ...],
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+) -> pd.DataFrame:
+    return data_check(
+        symbols=symbols,
+        data_root=Path(data_root),
+        timeframe=timeframe,
+        adjust=adjust,
+        start=start,
+        end=end,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_local_bars(
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+) -> pd.DataFrame:
+    return load_local_bars(
+        data_root=Path(data_root),
+        timeframe=timeframe,
+        adjust=adjust,
+        symbols=symbols,
+        start=start,
+        end=end,
+    )
 
 
 def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
@@ -370,6 +447,37 @@ def _date_text(value: object) -> str:
     if pd.isna(value):
         return "-"
     return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def _path_comparison_chart(
+    bars: pd.DataFrame,
+    result: CrossSectionSearchResult,
+) -> go.Figure:
+    start = result.start
+    end = inclusive_end_timestamp(result.end)
+    symbols = [result.target_symbol, *result.results["symbol"].head(5).tolist()]
+    target_length = result.window_size
+    fig = go.Figure()
+    for symbol in symbols:
+        window = bars.loc[
+            (bars["stock_code"] == symbol)
+            & (bars["date"] >= start)
+            & (bars["date"] <= end)
+        ].sort_values("date")
+        if window.empty:
+            continue
+        path = normalized_close_path(window)
+        if len(path) != target_length:
+            path = resample_path(path, target_length)
+        label = f"{symbol}（目标）" if symbol == result.target_symbol else symbol
+        fig.add_scatter(
+            x=list(range(1, len(path) + 1)),
+            y=path,
+            mode="lines",
+            name=label,
+        )
+    fig.update_layout(title="目标 vs Top 5 归一化走势", xaxis_title="窗口序号", yaxis_title="起点=100")
+    return fig
 
 
 if __name__ == "__main__":

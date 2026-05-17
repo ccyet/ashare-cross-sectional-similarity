@@ -84,3 +84,63 @@ def test_load_local_bars_date_only_end_includes_full_intraday_session(tmp_path: 
     )
 
     assert out["close"].tolist() == [10.0, 11.0]
+
+
+def test_load_local_bars_accepts_stock_code_column_without_optional_liquidity(
+    tmp_path: Path,
+) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "stock_code": ["000001"],
+            "open": [10],
+            "high": [11],
+            "low": [9],
+            "close": [10.5],
+            "extra": ["ignored"],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = load_local_bars(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-01",
+    )
+
+    assert out["stock_code"].tolist() == ["000001.SZ"]
+    assert out["close"].tolist() == [10.5]
+    assert out["volume"].isna().all()
+    assert out["amount"].isna().all()
+
+
+def test_load_local_bars_accepts_symbol_column(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "symbol": ["600519.SH"],
+            "open": [1],
+            "high": [1],
+            "low": [1],
+            "close": [1],
+            "volume": [10],
+            "amount": [100],
+        }
+    ).to_parquet(qfq / "600519.SH.parquet", index=False)
+
+    out = load_local_bars(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        symbols=("600519.SH",),
+        start="2024-01-01",
+        end="2024-01-01",
+    )
+
+    assert out["stock_code"].tolist() == ["600519.SH"]

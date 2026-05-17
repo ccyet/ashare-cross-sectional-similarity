@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -114,3 +115,24 @@ def test_data_check_reports_missing_and_available_symbols(tmp_path: Path) -> Non
         {"symbol": "000001.SZ", "status": "available", "rows": 2},
         {"symbol": "000002.SZ", "status": "missing_file", "rows": 0},
     ]
+
+
+def test_data_check_reads_only_date_column(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    file_path = qfq / "000001.SZ.parquet"
+    file_path.write_bytes(b"placeholder")
+    frame = pd.DataFrame({"date": ["2024-01-01", "2024-01-02"]})
+
+    with patch("pandas.read_parquet", return_value=frame) as read_parquet:
+        out = data_check(
+            symbols=("000001.SZ",),
+            data_root=tmp_path / "market" / "daily",
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+        )
+
+    read_parquet.assert_called_once_with(file_path, columns=["date"])
+    assert out["status"].tolist() == ["available"]
