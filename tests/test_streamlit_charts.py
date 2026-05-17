@@ -198,6 +198,29 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
     assert formatted["区间开始"].iloc[0] == "2024-01-01"
 
 
+def test_format_results_formats_feature_numbers_for_display() -> None:
+    formatted = _format_results(
+        pd.DataFrame(
+            {
+                "symbol": ["000001.SZ"],
+                "路径距离": [0.123456],
+                "趋势斜率": [-0.987654],
+                "下跌放量占比": [0.34567],
+                "量价相关": [-0.45678],
+                "成交规模": [19.87654],
+                "特征距离": [1.23456],
+            }
+        )
+    )
+
+    assert formatted["路径距离"].iloc[0] == "0.12"
+    assert formatted["趋势斜率"].iloc[0] == "-0.99"
+    assert formatted["下跌放量占比"].iloc[0] == "34.57%"
+    assert formatted["量价相关"].iloc[0] == "-0.46"
+    assert formatted["成交规模"].iloc[0] == "19.88"
+    assert formatted["特征距离"].iloc[0] == "1.23"
+
+
 def test_cross_section_forward_summary_measures_valid_results() -> None:
     frame = pd.DataFrame(
         {

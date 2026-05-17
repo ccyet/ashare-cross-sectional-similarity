@@ -24,7 +24,8 @@ from ashare_cross_section_similarity.similarity import (
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 
-PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤"]
+PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比"]
+DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 
 
 def main() -> None:
@@ -616,6 +617,7 @@ def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
             rename_map[column] = f"后{horizon}根收益"
             percent_columns.append(column)
     result = _format_percent_columns(result, percent_columns)
+    result = _format_decimal_columns(result, DECIMAL_COLUMNS)
     result = result.rename(columns=rename_map)
     for column in ["区间开始", "区间结束"]:
         if column in result.columns:
@@ -757,6 +759,7 @@ def _format_history_results(frame: pd.DataFrame) -> pd.DataFrame:
             rename_map[column] = f"后{horizon}根最大浮盈"
             percent_columns.append(column)
     result = _format_percent_columns(result, percent_columns)
+    result = _format_decimal_columns(result, DECIMAL_COLUMNS)
     result = result.rename(columns=rename_map)
     for column in ["窗口开始", "窗口结束"]:
         if column in result.columns:
@@ -769,6 +772,15 @@ def _format_percent_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataF
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce").map(
                 lambda value: "" if pd.isna(value) else f"{value:.2%}"
+            )
+    return frame
+
+
+def _format_decimal_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    for column in columns:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce").map(
+                lambda value: "" if pd.isna(value) else f"{value:.2f}"
             )
     return frame
 
