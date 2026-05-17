@@ -101,7 +101,27 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
             [{"symbol": symbol, "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"}]
         )
 
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        symbol = kwargs["symbols"][0]
+        if symbol == "000001.SZ":
+            return pd.DataFrame(
+                [{"symbol": symbol, "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "本地 parquet 不存在"}]
+            )
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                }
+            ]
+        )
+
     monkeypatch.setattr("streamlit_app.update_local_bars", fake_update_local_bars)
+    monkeypatch.setattr("streamlit_app.data_check", fake_data_check)
     progress: list[tuple[int, int, str, str]] = []
 
     result = _download_symbols_with_progress(
@@ -120,16 +140,23 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
     assert calls == [(("000001.SZ",), "2024-01-31"), (("000002.SZ",), "2024-01-31")]
     assert progress == [
         (0, 2, "000001.SZ", "running"),
-        (1, 2, "000001.SZ", "delegated"),
+        (1, 2, "000001.SZ", "missing_file"),
         (1, 2, "000002.SZ", "running"),
-        (2, 2, "000002.SZ", "delegated"),
+        (2, 2, "000002.SZ", "available"),
     ]
     assert_frame_equal(
         result,
         pd.DataFrame(
             [
-                {"symbol": "000001.SZ", "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"},
-                {"symbol": "000002.SZ", "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"},
+                {"symbol": "000001.SZ", "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "下载命令执行后仍缺本地 parquet；本地 parquet 不存在"},
+                {
+                    "symbol": "000002.SZ",
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                },
             ]
         ),
     )

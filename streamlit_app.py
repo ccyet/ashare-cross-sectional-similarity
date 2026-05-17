@@ -274,6 +274,12 @@ def _render_cross_section_tab(
         st.session_state.pop("cross_data_check", None)
         st.session_state.pop("cross_data_check_key", None)
         st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
+        normalized_targets = unique_symbols([target_symbol])
+        if normalized_targets:
+            normalized_target = normalized_targets[0]
+            target_status = update_result.loc[update_result["symbol"] == normalized_target, "status"]
+            if not target_status.empty and target_status.iloc[0] != "available":
+                st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
 
     st.markdown("**3. 运行横截面搜索**")
     if not st.button("运行横截面搜索", type="primary", key="cross_run"):
@@ -415,7 +421,7 @@ def _download_symbols_with_progress(
     normalized = unique_symbols(symbols)
     if not normalized:
         return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
-    rows: list[pd.DataFrame] = []
+    rows: list[dict[str, object]] = []
     total = len(normalized)
     for index, symbol in enumerate(normalized):
         if progress_callback is not None:
@@ -431,11 +437,24 @@ def _download_symbols_with_progress(
             provider=provider,
             download_engine=download_engine,
         )
-        rows.append(result)
-        status = str(result["status"].iloc[0]) if not result.empty and "status" in result.columns else "unknown"
+        checked = data_check(
+            symbols=[symbol],
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+        if checked.empty:
+            checked = result
+        elif not result.empty and str(checked["status"].iloc[0]) != "available":
+            message = str(checked["message"].iloc[0]) if "message" in checked.columns else ""
+            checked.loc[checked.index[0], "message"] = f"下载命令执行后仍缺本地 parquet；{message}".rstrip("；")
+        rows.append(checked.iloc[0].to_dict())
+        status = str(checked["status"].iloc[0]) if not checked.empty and "status" in checked.columns else "unknown"
         if progress_callback is not None:
             progress_callback(index + 1, total, symbol, status)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
 
 
 def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None = None) -> str:
