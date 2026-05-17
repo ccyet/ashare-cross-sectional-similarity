@@ -180,6 +180,41 @@ python -m ashare_cross_section_similarity check \
   --end 2024-03-31
 ```
 
+### 5.4 下载全 A 股票历史日线
+
+脚本会用 AkShare 获取当前全 A 股票列表，按批次委托本库下载器抓取 `1d/qfq` 日线，并在每批结束后复查本地 parquet 覆盖情况，日志写入 CSV。
+
+先做 dry-run：
+
+```bash
+python scripts/download_all_a_daily.py \
+  --dry-run \
+  --symbols-output outputs/all_a_symbols.csv
+```
+
+正式下载全历史：
+
+```bash
+python scripts/download_all_a_daily.py \
+  --trend-repo /Users/a1234/Desktop/trend-backtest \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --start 1990-01-01 \
+  --end 2026-05-17 \
+  --adjust qfq \
+  --batch-size 100 \
+  --provider akshare \
+  --output outputs/all_a_daily_download_log.csv
+```
+
+常用选项：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--skip-available` | 下载前跳过本地已覆盖区间的股票 |
+| `--limit` | 调试时只下载前 N 个股票 |
+| `--sleep` | 批次之间暂停秒数，避免数据源限流 |
+| `--download-engine openbb` | 改用 OpenBB 直接写入本地 parquet |
+
 ## 6. 历史时序搜索命令
 
 ```bash

@@ -7,7 +7,11 @@ from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
+    _cross_section_bucket_summary,
+    _cross_section_forward_summary,
+    _cross_section_overview_metrics,
     _download_symbols_with_progress,
+    _format_cross_section_stats,
     _format_results,
     _forward_stats_load_end,
     _lightweight_kline_chart_html,
@@ -123,6 +127,88 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
     assert formatted["区间收益"].iloc[0] == "12.34%"
     assert formatted["后3根收益"].iloc[0] == "5.67%"
     assert formatted["区间开始"].iloc[0] == "2024-01-01"
+
+
+def test_cross_section_forward_summary_measures_valid_results() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "综合相似度": [0.9, 0.8, 0.7],
+            "t_plus_3_return": [0.10, -0.05, 0.20],
+            "t_plus_5_return": [0.12, 0.00, None],
+            "t_plus_10_return": [0.30, -0.10, 0.05],
+        }
+    )
+
+    summary = _cross_section_forward_summary(frame)
+
+    row3 = summary.loc[summary["观察窗口"] == "后3根"].iloc[0]
+    assert row3["样本数"] == 3
+    assert row3["平均收益"] == pd.Series([0.10, -0.05, 0.20]).mean()
+    assert row3["胜率"] == 2 / 3
+    assert row3["最好标的"] == "000003.SZ"
+    assert row3["最差标的"] == "000002.SZ"
+    assert row3["相似度-收益相关"] < 0
+
+    row5 = summary.loc[summary["观察窗口"] == "后5根"].iloc[0]
+    assert row5["样本数"] == 2
+    assert row5["胜率"] == 1 / 2
+
+
+def test_cross_section_bucket_summary_compares_top_buckets() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": [f"00000{index}.SZ" for index in range(1, 13)],
+            "综合相似度": [1 - index * 0.01 for index in range(12)],
+            "t_plus_3_return": [0.01 * index for index in range(12)],
+            "t_plus_10_return": [0.02 * index - 0.05 for index in range(12)],
+        }
+    )
+
+    summary = _cross_section_bucket_summary(frame)
+
+    assert summary["分层"].tolist() == ["Top3", "Top6", "Top10", "全部"]
+    top3 = summary.loc[summary["分层"] == "Top3"].iloc[0]
+    assert top3["样本数"] == 3
+    assert top3["平均综合相似度"] == pd.Series([1.0, 0.99, 0.98]).mean()
+    assert top3["后3根平均收益"] == pd.Series([0.0, 0.01, 0.02]).mean()
+    assert top3["后10根胜率"] == 0
+
+
+def test_cross_section_overview_metrics_uses_forward_returns() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "综合相似度": [0.9, 0.8, 0.7],
+            "t_plus_10_return": [0.10, -0.05, 0.20],
+        }
+    )
+
+    metrics = _cross_section_overview_metrics(frame)
+
+    assert metrics == [
+        ("有效结果", "3"),
+        ("平均相似度", "80.00%"),
+        ("后10根胜率", "66.67%"),
+        ("Top6后10根均值", "8.33%"),
+    ]
+
+
+def test_format_cross_section_stats_keeps_correlation_as_decimal() -> None:
+    formatted = _format_cross_section_stats(
+        pd.DataFrame(
+            {
+                "观察窗口": ["后10根"],
+                "平均收益": [0.1234],
+                "胜率": [2 / 3],
+                "相似度-收益相关": [-0.4567],
+            }
+        )
+    )
+
+    assert formatted["平均收益"].iloc[0] == "12.34%"
+    assert formatted["胜率"].iloc[0] == "66.67%"
+    assert formatted["相似度-收益相关"].iloc[0] == "-0.46"
 
 
 def test_forward_stats_load_end_extends_historical_window() -> None:

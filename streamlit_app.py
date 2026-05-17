@@ -333,6 +333,25 @@ def _render_cross_section_tab(
         return
 
     st.dataframe(_centered(_format_results(result.results)), use_container_width=True, hide_index=True)
+    st.markdown("**5. 有效结果计量**")
+    metric_columns = st.columns(4)
+    for column, (label, value) in zip(metric_columns, _cross_section_overview_metrics(result.results)):
+        column.metric(label, value)
+    summary_col, bucket_col = st.columns(2)
+    with summary_col:
+        st.caption("后续收益统计")
+        st.dataframe(
+            _centered(_format_cross_section_stats(_cross_section_forward_summary(result.results))),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with bucket_col:
+        st.caption("相似度分层表现")
+        st.dataframe(
+            _centered(_format_cross_section_stats(_cross_section_bucket_summary(result.results))),
+            use_container_width=True,
+            hide_index=True,
+        )
     st.plotly_chart(_score_chart(result.results), use_container_width=True)
     components.html(
         _lightweight_kline_chart_html(_lightweight_kline_series(bars, result)),
@@ -494,6 +513,109 @@ def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
         if column in result.columns:
             result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
     return result
+
+
+def _cross_section_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]]:
+    if frame.empty:
+        return [("有效结果", "0"), ("平均相似度", "-"), ("后10根胜率", "-"), ("Top6后10根均值", "-")]
+    similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
+    returns_10 = pd.to_numeric(frame.get("t_plus_10_return"), errors="coerce")
+    return [
+        ("有效结果", f"{len(frame):,}"),
+        ("平均相似度", _percent_text(similarity.mean())),
+        ("后10根胜率", _percent_text((returns_10.dropna() > 0).mean())),
+        ("Top6后10根均值", _percent_text(returns_10.head(6).mean())),
+    ]
+
+
+def _cross_section_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
+    for column in _forward_return_columns(frame):
+        horizon = column.removeprefix("t_plus_").removesuffix("_return")
+        values = pd.to_numeric(frame[column], errors="coerce")
+        valid = values.dropna()
+        if valid.empty:
+            continue
+        best_index = values.idxmax()
+        worst_index = values.idxmin()
+        rows.append(
+            {
+                "观察窗口": f"后{horizon}根",
+                "样本数": int(valid.count()),
+                "平均收益": float(valid.mean()),
+                "中位收益": float(valid.median()),
+                "胜率": float((valid > 0).mean()),
+                "收益波动": float(valid.std(ddof=0)) if len(valid) else 0.0,
+                "最好标的": str(frame.loc[best_index, "symbol"]) if "symbol" in frame.columns else "",
+                "最好收益": float(values.loc[best_index]),
+                "最差标的": str(frame.loc[worst_index, "symbol"]) if "symbol" in frame.columns else "",
+                "最差收益": float(values.loc[worst_index]),
+                "相似度-收益相关": _series_corr(similarity, values),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _cross_section_bucket_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    if frame.empty:
+        return pd.DataFrame(rows)
+    buckets = [("Top3", 3), ("Top6", 6), ("Top10", 10), ("全部", len(frame))]
+    return_columns = _forward_return_columns(frame)
+    for label, size in buckets:
+        sample = frame.head(size)
+        row: dict[str, object] = {
+            "分层": label,
+            "样本数": int(len(sample)),
+            "平均综合相似度": float(pd.to_numeric(sample.get("综合相似度"), errors="coerce").mean()),
+        }
+        for column in return_columns:
+            horizon = column.removeprefix("t_plus_").removesuffix("_return")
+            values = pd.to_numeric(sample[column], errors="coerce").dropna()
+            row[f"后{horizon}根平均收益"] = float(values.mean()) if not values.empty else float("nan")
+            row[f"后{horizon}根胜率"] = float((values > 0).mean()) if not values.empty else float("nan")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _format_cross_section_stats(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    percent_columns = [
+        column
+        for column in result.columns
+        if any(keyword in column for keyword in ("收益", "胜率", "相似度", "波动"))
+        and "相关" not in column
+        and column != "样本数"
+    ]
+    result = _format_percent_columns(result, percent_columns)
+    for column in result.columns:
+        if "相关" in column:
+            result[column] = pd.to_numeric(result[column], errors="coerce").map(
+                lambda value: "" if pd.isna(value) else f"{value:.2f}"
+            )
+    return result
+
+
+def _forward_return_columns(frame: pd.DataFrame) -> list[str]:
+    return [
+        column
+        for column in frame.columns
+        if column.startswith("t_plus_") and column.endswith("_return")
+    ]
+
+
+def _series_corr(left: pd.Series, right: pd.Series) -> float:
+    pairs = pd.concat([left, right], axis=1).dropna()
+    if len(pairs) < 2:
+        return float("nan")
+    corr = float(pairs.iloc[:, 0].corr(pairs.iloc[:, 1]))
+    return corr if pd.notna(corr) else float("nan")
+
+
+def _percent_text(value: object) -> str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return "-" if pd.isna(numeric) else f"{numeric:.2%}"
 
 
 def _pin_symbol_row(frame: pd.DataFrame, symbol: str, limit: int | None = None) -> pd.DataFrame:

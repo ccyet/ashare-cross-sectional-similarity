@@ -6,6 +6,7 @@ from typing import Iterable
 import pandas as pd
 
 SYMBOL_COLUMNS = (
+    "code",
     "stock_code",
     "symbol",
     "ts_code",
