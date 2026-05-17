@@ -8,6 +8,7 @@ import streamlit as st
 
 from ashare_cross_section_similarity.cli import _resolve_universe
 from ashare_cross_section_similarity.data import load_local_bars
+from ashare_cross_section_similarity.downloader import data_check, update_local_bars
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 
 
@@ -17,7 +18,7 @@ def main() -> None:
     st.caption("选定某个个股/板块代理的一段走势，在同一时间窗口内搜索其他个股或板块代理的相似走势。")
     with st.sidebar:
         st.header("运行设置")
-        data_root = st.text_input("本地行情根目录", value="/Users/a1234/Desktop/trend-backtest/data/market/daily")
+        data_root = st.text_input("本地行情根目录", value="data/market/daily")
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
         target_symbol = st.text_input("目标代码", value="300750.SZ")
@@ -31,10 +32,6 @@ def main() -> None:
         top_n = st.number_input("展示数量", min_value=5, max_value=100, value=20, step=5)
         min_coverage = st.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05)
         path_weight = st.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05)
-
-    if not st.button("运行横截面搜索", type="primary"):
-        st.info("先设定目标区间和搜索范围，再点击运行。")
-        return
 
     args = _Args(
         data_root=data_root,
@@ -51,11 +48,56 @@ def main() -> None:
     )
     try:
         universe = _resolve_universe(args)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"搜索范围解析失败：{exc}")
+        return
+    symbols = [target_symbol, *universe]
+    st.markdown("**1. 数据检查**")
+    st.caption("先确认目标和搜索范围在所选区间内是否已有本地行情；缺数据时可直接在本页下载。")
+    try:
+        check = data_check(
+            symbols=symbols,
+            data_root=Path(data_root),
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"数据检查失败：{exc}")
+        return
+    cols = st.columns(4)
+    cols[0].metric("搜索范围", f"{len(universe):,}")
+    cols[1].metric("可用标的", f"{int((check['status'] == 'available').sum()):,}")
+    cols[2].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
+    cols[3].metric("区间缺失", f"{int((check['status'] == 'missing_window').sum()):,}")
+    st.dataframe(check.head(200), use_container_width=True, hide_index=True)
+
+    st.markdown("**2. 数据抓取 / 更新**")
+    st.caption("日线和近端分钟线使用 AkShare 写入本地 parquet；30m 长历史建议提前准备本地数据。")
+    if st.button("下载或更新当前目标与搜索范围行情"):
+        with st.spinner("正在抓取行情并写入本地 parquet..."):
+            update_result = update_local_bars(
+                symbols=symbols,
+                data_root=Path(data_root),
+                timeframe=timeframe,
+                adjust=adjust,
+                start=start,
+                end=end,
+            )
+        st.dataframe(update_result, use_container_width=True, hide_index=True)
+
+    st.markdown("**3. 横截面相似搜索**")
+    if not st.button("运行横截面搜索", type="primary"):
+        st.info("检查数据后，缺失则先下载；数据可用后点击运行横截面搜索。")
+        return
+
+    try:
         bars = load_local_bars(
             data_root=Path(data_root),
             timeframe=timeframe,
             adjust=adjust,
-            symbols=[target_symbol, *universe],
+            symbols=symbols,
             start=start,
             end=end,
         )
@@ -75,6 +117,7 @@ def main() -> None:
         st.error(str(exc))
         return
 
+    st.markdown("**4. 搜索结果**")
     st.metric("目标窗口 K 线数", result.window_size)
     st.metric("有效结果数", len(result.results))
     if result.results.empty:

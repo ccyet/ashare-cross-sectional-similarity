@@ -3,5 +3,6 @@ pandas>=2.2
 pyarrow>=15
 plotly>=5.20
 streamlit>=1.37
+akshare>=1.17
 pytest>=8.0
 ruff>=0.6
