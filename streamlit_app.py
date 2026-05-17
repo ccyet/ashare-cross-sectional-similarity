@@ -596,23 +596,28 @@ def _lightweight_kline_series(
     bars: pd.DataFrame,
     result: CrossSectionSearchResult,
     top_n: int = 6,
+    forward_bars: int = 10,
 ) -> list[dict[str, object]]:
     start = result.start
     end = inclusive_end_timestamp(result.end)
     symbols = [result.target_symbol, *result.results["symbol"].head(top_n).tolist()]
     series: list[dict[str, object]] = []
     for symbol in symbols:
-        window = bars.loc[
-            (bars["stock_code"] == symbol)
-            & (bars["date"] >= start)
-            & (bars["date"] <= end)
-        ].sort_values("date")
+        symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= start)].sort_values("date")
+        if symbol_bars.empty:
+            continue
+        window = symbol_bars.loc[symbol_bars["date"] <= end]
         if window.empty:
             continue
+        chart_window = symbol_bars.head(len(window) + forward_bars)
+        window_end_time = pd.Timestamp(window["date"].iloc[-1]).strftime("%Y-%m-%d")
         label = f"{symbol}（目标）" if symbol == result.target_symbol else symbol
         series.append(
             {
                 "title": label,
+                "windowEndTime": window_end_time,
+                "windowSize": int(len(window)),
+                "forwardSize": int(max(0, len(chart_window) - len(window))),
                 "data": [
                     {
                         "time": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
@@ -621,7 +626,7 @@ def _lightweight_kline_series(
                         "low": float(row["low"]),
                         "close": float(row["close"]),
                     }
-                    for _, row in window.iterrows()
+                    for _, row in chart_window.iterrows()
                 ],
             }
         )
@@ -652,6 +657,7 @@ chartItems.forEach((item, index) => {{
   title.style.marginBottom = '6px';
   const container = document.createElement('div');
   container.style.height = '220px';
+  container.style.position = 'relative';
   panel.appendChild(title);
   panel.appendChild(container);
   grid.appendChild(panel);
@@ -672,11 +678,73 @@ chartItems.forEach((item, index) => {{
     wickDownColor: '#2ca02c'
   }});
   candles.setData(item.data);
+  const markers = [];
+  if (item.windowEndTime) {{
+    markers.push({{
+      time: item.windowEndTime,
+      position: 'aboveBar',
+      color: '#2563eb',
+      shape: 'circle',
+      text: '窗口结束'
+    }});
+  }}
+  if (markers.length > 0) {{
+    LightweightCharts.createSeriesMarkers(candles, markers);
+  }}
+  const divider = document.createElement('div');
+  divider.style.position = 'absolute';
+  divider.style.top = '0';
+  divider.style.bottom = '22px';
+  divider.style.width = '2px';
+  divider.style.background = '#2563eb';
+  divider.style.opacity = '0.8';
+  divider.style.pointerEvents = 'none';
+  divider.style.zIndex = '3';
+  divider.style.display = 'none';
+  const forwardShade = document.createElement('div');
+  forwardShade.style.position = 'absolute';
+  forwardShade.style.top = '0';
+  forwardShade.style.bottom = '22px';
+  forwardShade.style.background = 'rgba(37, 99, 235, 0.08)';
+  forwardShade.style.pointerEvents = 'none';
+  forwardShade.style.zIndex = '2';
+  forwardShade.style.display = 'none';
+  container.appendChild(forwardShade);
+  container.appendChild(divider);
+  const positionWindowDivider = () => {{
+    if (!item.windowEndTime || !item.windowSize || !item.data.length) {{
+      return;
+    }}
+    let x = chart.timeScale().timeToCoordinate(item.windowEndTime);
+    if (x === null || x === undefined) {{
+      x = container.clientWidth * (item.windowSize / item.data.length);
+    }}
+    const left = Math.max(0, Math.min(container.clientWidth, Math.round(x)));
+    divider.style.left = `${{left}}px`;
+    divider.style.display = 'block';
+    forwardShade.style.left = `${{left}}px`;
+    forwardShade.style.right = '0';
+    forwardShade.style.display = item.forwardSize > 0 ? 'block' : 'none';
+  }};
+  if (item.windowSize && item.forwardSize > 0) {{
+    const band = document.createElement('div');
+    band.textContent = `窗口内 ${{item.windowSize}} 根 | 后续 ${{item.forwardSize}} 根`;
+    band.style.font = '12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
+    band.style.color = '#4b5563';
+    band.style.marginTop = '4px';
+    panel.appendChild(band);
+  }}
   chart.timeScale().fitContent();
-  charts.push({{ chart, container }});
+  positionWindowDivider();
+  setTimeout(positionWindowDivider, 100);
+  chart.timeScale().subscribeVisibleTimeRangeChange(positionWindowDivider);
+  charts.push({{ chart, container, positionWindowDivider }});
 }});
 window.addEventListener('resize', () => {{
-  charts.forEach((item) => item.chart.applyOptions({{ width: item.container.clientWidth }}));
+  charts.forEach((item) => {{
+    item.chart.applyOptions({{ width: item.container.clientWidth }});
+    item.positionWindowDivider();
+  }});
 }});
 </script>
 """

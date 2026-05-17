@@ -10,6 +10,7 @@ from streamlit_app import (
     _download_symbols_with_progress,
     _format_results,
     _forward_stats_load_end,
+    _lightweight_kline_chart_html,
     _lightweight_kline_series,
     _pin_symbol_row,
 )
@@ -33,8 +34,8 @@ def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
 def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:
     bars = pd.concat(
         [
-            _bars("000001.SZ", [10, 11, 12]),
-            *[_bars(f"00000{index}.SZ", [20 + index, 22 + index, 24 + index]) for index in range(2, 9)],
+            _bars("000001.SZ", list(range(10, 25))),
+            *[_bars(f"00000{index}.SZ", list(range(20 + index, 35 + index))) for index in range(2, 9)],
         ],
         ignore_index=True,
     )
@@ -54,9 +55,22 @@ def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:
         {"time": "2024-01-01", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
         {"time": "2024-01-02", "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0},
         {"time": "2024-01-03", "open": 12.0, "high": 12.0, "low": 12.0, "close": 12.0},
+        {"time": "2024-01-04", "open": 13.0, "high": 13.0, "low": 13.0, "close": 13.0},
+        {"time": "2024-01-05", "open": 14.0, "high": 14.0, "low": 14.0, "close": 14.0},
+        {"time": "2024-01-06", "open": 15.0, "high": 15.0, "low": 15.0, "close": 15.0},
+        {"time": "2024-01-07", "open": 16.0, "high": 16.0, "low": 16.0, "close": 16.0},
+        {"time": "2024-01-08", "open": 17.0, "high": 17.0, "low": 17.0, "close": 17.0},
+        {"time": "2024-01-09", "open": 18.0, "high": 18.0, "low": 18.0, "close": 18.0},
+        {"time": "2024-01-10", "open": 19.0, "high": 19.0, "low": 19.0, "close": 19.0},
+        {"time": "2024-01-11", "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0},
+        {"time": "2024-01-12", "open": 21.0, "high": 21.0, "low": 21.0, "close": 21.0},
+        {"time": "2024-01-13", "open": 22.0, "high": 22.0, "low": 22.0, "close": 22.0},
     ]
     assert series[1]["title"] == "000002.SZ"
-    assert series[1]["data"][1] == {"time": "2024-01-02", "open": 24.0, "high": 24.0, "low": 24.0, "close": 24.0}
+    assert series[1]["data"][1] == {"time": "2024-01-02", "open": 23.0, "high": 23.0, "low": 23.0, "close": 23.0}
+    assert series[0]["windowEndTime"] == "2024-01-03"
+    assert series[0]["windowSize"] == 3
+    assert series[0]["forwardSize"] == 10
     assert [item["title"] for item in series] == [
         "000001.SZ（目标）",
         "000002.SZ",
@@ -66,6 +80,29 @@ def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:
         "000006.SZ",
         "000007.SZ",
     ]
+
+
+def test_lightweight_kline_chart_marks_window_and_forward_area() -> None:
+    html = _lightweight_kline_chart_html(
+        [
+            {
+                "title": "000001.SZ（目标）",
+                "windowEndTime": "2024-01-03",
+                "windowSize": 3,
+                "forwardSize": 10,
+                "data": [
+                    {"time": "2024-01-01", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0},
+                    {"time": "2024-01-02", "open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0},
+                    {"time": "2024-01-03", "open": 3.0, "high": 3.0, "low": 3.0, "close": 3.0},
+                    {"time": "2024-01-04", "open": 4.0, "high": 4.0, "low": 4.0, "close": 4.0},
+                ],
+            }
+        ]
+    )
+
+    assert "窗口结束" in html
+    assert "forwardShade" in html
+    assert "positionWindowDivider" in html
 
 
 def test_format_results_formats_forward_returns_as_percentages() -> None:
