@@ -1,0 +1,11 @@
+services:
+  ashare-similarity:
+    build: .
+    ports:
+      - "${ASHARE_PORT:-8502}:8501"
+    environment:
+      ASHARE_DATA_ROOT: /data/market/daily
+      ASHARE_TREND_REPO: /trend-backtest
+    volumes:
+      - ./docker-data:/data
+      - ./outputs:/app/outputs

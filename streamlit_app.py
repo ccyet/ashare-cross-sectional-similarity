@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import date
 from html import escape
 from pathlib import Path
@@ -12,7 +13,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from ashare_cross_section_similarity.cli import _resolve_universe
-from ashare_cross_section_similarity.data import inclusive_end_timestamp, load_local_bars
+from ashare_cross_section_similarity.data import (
+    import_price_frame,
+    inclusive_end_timestamp,
+    load_local_bars,
+    read_price_data_file,
+)
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
@@ -34,8 +40,10 @@ def main() -> None:
     st.caption("保留同一标的历史时序相似阶段搜索，并新增同一时间内的横截面相似标的搜索。")
     with st.sidebar:
         st.header("通用设置")
-        trend_repo = st.text_input("原 trend-backtest 仓库", value=str(default_trend_repo()))
-        data_root = st.text_input("本地行情根目录", value=str(Path(trend_repo) / "data" / "market" / "daily"))
+        trend_repo_default = os.environ.get("ASHARE_TREND_REPO", str(default_trend_repo()))
+        data_root_default = os.environ.get("ASHARE_DATA_ROOT", str(Path(trend_repo_default) / "data" / "market" / "daily"))
+        trend_repo = st.text_input("原 trend-backtest 仓库", value=trend_repo_default)
+        data_root = st.text_input("本地行情根目录", value=data_root_default)
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
         download_engine = st.selectbox(
@@ -49,6 +57,7 @@ def main() -> None:
             value=provider_default,
             help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
         )
+        _render_price_upload(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
     history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
     with history_tab:
@@ -393,6 +402,33 @@ def _render_cross_section_tab(
         file_name="cross_section_similarity.csv",
         mime="text/csv",
     )
+
+
+def _render_price_upload(*, data_root: str, timeframe: str, adjust: str) -> None:
+    with st.expander("上传自定义价格数据"):
+        st.caption("支持 CSV/Parquet；必要列：date、open、high、low、close、symbol 或 stock_code。可选：volume、amount。")
+        uploaded_file = st.file_uploader("价格数据文件", type=["csv", "parquet"], key="price_data_upload")
+        fallback_symbol = st.text_input("默认代码", value="", help="仅当文件没有 symbol/stock_code 列时填写。")
+        if not st.button("导入到本地行情目录", key="price_data_import"):
+            return
+        if uploaded_file is None:
+            st.warning("请先选择 CSV 或 Parquet 文件。")
+            return
+        try:
+            frame = read_price_data_file(uploaded_file, uploaded_file.name)
+            result = import_price_frame(
+                data_root=Path(data_root),
+                timeframe=timeframe,
+                adjust=adjust,
+                frame=frame,
+                fallback_symbol=fallback_symbol,
+                source_name=uploaded_file.name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"价格数据导入失败：{exc}")
+            return
+        st.cache_data.clear()
+        st.dataframe(_centered(_format_import_status(result)), use_container_width=True, hide_index=True)
 
 
 class _Args:
@@ -786,6 +822,14 @@ def _format_decimal_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataF
 
 
 def _format_status(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column in ["start", "end"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    return result
+
+
+def _format_import_status(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     for column in ["start", "end"]:
         if column in result.columns:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_cross_section_similarity.data import load_local_bars, resolve_timeframe_root
+from ashare_cross_section_similarity.data import import_price_frame, load_local_bars, resolve_timeframe_root
 
 
 def test_resolve_timeframe_root_maps_daily_root_to_intraday_root(tmp_path: Path) -> None:
@@ -171,3 +171,92 @@ def test_load_local_bars_accepts_symbol_column(tmp_path: Path) -> None:
     )
 
     assert out["stock_code"].tolist() == ["600519.SH"]
+
+
+def test_import_price_frame_writes_multi_symbol_parquet(tmp_path: Path) -> None:
+    status = import_price_frame(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        frame=pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02", "2024-01-01"],
+                "symbol": ["000001.sz", "000001.SZ", "600519.SH"],
+                "open": [10, 11, 20],
+                "high": [12, 13, 21],
+                "low": [9, 10, 19],
+                "close": [11, 12, 20.5],
+                "volume": [100, 110, 200],
+            }
+        ),
+        source_name="upload.csv",
+    )
+
+    assert status["symbol"].tolist() == ["000001.SZ", "600519.SH"]
+    assert status["status"].tolist() == ["imported", "imported"]
+
+    loaded = load_local_bars(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        symbols=("000001.SZ", "600519.SH"),
+        start="2024-01-01",
+        end="2024-01-02",
+    )
+
+    assert loaded["stock_code"].tolist() == ["000001.SZ", "000001.SZ", "600519.SH"]
+    assert loaded["close"].tolist() == [11.0, 12.0, 20.5]
+
+
+def test_import_price_frame_uses_fallback_symbol_for_single_symbol_file(tmp_path: Path) -> None:
+    import_price_frame(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        frame=pd.DataFrame(
+            {
+                "date": ["2024-01-01"],
+                "open": [10],
+                "high": [11],
+                "low": [9],
+                "close": [10.5],
+            }
+        ),
+        fallback_symbol="000001",
+    )
+
+    loaded = load_local_bars(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-01",
+    )
+
+    assert loaded["stock_code"].tolist() == ["000001.SZ"]
+    assert loaded["close"].tolist() == [10.5]
+
+
+def test_import_price_frame_requires_symbol_column_or_fallback(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "open": [10],
+            "high": [11],
+            "low": [9],
+            "close": [10.5],
+        }
+    )
+
+    try:
+        import_price_frame(
+            data_root=tmp_path / "market" / "daily",
+            timeframe="1d",
+            adjust="qfq",
+            frame=frame,
+        )
+    except ValueError as exc:
+        assert "symbol" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

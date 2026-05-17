@@ -6,7 +6,12 @@ import sys
 
 import pandas as pd
 
-from ashare_cross_section_similarity.data import available_symbols, load_local_bars
+from ashare_cross_section_similarity.data import (
+    available_symbols,
+    import_price_frame,
+    load_local_bars,
+    read_price_data_file,
+)
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
 from ashare_cross_section_similarity.similarity import (
@@ -29,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_download(args)
     if args.command == "check":
         return _run_check(args)
+    if args.command == "import-data":
+        return _run_import_data(args)
     if args.command == "history":
         return _run_history(args)
     return _run_search(args)
@@ -182,9 +189,28 @@ def _run_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_import_data(args: argparse.Namespace) -> int:
+    frame = read_price_data_file(args.input)
+    result = import_price_frame(
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+        frame=frame,
+        fallback_symbol=args.fallback_symbol,
+        source_name=Path(args.input).name,
+    )
+    print(result.to_string(index=False))
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+        print(f"导入日志已写入：{output_path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] not in {"search", "history", "download", "check", "-h", "--help"}:
+    if argv and argv[0] not in {"search", "history", "download", "check", "import-data", "-h", "--help"}:
         argv.insert(0, "search")
     parser = argparse.ArgumentParser(description="A股相似阶段搜集：历史时序、横截面、数据抓取、检查")
     subparsers = parser.add_subparsers(dest="command")
@@ -220,6 +246,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     check_parser = subparsers.add_parser("check", help="检查本地 parquet 覆盖情况")
     _add_common_data_args(check_parser)
     _add_download_symbol_args(check_parser)
+
+    import_parser = subparsers.add_parser("import-data", help="导入符合规范的 csv/parquet 价格数据")
+    _add_common_data_args(import_parser)
+    import_parser.add_argument("--input", required=True, help="价格数据文件，支持 csv/parquet")
+    import_parser.add_argument(
+        "--fallback-symbol",
+        default="",
+        help="当文件没有 symbol/stock_code 列时使用的单一标的代码",
+    )
+    import_parser.add_argument("--output", default="", help="CSV 导入日志输出路径")
 
     parsed = parser.parse_args(argv)
     if parsed.command is None:

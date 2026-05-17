@@ -75,6 +75,25 @@ def test_parse_check_command() -> None:
     assert args.symbols == "000001.SZ"
 
 
+def test_parse_import_data_command() -> None:
+    args = _parse_args(
+        [
+            "import-data",
+            "--input",
+            "/tmp/prices.csv",
+            "--data-root",
+            "/tmp/market/daily",
+            "--fallback-symbol",
+            "000001.SZ",
+        ]
+    )
+
+    assert args.command == "import-data"
+    assert args.input == "/tmp/prices.csv"
+    assert args.data_root == "/tmp/market/daily"
+    assert args.fallback_symbol == "000001.SZ"
+
+
 def test_parse_search_command() -> None:
     args = _parse_args(
         [

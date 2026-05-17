@@ -215,6 +215,37 @@ python scripts/download_all_a_daily.py \
 | `--sleep` | 批次之间暂停秒数，避免数据源限流 |
 | `--download-engine openbb` | 改用 OpenBB 直接写入本地 parquet |
 
+### 5.5 导入自定义价格数据
+
+也可以不走下载器，直接导入用户准备好的 `csv / parquet` 价格数据。文件需要符合本库价格数据规范：
+
+```text
+date, symbol 或 stock_code, open, high, low, close
+```
+
+可选列：
+
+```text
+volume, amount
+```
+
+如果文件只包含单一标的且没有 `symbol / stock_code` 列，可以用 `--fallback-symbol` 指定代码：
+
+```bash
+python -m ashare_cross_section_similarity import-data \
+  --input examples/my_prices.csv \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --timeframe 1d \
+  --adjust qfq \
+  --fallback-symbol 000001.SZ
+```
+
+导入后会按本库目录结构写入：
+
+```text
+<data-root>/<adjust>/<symbol>.parquet
+```
+
 ## 6. 历史时序搜索命令
 
 ```bash
@@ -315,12 +346,40 @@ streamlit run streamlit_app.py
 3. 选择周期，默认日线。
 4. 选择下载引擎：默认调用原库 `update_data.py`，也可选择 OpenBB。
 5. 在对应工作台填写目标代码、窗口或区间；横截面工作台还需填写搜索范围。
-6. 查看或点击数据检查。
-7. 如缺数据，点击下载或更新。
-8. 运行搜索。
-9. 查看结果表、图表；横截面工作台会展示 TradingView lightweight-charts 交互走势对比，并可下载 CSV。
+6. 如需使用自有行情，在左侧 `上传自定义价格数据` 中导入 `csv / parquet`。
+7. 查看或点击数据检查。
+8. 如缺数据，点击下载或更新。
+9. 运行搜索。
+10. 查看结果表、图表；横截面工作台会展示目标与相似标的收盘价折线图、单票 K 线聚合图，并可下载 CSV。
 
-## 9. 输出字段解释
+## 9. Docker 服务
+
+本分支提供 Docker 服务化运行方式，默认把本地 `./docker-data` 挂载到容器内 `/data`，并把行情根目录设为 `/data/market/daily`。
+
+启动：
+
+```bash
+docker compose up --build
+```
+
+浏览器打开：
+
+```text
+http://localhost:8502
+```
+
+如需改端口：
+
+```bash
+ASHARE_PORT=8510 docker compose up --build
+```
+
+在 Docker 服务里有两种使用自定义价格数据的方式：
+
+1. 页面左侧 `上传自定义价格数据`，上传符合规范的 `csv / parquet`。
+2. 把已有 parquet 放入 `./docker-data/market/daily/qfq/`，文件名使用规范化代码，如 `000001.SZ.parquet`。
+
+## 10. 输出字段解释
 
 | 字段 | 含义 |
 | --- | --- |
@@ -336,7 +395,7 @@ streamlit run streamlit_app.py
 | `后N根最大回撤` | 历史样本结束后 N 根 K 线内的最大回撤 |
 | `后N根最大浮盈` | 历史样本结束后 N 根 K 线内的最大浮盈 |
 
-## 10. 当前边界
+## 11. 当前边界
 
 - 历史时序搜索和横截面搜索分开运行，不自动合成总评分。
 - 指数成分、行业板块、概念板块来自 AkShare 当前接口，不保证历史成分时点准确。
@@ -344,7 +403,7 @@ streamlit run streamlit_app.py
 - 默认数据抓取仍按原 `trend-backtest` 处理；OpenBB 链路为可选增强，依赖本机 OpenBB 与对应 provider 扩展是否可用。
 - 结果是研究工具，不是买卖建议。
 
-## 11. 开发验证
+## 12. 开发验证
 
 ```bash
 python -m pytest -q
