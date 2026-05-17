@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 
@@ -102,3 +103,30 @@ def test_search_uses_same_window_semantics_after_grouped_filtering() -> None:
     assert result.results["symbol"].tolist() == ["000002.SZ", "000004.SZ", "000003.SZ"]
     assert result.results["区间开始"].tolist() == [pd.Timestamp("2024-01-02")] * 3
     assert result.results["区间结束"].tolist() == [pd.Timestamp("2024-01-06")] * 3
+
+
+def test_search_reports_forward_returns_after_historical_window() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]),
+            _bars("000002.SZ", [20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42]),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=("000002.SZ",),
+            start="2024-01-01",
+            end="2024-01-02",
+            top_n=1,
+            forward_windows=(3, 5, 10),
+        ),
+    )
+
+    row = result.results.iloc[0]
+    assert row["t_plus_3_return"] == pytest.approx(28 / 22 - 1)
+    assert row["t_plus_5_return"] == pytest.approx(32 / 22 - 1)
+    assert row["t_plus_10_return"] == pytest.approx(42 / 22 - 1)

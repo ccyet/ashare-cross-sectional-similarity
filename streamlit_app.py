@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,13 +12,14 @@ import streamlit.components.v1 as components
 from ashare_cross_section_similarity.cli import _resolve_universe
 from ashare_cross_section_similarity.data import inclusive_end_timestamp, load_local_bars
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
-from ashare_cross_section_similarity.features import normalized_close_path, resample_path, z_normalize
+from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
     search_cross_section,
 )
+from ashare_cross_section_similarity.universe import unique_symbols
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤"]
@@ -244,18 +246,30 @@ def _render_cross_section_tab(
     st.markdown("**2. 数据抓取 / 更新**")
     st.caption("默认委托 trend-backtest；也可用 OpenBB/AKShare 直接写入本地 parquet。")
     if st.button("下载或更新当前目标与搜索范围行情", key="cross_download"):
-        with st.spinner("正在抓取行情并写入本地 parquet..."):
-            update_result = update_local_bars(
-                symbols=symbols,
-                timeframe=timeframe,
-                adjust=adjust,
-                start=start,
-                end=end,
-                trend_repo=Path(trend_repo),
-                data_root=Path(data_root),
-                provider=provider,
-                download_engine=download_engine,
-            )
+        download_end = _forward_stats_load_end(end)
+        progress_bar = st.progress(0.0, text=f"准备下载 {len(unique_symbols(symbols)):,} 个标的")
+        progress_text = st.empty()
+
+        def report_progress(completed: int, total: int, symbol: str, status: str) -> None:
+            ratio = completed / total if total else 1.0
+            action = "正在下载" if status == "running" else "已完成"
+            progress_bar.progress(ratio, text=f"{completed}/{total} {action} {symbol}")
+            progress_text.caption(f"当前标的：{symbol}；状态：{status}")
+
+        update_result = _download_symbols_with_progress(
+            symbols=symbols,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=download_end,
+            trend_repo=Path(trend_repo),
+            data_root=Path(data_root),
+            provider=provider,
+            download_engine=download_engine,
+            progress_callback=report_progress,
+        )
+        progress_bar.progress(1.0, text="下载任务已完成")
+        progress_text.caption(f"下载截止：{download_end}，用于覆盖窗口后 3/5/10 根收益统计。")
         st.cache_data.clear()
         st.session_state.pop("cross_data_check", None)
         st.session_state.pop("cross_data_check_key", None)
@@ -273,7 +287,7 @@ def _render_cross_section_tab(
             adjust=adjust,
             symbols=tuple(symbols),
             start=start,
-            end=end,
+            end=_forward_stats_load_end(end),
         )
         result = search_cross_section(
             bars,
@@ -301,8 +315,8 @@ def _render_cross_section_tab(
     st.dataframe(_centered(_format_results(result.results)), use_container_width=True, hide_index=True)
     st.plotly_chart(_score_chart(result.results), use_container_width=True)
     components.html(
-        _lightweight_chart_html(_lightweight_chart_series(bars, result)),
-        height=440,
+        _lightweight_kline_chart_html(_lightweight_kline_series(bars, result)),
+        height=820,
     )
     if not result.skipped.empty:
         with st.expander("查看跳过的标的"):
@@ -385,8 +399,69 @@ def _cached_load_local_bars(
     )
 
 
+def _download_symbols_with_progress(
+    *,
+    symbols: list[str] | tuple[str, ...],
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+    trend_repo: Path,
+    data_root: Path,
+    provider: str,
+    download_engine: str,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+) -> pd.DataFrame:
+    normalized = unique_symbols(symbols)
+    if not normalized:
+        return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
+    rows: list[pd.DataFrame] = []
+    total = len(normalized)
+    for index, symbol in enumerate(normalized):
+        if progress_callback is not None:
+            progress_callback(index, total, symbol, "running")
+        result = update_local_bars(
+            symbols=[symbol],
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+            trend_repo=trend_repo,
+            data_root=data_root,
+            provider=provider,
+            download_engine=download_engine,
+        )
+        rows.append(result)
+        status = str(result["status"].iloc[0]) if not result.empty and "status" in result.columns else "unknown"
+        if progress_callback is not None:
+            progress_callback(index + 1, total, symbol, status)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
+
+
+def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None = None) -> str:
+    end_ts = pd.Timestamp(end)
+    current_day = pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()
+    if end_ts >= current_day:
+        return end_ts.strftime("%Y-%m-%d")
+    return min(end_ts + pd.Timedelta(days=45), current_day).strftime("%Y-%m-%d")
+
+
 def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
-    return _format_percent_columns(frame.copy(), PERCENT_COLUMNS)
+    result = frame.copy()
+    rename_map: dict[str, str] = {}
+    percent_columns = [*PERCENT_COLUMNS]
+    for column in result.columns:
+        if column.startswith("t_plus_") and column.endswith("_return"):
+            horizon = column.removeprefix("t_plus_").removesuffix("_return")
+            rename_map[column] = f"后{horizon}根收益"
+            percent_columns.append(column)
+    result = _format_percent_columns(result, percent_columns)
+    result = result.rename(columns=rename_map)
+    for column in ["区间开始", "区间结束"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    return result
+
 
 
 def _format_history_results(frame: pd.DataFrame) -> pd.DataFrame:
@@ -472,15 +547,14 @@ def _date_text(value: object) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
-def _lightweight_chart_series(
+def _lightweight_kline_series(
     bars: pd.DataFrame,
     result: CrossSectionSearchResult,
-    top_n: int = 5,
+    top_n: int = 6,
 ) -> list[dict[str, object]]:
     start = result.start
     end = inclusive_end_timestamp(result.end)
     symbols = [result.target_symbol, *result.results["symbol"].head(top_n).tolist()]
-    target_dates = _target_chart_dates(bars, result)
     series: list[dict[str, object]] = []
     for symbol in symbols:
         window = bars.loc[
@@ -490,67 +564,74 @@ def _lightweight_chart_series(
         ].sort_values("date")
         if window.empty:
             continue
-        path = normalized_close_path(window)
-        if len(path) != result.window_size:
-            path = resample_path(path, result.window_size)
-        dates = target_dates[: len(path)]
-        if len(dates) != len(path):
-            dates = [f"{index + 1}" for index in range(len(path))]
         label = f"{symbol}（目标）" if symbol == result.target_symbol else symbol
         series.append(
             {
                 "title": label,
                 "data": [
-                    {"time": str(date), "value": float(round(value, 6))}
-                    for date, value in zip(dates, path)
+                    {
+                        "time": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                    }
+                    for _, row in window.iterrows()
                 ],
             }
         )
     return series
 
 
-def _target_chart_dates(bars: pd.DataFrame, result: CrossSectionSearchResult) -> list[str]:
-    target = bars.loc[
-        (bars["stock_code"] == result.target_symbol)
-        & (bars["date"] >= result.start)
-        & (bars["date"] <= inclusive_end_timestamp(result.end))
-    ].sort_values("date")
-    if target.empty:
-        return []
-    return [pd.Timestamp(value).strftime("%Y-%m-%d") for value in target["date"].tolist()]
-
-
-def _lightweight_chart_html(series: list[dict[str, object]]) -> str:
+def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
     series_json = json.dumps(series, ensure_ascii=False)
     return f"""
-<div id="similarity-chart" style="width:100%;height:400px;"></div>
+<div id="kline-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;width:100%;"></div>
 <div style="font-size:12px;color:#666;margin-top:6px;">
   Powered by <a href="https://www.tradingview.com/" target="_blank">TradingView</a> Lightweight Charts
 </div>
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <script>
-const container = document.getElementById('similarity-chart');
-const chart = LightweightCharts.createChart(container, {{
-  layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#1f2937' }},
-  grid: {{ vertLines: {{ color: '#eef2f7' }}, horzLines: {{ color: '#eef2f7' }} }},
-  rightPriceScale: {{ borderColor: '#d1d5db' }},
-  timeScale: {{ borderColor: '#d1d5db' }},
-  width: container.clientWidth,
-  height: 400
-}});
-const colors = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#17becf'];
-const series = {series_json};
-series.forEach((item, index) => {{
-  const line = chart.addSeries(LightweightCharts.LineSeries, {{
-    title: item.title,
-    color: colors[index % colors.length],
-    lineWidth: index === 0 ? 3 : 2
+const grid = document.getElementById('kline-grid');
+const chartItems = {series_json};
+const charts = [];
+chartItems.forEach((item, index) => {{
+  const panel = document.createElement('div');
+  panel.style.border = '1px solid #e5e7eb';
+  panel.style.borderRadius = '6px';
+  panel.style.padding = '8px';
+  panel.style.background = '#ffffff';
+  const title = document.createElement('div');
+  title.textContent = item.title;
+  title.style.font = '600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
+  title.style.marginBottom = '6px';
+  const container = document.createElement('div');
+  container.style.height = '220px';
+  panel.appendChild(title);
+  panel.appendChild(container);
+  grid.appendChild(panel);
+  const chart = LightweightCharts.createChart(container, {{
+    layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#1f2937' }},
+    grid: {{ vertLines: {{ color: '#f3f4f6' }}, horzLines: {{ color: '#f3f4f6' }} }},
+    rightPriceScale: {{ borderColor: '#d1d5db' }},
+    timeScale: {{ borderColor: '#d1d5db' }},
+    width: container.clientWidth,
+    height: 220
   }});
-  line.setData(item.data);
+  const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {{
+    upColor: '#d62728',
+    downColor: '#2ca02c',
+    borderUpColor: '#d62728',
+    borderDownColor: '#2ca02c',
+    wickUpColor: '#d62728',
+    wickDownColor: '#2ca02c'
+  }});
+  candles.setData(item.data);
+  chart.timeScale().fitContent();
+  charts.push({{ chart, container }});
 }});
-chart.timeScale().fitContent();
 window.addEventListener('resize', () => {{
-  chart.applyOptions({{ width: container.clientWidth }});
+  charts.forEach((item) => item.chart.applyOptions({{ width: item.container.clientWidth }}));
 }});
 </script>
 """

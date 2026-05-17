@@ -4,10 +4,16 @@ import argparse
 from pathlib import Path
 import sys
 
+import pandas as pd
+
 from ashare_cross_section_similarity.data import available_symbols, load_local_bars
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
-from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
+from ashare_cross_section_similarity.similarity import (
+    CrossSectionSearchConfig,
+    FORWARD_RETURN_WINDOWS,
+    search_cross_section,
+)
 from ashare_cross_section_similarity.universe import (
     fetch_concept_constituents,
     fetch_index_constituents,
@@ -39,7 +45,7 @@ def _run_search(args: argparse.Namespace) -> int:
         adjust=args.adjust,
         symbols=symbols_to_load,
         start=args.start,
-        end=args.end,
+        end=_forward_stats_load_end(args.end),
     )
     result = search_cross_section(
         bars,
@@ -53,6 +59,11 @@ def _run_search(args: argparse.Namespace) -> int:
             path_weight=args.path_weight,
         ),
     )
+    outcome_columns = [
+        f"t_plus_{horizon}_return"
+        for horizon in FORWARD_RETURN_WINDOWS
+        if f"t_plus_{horizon}_return" in result.results.columns
+    ]
     display_columns = [
         "symbol",
         "综合相似度",
@@ -62,6 +73,7 @@ def _run_search(args: argparse.Namespace) -> int:
         "波动率",
         "最大回撤",
         "K线数量",
+        *outcome_columns,
     ]
     print(result.results[display_columns].to_string(index=False) if not result.results.empty else "没有可用结果。")
     if args.output:
@@ -302,3 +314,11 @@ def _parse_int_list(value: str) -> list[int]:
     if any(item <= 0 for item in parsed):
         raise SystemExit("forward-windows 必须为正整数。")
     return parsed
+
+
+def _forward_stats_load_end(end: str | pd.Timestamp) -> str:
+    end_ts = pd.Timestamp(end)
+    today = pd.Timestamp.today().normalize()
+    if end_ts >= today:
+        return end_ts.strftime("%Y-%m-%d")
+    return min(end_ts + pd.Timedelta(days=45), today).strftime("%Y-%m-%d")
