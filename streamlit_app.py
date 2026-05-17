@@ -20,7 +20,7 @@ from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchResult,
     search_cross_section,
 )
-from ashare_cross_section_similarity.universe import unique_symbols
+from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤"]
@@ -188,6 +188,10 @@ def _render_cross_section_tab(
     st.caption("选定某个标的一段区间走势，在同一段时间里从指定范围内寻找其他相似标的。")
     col1, col2, col3 = st.columns(3)
     target_symbol = col1.text_input("目标代码", value="300750.SZ", key="cross_target_symbol")
+    normalized_target = normalize_symbol(target_symbol)
+    if st.session_state.get("cross_quick_message_symbol") != normalized_target:
+        st.session_state.pop("cross_quick_message", None)
+        st.session_state["cross_quick_message_symbol"] = normalized_target
     start_input = {"key": "cross_start_date"}
     end_input = {"key": "cross_end_date"}
     if "cross_start_date" not in st.session_state:
@@ -205,6 +209,8 @@ def _render_cross_section_tab(
             on_click=_set_cross_quick_window,
             args=(data_root, timeframe, adjust, target_symbol, window_size),
         )
+    if st.session_state.get("cross_quick_message"):
+        st.info(st.session_state["cross_quick_message"])
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
     col4, col5, col6 = st.columns(3)
@@ -486,9 +492,15 @@ def _set_cross_quick_window(
         adjust=adjust,
         target_symbol=target_symbol,
     )
-    quick_start, quick_end = _cross_section_quick_window(local_target, window_size)
+    quick_start, quick_end, quick_message = _cross_section_quick_window_feedback(
+        local_target,
+        window_size,
+        target_symbol,
+    )
     st.session_state["cross_start_date"] = quick_start
     st.session_state["cross_end_date"] = quick_end
+    st.session_state["cross_quick_message"] = quick_message
+    st.session_state["cross_quick_message_symbol"] = normalize_symbol(target_symbol)
 
 
 def _download_symbols_with_progress(
@@ -556,16 +568,41 @@ def _cross_section_quick_window(
     window_size: int,
     today: pd.Timestamp | None = None,
 ) -> tuple[date, date]:
+    start, end, _selected_count, _total_count = _cross_section_quick_window_selection(bars, window_size, today)
+    return start, end
+
+
+def _cross_section_quick_window_feedback(
+    bars: pd.DataFrame,
+    window_size: int,
+    target_symbol: str,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, date, str]:
+    start, end, selected_count, total_count = _cross_section_quick_window_selection(bars, window_size, today)
+    symbol = normalize_symbol(target_symbol)
+    window_text = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
+    if total_count == 0:
+        return start, end, f"{symbol} 未找到本地行情，已按自然日近 {window_size} 天设置区间：{window_text}。"
+    if selected_count < window_size:
+        return start, end, f"{symbol} 本地仅有 {selected_count} 根K线，不足近 {window_size} 根；已使用全部可用区间：{window_text}。"
+    return start, end, f"{symbol} 已选择近 {window_size} 根K线：{window_text}。"
+
+
+def _cross_section_quick_window_selection(
+    bars: pd.DataFrame,
+    window_size: int,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, date, int, int]:
     if window_size < 1:
         raise ValueError("window_size 至少需要 1。")
     if not bars.empty and "date" in bars.columns:
         dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values().drop_duplicates()
         if not dates.empty:
             selected = dates.tail(window_size)
-            return selected.iloc[0].date(), selected.iloc[-1].date()
+            return selected.iloc[0].date(), selected.iloc[-1].date(), int(len(selected)), int(len(dates))
     end = pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()
     start = end - pd.Timedelta(days=window_size - 1)
-    return start.date(), end.date()
+    return start.date(), end.date(), window_size, 0
 
 
 def _format_results(frame: pd.DataFrame) -> pd.DataFrame:

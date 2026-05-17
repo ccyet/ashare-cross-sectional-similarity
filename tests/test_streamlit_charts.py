@@ -10,6 +10,7 @@ from streamlit_app import (
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
+    _cross_section_quick_window_feedback,
     _cross_section_quick_window,
     _download_symbols_with_progress,
     _format_cross_section_stats,
@@ -230,6 +231,30 @@ def test_cross_section_quick_window_falls_back_to_calendar_days() -> None:
 
     assert start == pd.Timestamp("2024-02-16").date()
     assert end == pd.Timestamp("2024-02-20").date()
+
+
+def test_cross_section_quick_window_feedback_reports_short_history() -> None:
+    bars = _bars("688603.SH", [10, 11, 12])
+
+    start, end, message = _cross_section_quick_window_feedback(bars, 120, "688603.sh")
+
+    assert start == pd.Timestamp("2024-01-01").date()
+    assert end == pd.Timestamp("2024-01-03").date()
+    assert "688603.SH 本地仅有 3 根K线" in message
+    assert "不足近 120 根" in message
+
+
+def test_cross_section_quick_window_feedback_reports_empty_fallback() -> None:
+    start, end, message = _cross_section_quick_window_feedback(
+        pd.DataFrame(),
+        5,
+        "688603.sh",
+        today=pd.Timestamp("2024-02-20"),
+    )
+
+    assert start == pd.Timestamp("2024-02-16").date()
+    assert end == pd.Timestamp("2024-02-20").date()
+    assert "未找到本地行情" in message
 
 
 def test_pin_symbol_row_keeps_target_visible_at_top() -> None:
