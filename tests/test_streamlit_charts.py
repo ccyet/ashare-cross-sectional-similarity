@@ -10,6 +10,7 @@ from streamlit_app import (
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
+    _cross_section_quick_window,
     _download_symbols_with_progress,
     _format_cross_section_stats,
     _format_results,
@@ -213,6 +214,22 @@ def test_format_cross_section_stats_keeps_correlation_as_decimal() -> None:
 
 def test_forward_stats_load_end_extends_historical_window() -> None:
     assert _forward_stats_load_end("2024-01-01", today=pd.Timestamp("2024-02-20")) == "2024-02-15"
+
+
+def test_cross_section_quick_window_uses_latest_local_trading_day() -> None:
+    bars = _bars("000852.SH", [10, 11, 12, 13, 14])
+
+    start, end = _cross_section_quick_window(bars, 3)
+
+    assert start == pd.Timestamp("2024-01-03").date()
+    assert end == pd.Timestamp("2024-01-05").date()
+
+
+def test_cross_section_quick_window_falls_back_to_calendar_days() -> None:
+    start, end = _cross_section_quick_window(pd.DataFrame(), 5, today=pd.Timestamp("2024-02-20"))
+
+    assert start == pd.Timestamp("2024-02-16").date()
+    assert end == pd.Timestamp("2024-02-20").date()
 
 
 def test_pin_symbol_row_keeps_target_visible_at_top() -> None:

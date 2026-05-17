@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Callable
 
@@ -187,8 +188,25 @@ def _render_cross_section_tab(
     st.caption("选定某个标的一段区间走势，在同一段时间里从指定范围内寻找其他相似标的。")
     col1, col2, col3 = st.columns(3)
     target_symbol = col1.text_input("目标代码", value="300750.SZ", key="cross_target_symbol")
-    start = col2.text_input("区间开始", value="2024-01-01", key="cross_start")
-    end = col3.text_input("区间结束", value="2024-03-31", key="cross_end")
+    start_input = {"key": "cross_start_date"}
+    end_input = {"key": "cross_end_date"}
+    if "cross_start_date" not in st.session_state:
+        start_input["value"] = date(2024, 1, 1)
+    if "cross_end_date" not in st.session_state:
+        end_input["value"] = date(2024, 3, 31)
+    start_date = col2.date_input("区间开始", **start_input)
+    end_date = col3.date_input("区间结束", **end_input)
+    quick_cols = st.columns(6)
+    quick_cols[0].caption("快捷区间")
+    for button_col, window_size in zip(quick_cols[1:], [5, 10, 20, 60, 120]):
+        button_col.button(
+            f"近{window_size}根",
+            key=f"cross_quick_{window_size}",
+            on_click=_set_cross_quick_window,
+            args=(data_root, timeframe, adjust, target_symbol, window_size),
+        )
+    start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+    end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
     col4, col5, col6 = st.columns(3)
     top_n = col4.number_input("展示数量", min_value=5, max_value=100, value=20, step=5, key="cross_top_n")
     min_coverage = col5.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05, key="cross_min_coverage")
@@ -438,6 +456,41 @@ def _cached_load_local_bars(
     )
 
 
+def _load_target_bars_for_quick_window(
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    target_symbol: str,
+) -> pd.DataFrame:
+    return load_local_bars(
+        data_root=Path(data_root),
+        timeframe=timeframe,
+        adjust=adjust,
+        symbols=[target_symbol],
+        start="1900-01-01",
+        end=pd.Timestamp.today().strftime("%Y-%m-%d"),
+    )
+
+
+def _set_cross_quick_window(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    target_symbol: str,
+    window_size: int,
+) -> None:
+    local_target = _load_target_bars_for_quick_window(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        target_symbol=target_symbol,
+    )
+    quick_start, quick_end = _cross_section_quick_window(local_target, window_size)
+    st.session_state["cross_start_date"] = quick_start
+    st.session_state["cross_end_date"] = quick_end
+
+
 def _download_symbols_with_progress(
     *,
     symbols: list[str] | tuple[str, ...],
@@ -496,6 +549,23 @@ def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None 
     if end_ts >= current_day:
         return end_ts.strftime("%Y-%m-%d")
     return min(end_ts + pd.Timedelta(days=45), current_day).strftime("%Y-%m-%d")
+
+
+def _cross_section_quick_window(
+    bars: pd.DataFrame,
+    window_size: int,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, date]:
+    if window_size < 1:
+        raise ValueError("window_size 至少需要 1。")
+    if not bars.empty and "date" in bars.columns:
+        dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values().drop_duplicates()
+        if not dates.empty:
+            selected = dates.tail(window_size)
+            return selected.iloc[0].date(), selected.iloc[-1].date()
+    end = pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()
+    start = end - pd.Timedelta(days=window_size - 1)
+    return start.date(), end.date()
 
 
 def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
