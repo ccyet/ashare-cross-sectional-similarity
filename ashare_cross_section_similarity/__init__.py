@@ -1,3 +1,8 @@
+from ashare_cross_section_similarity.history import (
+    HistorySearchConfig,
+    HistorySearchResult,
+    search_history,
+)
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
@@ -7,5 +12,8 @@ from ashare_cross_section_similarity.similarity import (
 __all__ = [
     "CrossSectionSearchConfig",
     "CrossSectionSearchResult",
+    "HistorySearchConfig",
+    "HistorySearchResult",
+    "search_history",
     "search_cross_section",
 ]

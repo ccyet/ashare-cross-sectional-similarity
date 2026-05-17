@@ -6,6 +6,7 @@ import sys
 
 from ashare_cross_section_similarity.data import available_symbols, load_local_bars
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
+from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 from ashare_cross_section_similarity.universe import (
     fetch_concept_constituents,
@@ -22,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_download(args)
     if args.command == "check":
         return _run_check(args)
+    if args.command == "history":
+        return _run_history(args)
     return _run_search(args)
 
 
@@ -59,6 +62,58 @@ def _run_search(args: argparse.Namespace) -> int:
         "波动率",
         "最大回撤",
         "K线数量",
+    ]
+    print(result.results[display_columns].to_string(index=False) if not result.results.empty else "没有可用结果。")
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.results.to_csv(output_path, index=False)
+        print(f"结果已写入：{output_path}")
+    return 0
+
+
+def _run_history(args: argparse.Namespace) -> int:
+    forward_windows = _parse_int_list(args.forward_windows)
+    bars = load_local_bars(
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+        symbols=[args.symbol],
+        start=args.start,
+        end=args.as_of,
+    )
+    result = search_history(
+        bars,
+        HistorySearchConfig(
+            symbol=args.symbol,
+            as_of=args.as_of,
+            window_size=args.window_size,
+            forward_windows=tuple(forward_windows),
+            candidate_n=args.candidate_n,
+            top_n=args.top_n,
+            exclusion_bars=args.exclusion_bars,
+            nearby_gap_days=args.nearby_gap_days,
+            path_weight=args.path_weight,
+        ),
+    )
+    outcome_columns = [
+        column
+        for horizon in forward_windows
+        for column in (
+            f"t_plus_{horizon}_return",
+            f"t_plus_{horizon}_max_drawdown",
+            f"t_plus_{horizon}_max_favorable",
+        )
+        if column in result.results.columns
+    ]
+    display_columns = [
+        "symbol",
+        "窗口开始",
+        "窗口结束",
+        "综合相似度",
+        "路径相似度",
+        "特征相似度",
+        *outcome_columns,
     ]
     print(result.results[display_columns].to_string(index=False) if not result.results.empty else "没有可用结果。")
     if args.output:
@@ -115,9 +170,9 @@ def _run_check(args: argparse.Namespace) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] not in {"search", "download", "check", "-h", "--help"}:
+    if argv and argv[0] not in {"search", "history", "download", "check", "-h", "--help"}:
         argv.insert(0, "search")
-    parser = argparse.ArgumentParser(description="A股横截面相似搜集：数据抓取、检查、搜索")
+    parser = argparse.ArgumentParser(description="A股相似阶段搜集：历史时序、横截面、数据抓取、检查")
     subparsers = parser.add_subparsers(dest="command")
     search_parser = subparsers.add_parser("search", help="搜索同一时间窗口内的横截面相似标的")
     _add_common_data_args(search_parser)
@@ -129,6 +184,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     search_parser.add_argument("--min-coverage", type=float, default=0.8)
     search_parser.add_argument("--path-weight", type=float, default=0.7)
     search_parser.add_argument("--output", default="", help="CSV 输出路径")
+
+    history_parser = subparsers.add_parser("history", help="搜索同一标的的历史相似阶段")
+    _add_common_data_args(history_parser)
+    history_parser.add_argument("--symbol", required=True, help="目标个股、指数或板块代理代码，如 399006.SZ")
+    history_parser.add_argument("--as-of", required=True, help="当前窗口结束日期或时间")
+    history_parser.add_argument("--start", default="1900-01-01", help="历史数据读取起点，默认尽量读取全历史")
+    history_parser.add_argument("--window-size", type=int, default=20, help="主走势窗口长度")
+    history_parser.add_argument("--forward-windows", default="5,20,60", help="后验观察窗口，逗号分隔")
+    history_parser.add_argument("--candidate-n", type=int, default=100, help="初筛候选数量")
+    history_parser.add_argument("--top-n", type=int, default=10, help="展示数量")
+    history_parser.add_argument("--exclusion-bars", type=int, default=20, help="排除当前窗口附近的 K 线数量")
+    history_parser.add_argument("--nearby-gap-days", type=int, default=20, help="相邻历史样本最小间隔天数")
+    history_parser.add_argument("--path-weight", type=float, default=0.7, help="走势形状在综合相似度中的权重")
+    history_parser.add_argument("--output", default="", help="CSV 输出路径")
 
     download_parser = subparsers.add_parser("download", help="抓取行情并落地本地 parquet")
     _add_download_data_args(download_parser)
@@ -215,3 +284,12 @@ def _has_explicit_universe(args: argparse.Namespace) -> bool:
             "universe_concept",
         )
     )
+
+
+def _parse_int_list(value: str) -> list[int]:
+    parsed = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not parsed:
+        raise SystemExit("forward-windows 至少需要一个正整数。")
+    if any(item <= 0 for item in parsed):
+        raise SystemExit("forward-windows 必须为正整数。")
+    return parsed

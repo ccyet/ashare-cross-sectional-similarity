@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ashare-cross-sectional-similarity"
 version = "0.1.0"
-description = "A-share same-window cross-sectional similarity search for stocks, sector proxies, and index universes."
+description = "A-share historical time-series and same-window cross-sectional similarity search."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

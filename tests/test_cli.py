@@ -68,6 +68,24 @@ def test_parse_search_command() -> None:
     assert args.target_symbol == "300750.SZ"
 
 
+def test_parse_history_command() -> None:
+    args = _parse_args(
+        [
+            "history",
+            "--symbol",
+            "300750.SZ",
+            "--as-of",
+            "2024-03-31",
+            "--window-size",
+            "20",
+        ]
+    )
+
+    assert args.command == "history"
+    assert args.symbol == "300750.SZ"
+    assert args.window_size == 20
+
+
 def test_download_symbols_do_not_fallback_to_full_local_universe(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)
