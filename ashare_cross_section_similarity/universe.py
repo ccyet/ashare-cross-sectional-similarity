@@ -30,7 +30,9 @@ def normalize_symbol(value: object) -> str:
     if len(digits) < 6:
         return text
     code = digits[-6:]
-    if code.startswith(("6", "5", "9")):
+    if code.startswith("920"):
+        exchange = "BJ"
+    elif code.startswith(("6", "5", "9")):
         exchange = "SH"
     elif code.startswith(("4", "8")):
         exchange = "BJ"

@@ -9,6 +9,7 @@ def test_normalize_symbol_adds_exchange_suffix_for_a_share_codes() -> None:
     assert normalize_symbol("000001") == "000001.SZ"
     assert normalize_symbol("399006") == "399006.SZ"
     assert normalize_symbol("600519") == "600519.SH"
+    assert normalize_symbol("920006") == "920006.BJ"
     assert normalize_symbol("000300.SH") == "000300.SH"
 
 
