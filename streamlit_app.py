@@ -377,7 +377,7 @@ def _render_cross_section_tab(
             use_container_width=True,
             hide_index=True,
         )
-    st.plotly_chart(_score_chart(result.results), use_container_width=True)
+    st.plotly_chart(_cross_section_price_chart(bars, result, top_n=int(top_n)), use_container_width=True)
     components.html(
         _lightweight_kline_chart_html(_lightweight_kline_series(bars, result)),
         height=820,
@@ -787,12 +787,55 @@ def _centered(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
     )
 
 
-def _score_chart(frame: pd.DataFrame) -> go.Figure:
-    top = frame.head(20)
+def _cross_section_price_chart(
+    bars: pd.DataFrame,
+    result: CrossSectionSearchResult,
+    top_n: int = 20,
+) -> go.Figure:
     fig = go.Figure()
-    fig.add_bar(x=top["symbol"], y=top["综合相似度"], name="综合相似度")
-    fig.add_bar(x=top["symbol"], y=top["路径相似度"], name="路径相似度")
-    fig.update_layout(title="Top 相似标的", yaxis_tickformat=".0%", barmode="group")
+    symbols = unique_symbols([result.target_symbol, *result.results["symbol"].head(top_n).tolist()])
+    start = pd.Timestamp(result.start)
+    end_marker = pd.Timestamp(result.end).strftime("%Y-%m-%d")
+    for symbol in symbols:
+        symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= start)].sort_values("date")
+        if symbol_bars.empty:
+            continue
+        is_target = symbol == result.target_symbol
+        fig.add_scatter(
+            x=symbol_bars["date"],
+            y=symbol_bars["close"],
+            mode="lines",
+            name=f"{symbol}（目标）" if is_target else symbol,
+            line={"width": 4 if is_target else 1.8},
+            opacity=1.0 if is_target else 0.72,
+        )
+    fig.add_shape(
+        type="line",
+        x0=end_marker,
+        x1=end_marker,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
+        line={"color": "#2563eb", "dash": "dot", "width": 1.5},
+    )
+    fig.add_annotation(
+        x=end_marker,
+        y=1,
+        xref="x",
+        yref="paper",
+        text="窗口结束",
+        showarrow=False,
+        xanchor="left",
+        yanchor="bottom",
+        font={"color": "#2563eb", "size": 12},
+    )
+    fig.update_layout(
+        title="目标与Top相似标的收盘价走势",
+        xaxis_title="日期",
+        yaxis_title="收盘价",
+        hovermode="x unified",
+    )
     return fig
 
 

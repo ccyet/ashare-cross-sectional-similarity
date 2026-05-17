@@ -10,6 +10,7 @@ from streamlit_app import (
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
+    _cross_section_price_chart,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
     _download_symbols_with_progress,
@@ -86,6 +87,41 @@ def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:
         "000006.SZ",
         "000007.SZ",
     ]
+
+
+def test_cross_section_price_chart_uses_close_line_traces() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [10, 11, 12, 13]),
+            _bars("000002.SZ", [20, 21, 22, 23]),
+            _bars("000003.SZ", [30, 31, 32, 33]),
+        ],
+        ignore_index=True,
+    )
+    result = CrossSectionSearchResult(
+        target_symbol="000001.SZ",
+        start=pd.Timestamp("2024-01-01"),
+        end=pd.Timestamp("2024-01-03"),
+        window_size=3,
+        results=pd.DataFrame(
+            {
+                "symbol": ["000002.SZ", "000003.SZ"],
+                "综合相似度": [0.9, 0.8],
+                "路径相似度": [0.91, 0.81],
+            }
+        ),
+        skipped=pd.DataFrame(),
+    )
+
+    fig = _cross_section_price_chart(bars, result)
+
+    assert all(trace.type == "scatter" for trace in fig.data)
+    assert all(trace.mode == "lines" for trace in fig.data)
+    assert [trace.name for trace in fig.data] == ["000001.SZ（目标）", "000002.SZ", "000003.SZ"]
+    assert list(fig.data[0].y) == [10, 11, 12, 13]
+    assert not any(trace.type == "bar" for trace in fig.data)
+    assert fig.layout.yaxis.title.text == "收盘价"
+    assert fig.layout.shapes
 
 
 def test_lightweight_kline_chart_marks_window_and_forward_area() -> None:
