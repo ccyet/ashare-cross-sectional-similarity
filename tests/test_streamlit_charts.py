@@ -11,6 +11,7 @@ from streamlit_app import (
     _format_results,
     _forward_stats_load_end,
     _lightweight_kline_series,
+    _pin_symbol_row,
 )
 
 
@@ -89,6 +90,19 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
 
 def test_forward_stats_load_end_extends_historical_window() -> None:
     assert _forward_stats_load_end("2024-01-01", today=pd.Timestamp("2024-02-20")) == "2024-02-15"
+
+
+def test_pin_symbol_row_keeps_target_visible_at_top() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000503.SZ", "000852.SH", "000543.SZ"],
+            "status": ["available", "available", "missing_file"],
+        }
+    )
+
+    pinned = _pin_symbol_row(frame, "000852.sh", limit=2)
+
+    assert pinned["symbol"].tolist() == ["000852.SH", "000503.SZ"]
 
 
 def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> None:

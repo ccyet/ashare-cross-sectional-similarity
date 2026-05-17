@@ -234,12 +234,24 @@ def _render_cross_section_tab(
             return
     check = st.session_state.get("cross_data_check")
     if check is not None and st.session_state.get("cross_data_check_key") == check_key:
+        normalized_targets = unique_symbols([target_symbol])
+        normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
+        target_check = check.loc[check["symbol"] == normalized_target]
         cols = st.columns(4)
         cols[0].metric("搜索范围", f"{len(universe):,}")
         cols[1].metric("可用标的", f"{int((check['status'] == 'available').sum()):,}")
         cols[2].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
         cols[3].metric("区间缺失", f"{int((check['status'] == 'missing_window').sum()):,}")
-        st.dataframe(_centered(_format_status(check.head(200))), use_container_width=True, hide_index=True)
+        if not target_check.empty:
+            target_row = target_check.iloc[0]
+            st.info(
+                f"目标标的 {normalized_target}：{target_row['status']}，"
+                f"{int(target_row['rows'])} 根，"
+                f"{_date_text(target_row['start'])} 至 {_date_text(target_row['end'])}"
+            )
+        else:
+            st.warning(f"目标标的 {normalized_target} 不在本次检查结果中，请确认目标代码输入。")
+        st.dataframe(_centered(_format_status(_pin_symbol_row(check, normalized_target, limit=200))), use_container_width=True, hide_index=True)
     else:
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
@@ -273,13 +285,15 @@ def _render_cross_section_tab(
         st.cache_data.clear()
         st.session_state.pop("cross_data_check", None)
         st.session_state.pop("cross_data_check_key", None)
-        st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
         normalized_targets = unique_symbols([target_symbol])
         if normalized_targets:
             normalized_target = normalized_targets[0]
+            st.dataframe(_centered(_format_status(_pin_symbol_row(update_result, normalized_target))), use_container_width=True, hide_index=True)
             target_status = update_result.loc[update_result["symbol"] == normalized_target, "status"]
             if not target_status.empty and target_status.iloc[0] != "available":
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
+        else:
+            st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
 
     st.markdown("**3. 运行横截面搜索**")
     if not st.button("运行横截面搜索", type="primary", key="cross_run"):
@@ -481,6 +495,18 @@ def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
             result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
     return result
 
+
+def _pin_symbol_row(frame: pd.DataFrame, symbol: str, limit: int | None = None) -> pd.DataFrame:
+    if frame.empty or "symbol" not in frame.columns:
+        return frame.head(limit) if limit is not None else frame
+    normalized_symbols = unique_symbols([symbol])
+    if not normalized_symbols:
+        return frame.head(limit) if limit is not None else frame
+    normalized_symbol = normalized_symbols[0]
+    target = frame.loc[frame["symbol"] == normalized_symbol]
+    rest = frame.loc[frame["symbol"] != normalized_symbol]
+    result = frame if target.empty else pd.concat([target, rest], ignore_index=True)
+    return result.head(limit) if limit is not None else result
 
 
 def _format_history_results(frame: pd.DataFrame) -> pd.DataFrame:
