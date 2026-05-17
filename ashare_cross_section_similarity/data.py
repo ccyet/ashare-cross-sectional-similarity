@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
-from ashare_cross_section_similarity.universe import normalize_symbol
+from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 TIMEFRAME_DIR_NAMES = {
     "1d": "daily",
@@ -48,8 +48,7 @@ def load_local_bars(
     start_ts = pd.Timestamp(start)
     end_ts = inclusive_end_timestamp(end)
     frames: list[pd.DataFrame] = []
-    for symbol_value in symbols:
-        symbol = normalize_symbol(symbol_value)
+    for symbol in unique_symbols(symbols):
         file_path = root / f"{symbol}.parquet"
         if not file_path.exists():
             continue

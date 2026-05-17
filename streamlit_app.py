@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import math
 from datetime import date
+from html import escape
 from pathlib import Path
 from typing import Callable
 
@@ -863,120 +864,146 @@ def _lightweight_kline_series(
 
 
 def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
-    series_json = json.dumps(series, ensure_ascii=False)
+    if not series:
+        return _kline_empty_message()
+    panels = "\n".join(_kline_svg_panel(item) for item in series)
     return f"""
-<div id="kline-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;width:100%;"></div>
-<div style="font-size:12px;color:#666;margin-top:6px;">
-  Powered by <a href="https://www.tradingview.com/" target="_blank">TradingView</a> Lightweight Charts
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;width:100%;">
+{panels}
 </div>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-<script>
-const grid = document.getElementById('kline-grid');
-const chartItems = {series_json};
-const charts = [];
-chartItems.forEach((item, index) => {{
-  const panel = document.createElement('div');
-  panel.style.border = '1px solid #e5e7eb';
-  panel.style.borderRadius = '6px';
-  panel.style.padding = '8px';
-  panel.style.background = '#ffffff';
-  const title = document.createElement('div');
-  title.textContent = item.title;
-  title.style.font = '600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
-  title.style.marginBottom = '6px';
-  const container = document.createElement('div');
-  container.style.height = '220px';
-  container.style.position = 'relative';
-  panel.appendChild(title);
-  panel.appendChild(container);
-  grid.appendChild(panel);
-  const chart = LightweightCharts.createChart(container, {{
-    layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#1f2937' }},
-    grid: {{ vertLines: {{ color: '#f3f4f6' }}, horzLines: {{ color: '#f3f4f6' }} }},
-    rightPriceScale: {{ borderColor: '#d1d5db' }},
-    timeScale: {{ borderColor: '#d1d5db' }},
-    width: container.clientWidth,
-    height: 220
-  }});
-  const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {{
-    upColor: '#d62728',
-    downColor: '#2ca02c',
-    borderUpColor: '#d62728',
-    borderDownColor: '#2ca02c',
-    wickUpColor: '#d62728',
-    wickDownColor: '#2ca02c'
-  }});
-  candles.setData(item.data);
-  const markers = [];
-  if (item.windowEndTime) {{
-    markers.push({{
-      time: item.windowEndTime,
-      position: 'aboveBar',
-      color: '#2563eb',
-      shape: 'circle',
-      text: '窗口结束'
-    }});
-  }}
-  if (markers.length > 0) {{
-    LightweightCharts.createSeriesMarkers(candles, markers);
-  }}
-  const divider = document.createElement('div');
-  divider.style.position = 'absolute';
-  divider.style.top = '0';
-  divider.style.bottom = '22px';
-  divider.style.width = '2px';
-  divider.style.background = '#2563eb';
-  divider.style.opacity = '0.8';
-  divider.style.pointerEvents = 'none';
-  divider.style.zIndex = '3';
-  divider.style.display = 'none';
-  const forwardShade = document.createElement('div');
-  forwardShade.style.position = 'absolute';
-  forwardShade.style.top = '0';
-  forwardShade.style.bottom = '22px';
-  forwardShade.style.background = 'rgba(37, 99, 235, 0.08)';
-  forwardShade.style.pointerEvents = 'none';
-  forwardShade.style.zIndex = '2';
-  forwardShade.style.display = 'none';
-  container.appendChild(forwardShade);
-  container.appendChild(divider);
-  const positionWindowDivider = () => {{
-    if (!item.windowEndTime || !item.windowSize || !item.data.length) {{
-      return;
-    }}
-    let x = chart.timeScale().timeToCoordinate(item.windowEndTime);
-    if (x === null || x === undefined) {{
-      x = container.clientWidth * (item.windowSize / item.data.length);
-    }}
-    const left = Math.max(0, Math.min(container.clientWidth, Math.round(x)));
-    divider.style.left = `${{left}}px`;
-    divider.style.display = 'block';
-    forwardShade.style.left = `${{left}}px`;
-    forwardShade.style.right = '0';
-    forwardShade.style.display = item.forwardSize > 0 ? 'block' : 'none';
-  }};
-  if (item.windowSize && item.forwardSize > 0) {{
-    const band = document.createElement('div');
-    band.textContent = `窗口内 ${{item.windowSize}} 根 | 后续 ${{item.forwardSize}} 根`;
-    band.style.font = '12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
-    band.style.color = '#4b5563';
-    band.style.marginTop = '4px';
-    panel.appendChild(band);
-  }}
-  chart.timeScale().fitContent();
-  positionWindowDivider();
-  setTimeout(positionWindowDivider, 100);
-  chart.timeScale().subscribeVisibleTimeRangeChange(positionWindowDivider);
-  charts.push({{ chart, container, positionWindowDivider }});
-}});
-window.addEventListener('resize', () => {{
-  charts.forEach((item) => {{
-    item.chart.applyOptions({{ width: item.container.clientWidth }});
-    item.positionWindowDivider();
-  }});
-}});
-</script>
 """
+
+
+def _kline_empty_message() -> str:
+    return """
+<div style="padding:12px;border:1px solid #e5e7eb;border-radius:6px;color:#6b7280;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">
+  没有可绘制的K线数据，请检查目标与相似标的在当前区间是否有本地行情。
+</div>
+"""
+
+
+def _kline_svg_panel(item: dict[str, object]) -> str:
+    rows = _valid_kline_rows(item)
+    title = escape(str(item.get("title", "-")))
+    window_size = int(item.get("windowSize") or 0)
+    forward_size = int(item.get("forwardSize") or 0)
+    if not rows:
+        return f"""
+<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#ffffff;">
+  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
+  <div style="height:220px;display:flex;align-items:center;justify-content:center;color:#6b7280;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">没有可绘制的K线数据</div>
+</div>
+"""
+
+    width = 360.0
+    height = 240.0
+    left = 42.0
+    right = 12.0
+    top = 14.0
+    bottom = 38.0
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    low = min(row["low"] for row in rows)
+    high = max(row["high"] for row in rows)
+    if high == low:
+        padding = max(abs(high) * 0.01, 1.0)
+        high += padding
+        low -= padding
+
+    def x_position(index: int) -> float:
+        if len(rows) == 1:
+            return left + plot_width / 2
+        return left + plot_width * index / (len(rows) - 1)
+
+    def y_position(price: float) -> float:
+        return top + (high - price) / (high - low) * plot_height
+
+    elements = [
+        f'<rect x="0" y="0" width="{width:g}" height="{height:g}" fill="#ffffff"/>',
+    ]
+    for step in range(5):
+        y = top + plot_height * step / 4
+        elements.append(f'<line x1="{left:.2f}" y1="{y:.2f}" x2="{width - right:.2f}" y2="{y:.2f}" stroke="#eef2f7" stroke-width="1"/>')
+    elements.extend(
+        [
+            f'<text x="4" y="{top + 4:.2f}" fill="#6b7280" font-size="10">{high:.2f}</text>',
+            f'<text x="4" y="{top + plot_height:.2f}" fill="#6b7280" font-size="10">{low:.2f}</text>',
+            f'<text x="{left:.2f}" y="{height - 14:.2f}" fill="#6b7280" font-size="10">{escape(rows[0]["time"][5:])}</text>',
+            f'<text x="{width - right:.2f}" y="{height - 14:.2f}" text-anchor="end" fill="#6b7280" font-size="10">{escape(rows[-1]["time"][5:])}</text>',
+        ]
+    )
+
+    divider_index = _window_end_index(rows, str(item.get("windowEndTime") or ""))
+    candle_width = min(10.0, max(3.0, plot_width / max(1, len(rows)) * 0.55))
+    if divider_index is not None:
+        divider_x = x_position(divider_index)
+        if forward_size > 0:
+            shade_x = min(width - right, divider_x + candle_width / 2)
+            shade_width = max(0.0, width - right - shade_x)
+            elements.append(
+                f'<rect class="forwardShade" x="{shade_x:.2f}" y="{top:.2f}" width="{shade_width:.2f}" height="{plot_height:.2f}" fill="#2563eb" opacity="0.08"/>'
+            )
+        elements.append(
+            f'<line class="positionWindowDivider" x1="{divider_x:.2f}" y1="{top:.2f}" x2="{divider_x:.2f}" y2="{top + plot_height:.2f}" stroke="#2563eb" stroke-width="1.5">'
+            "<title>窗口结束</title></line>"
+        )
+
+    for index, row in enumerate(rows):
+        x = x_position(index)
+        color = "#d62728" if row["close"] >= row["open"] else "#2ca02c"
+        high_y = y_position(row["high"])
+        low_y = y_position(row["low"])
+        open_y = y_position(row["open"])
+        close_y = y_position(row["close"])
+        body_top = min(open_y, close_y)
+        body_height = max(abs(open_y - close_y), 1.2)
+        elements.append(
+            f'<line data-kline-candle="1" x1="{x:.2f}" y1="{high_y:.2f}" x2="{x:.2f}" y2="{low_y:.2f}" stroke="{color}" stroke-width="1.2"/>'
+        )
+        elements.append(
+            f'<rect data-kline-candle="1" x="{x - candle_width / 2:.2f}" y="{body_top:.2f}" width="{candle_width:.2f}" height="{body_height:.2f}" fill="{color}" opacity="0.9"/>'
+        )
+
+    svg = "\n".join(elements)
+    return f"""
+<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#ffffff;">
+  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
+  <svg viewBox="0 0 360 240" role="img" aria-label="{title} K线图" style="width:100%;height:240px;display:block;">{svg}</svg>
+  <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#4b5563;margin-top:4px;">窗口内 {window_size} 根 | 后续 {forward_size} 根</div>
+</div>
+"""
+
+
+def _valid_kline_rows(item: dict[str, object]) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    raw_rows = item.get("data")
+    if not isinstance(raw_rows, list):
+        return rows
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            row = {
+                "time": str(raw["time"]),
+                "open": float(raw["open"]),
+                "high": float(raw["high"]),
+                "low": float(raw["low"]),
+                "close": float(raw["close"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(math.isfinite(float(row[column])) for column in ("open", "high", "low", "close")):
+            rows.append(row)
+    return rows
+
+
+def _window_end_index(rows: list[dict[str, float | str]], window_end_time: str) -> int | None:
+    if not window_end_time:
+        return None
+    for index, row in enumerate(rows):
+        if row["time"] == window_end_time:
+            return index
+    return None
 
 
 if __name__ == "__main__":

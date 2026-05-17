@@ -111,6 +111,37 @@ def test_lightweight_kline_chart_marks_window_and_forward_area() -> None:
     assert "positionWindowDivider" in html
 
 
+def test_lightweight_kline_chart_renders_inline_svg_without_external_dependency() -> None:
+    html = _lightweight_kline_chart_html(
+        [
+            {
+                "title": "000001.SZ（目标）",
+                "windowEndTime": "2024-01-03",
+                "windowSize": 3,
+                "forwardSize": 1,
+                "data": [
+                    {"time": "2024-01-01", "open": 1.0, "high": 3.0, "low": 0.5, "close": 2.0},
+                    {"time": "2024-01-02", "open": 2.0, "high": 2.5, "low": 1.5, "close": 1.8},
+                    {"time": "2024-01-03", "open": 1.8, "high": 2.2, "low": 1.7, "close": 2.1},
+                    {"time": "2024-01-04", "open": 2.1, "high": 2.4, "low": 2.0, "close": 2.3},
+                ],
+            }
+        ]
+    )
+
+    assert "<svg" in html
+    assert "data-kline-panel" in html
+    assert "data-kline-candle" in html
+    assert "lightweight-charts" not in html
+
+
+def test_lightweight_kline_chart_empty_series_has_visible_message() -> None:
+    html = _lightweight_kline_chart_html([])
+
+    assert "没有可绘制的K线数据" in html
+    assert "Powered by" not in html
+
+
 def test_format_results_formats_forward_returns_as_percentages() -> None:
     formatted = _format_results(
         pd.DataFrame(

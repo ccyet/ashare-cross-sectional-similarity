@@ -58,6 +58,33 @@ def test_load_local_bars_reads_only_requested_symbols_and_timeframe(tmp_path: Pa
     assert out["date"].iloc[0] == pd.Timestamp("2024-01-01 10:00:00")
 
 
+def test_load_local_bars_deduplicates_requested_symbols(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = load_local_bars(
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        symbols=("000001.sz", "000001.SZ"),
+        start="2024-01-01",
+        end="2024-01-02",
+    )
+
+    assert out["date"].tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+    assert out["stock_code"].tolist() == ["000001.SZ", "000001.SZ"]
+
+
 def test_load_local_bars_date_only_end_includes_full_intraday_session(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "30m" / "qfq"
     qfq.mkdir(parents=True)
