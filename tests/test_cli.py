@@ -28,8 +28,34 @@ def test_parse_download_command() -> None:
     assert args.command == "download"
     assert args.symbols == "000001.SZ,600519.SH"
     assert args.timeframe == "1d"
+    assert args.download_engine == "trend"
     assert args.trend_repo == "/tmp/trend-backtest"
     assert args.provider == "tdx"
+
+
+def test_parse_openbb_download_command() -> None:
+    args = _parse_args(
+        [
+            "download",
+            "--download-engine",
+            "openbb",
+            "--data-root",
+            "/tmp/market/daily",
+            "--symbols",
+            "600519.SH",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--provider",
+            "akshare",
+        ]
+    )
+
+    assert args.command == "download"
+    assert args.download_engine == "openbb"
+    assert args.data_root == "/tmp/market/daily"
+    assert args.provider == "akshare"
 
 
 def test_parse_check_command() -> None:

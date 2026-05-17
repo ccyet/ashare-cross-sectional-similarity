@@ -86,6 +86,110 @@ def test_update_local_bars_reports_original_runner_failure(tmp_path: Path) -> No
     assert "provider failed" in result["message"].iloc[0]
 
 
+def test_update_local_bars_can_fetch_and_write_with_openbb_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["600519.SH", "600519.SH"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_openbb_bars",
+        return_value=bars,
+    ) as fetch_openbb_bars:
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            provider="akshare",
+            download_engine="openbb",
+        )
+
+    fetch_openbb_bars.assert_called_once_with(
+        symbols=("600519.SH",),
+        start="2024-01-01",
+        end="2024-01-02",
+        provider="akshare",
+        timeframe="1d",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
+def test_openbb_engine_merges_with_existing_parquet_using_canonical_schema(
+    tmp_path: Path,
+) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "symbol": ["600519.SH"],
+            "open": [1],
+            "high": [1],
+            "low": [1],
+            "close": [1],
+        }
+    ).to_parquet(qfq / "600519.SH.parquet", index=False)
+    bars = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-02")],
+            "stock_code": ["600519.SH"],
+            "open": [2],
+            "high": [2],
+            "low": [2],
+            "close": [2],
+            "volume": [20],
+            "amount": [200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_openbb_bars",
+        return_value=bars,
+    ):
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-02",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            download_engine="openbb",
+        )
+
+    saved = pd.read_parquet(qfq / "600519.SH.parquet")
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 1}
+    ]
+    assert saved.columns.tolist() == [
+        "date",
+        "stock_code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+    ]
+    assert saved["date"].tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+    assert saved["volume"].isna().iloc[0]
+    assert saved["amount"].isna().iloc[0]
+
+
 def test_data_check_reports_missing_and_available_symbols(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)

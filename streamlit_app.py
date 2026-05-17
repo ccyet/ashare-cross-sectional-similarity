@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ashare_cross_section_similarity.cli import _resolve_universe
 from ashare_cross_section_similarity.data import inclusive_end_timestamp, load_local_bars
@@ -31,7 +33,17 @@ def main() -> None:
         data_root = st.text_input("本地行情根目录", value=str(Path(trend_repo) / "data" / "market" / "daily"))
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
-        provider = st.text_input("下载源", value="", help="留空使用原 trend-backtest 配置；也可填 akshare 或 tdx。")
+        download_engine = st.selectbox(
+            "下载引擎",
+            ["trend", "openbb"],
+            format_func=lambda value: "trend-backtest" if value == "trend" else "OpenBB",
+        )
+        provider_default = "akshare" if download_engine == "openbb" else ""
+        provider = st.text_input(
+            "下载源",
+            value=provider_default,
+            help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
+        )
 
     history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
     with history_tab:
@@ -41,6 +53,7 @@ def main() -> None:
             timeframe=timeframe,
             adjust=adjust,
             provider=provider,
+            download_engine=download_engine,
         )
     with cross_section_tab:
         _render_cross_section_tab(
@@ -49,6 +62,7 @@ def main() -> None:
             timeframe=timeframe,
             adjust=adjust,
             provider=provider,
+            download_engine=download_engine,
         )
 
 
@@ -59,6 +73,7 @@ def _render_history_tab(
     timeframe: str,
     adjust: str,
     provider: str,
+    download_engine: str,
 ) -> None:
     st.subheader("同一标的历史时序相似")
     st.caption("选定一个标的和当前窗口结束日，系统只在这个标的自己的历史里找相似阶段。")
@@ -106,7 +121,9 @@ def _render_history_tab(
                     start=download_start,
                     end=as_of,
                     trend_repo=Path(trend_repo),
+                    data_root=Path(data_root),
                     provider=provider,
+                    download_engine=download_engine,
                 )
             st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
 
@@ -162,6 +179,7 @@ def _render_cross_section_tab(
     timeframe: str,
     adjust: str,
     provider: str,
+    download_engine: str,
 ) -> None:
     st.subheader("同一时间横截面相似")
     st.caption("选定某个标的一段区间走势，在同一段时间里从指定范围内寻找其他相似标的。")
@@ -224,7 +242,7 @@ def _render_cross_section_tab(
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
     st.markdown("**2. 数据抓取 / 更新**")
-    st.caption("日线和近端分钟线使用 AkShare 写入本地 parquet；30m 长历史建议提前准备本地数据。")
+    st.caption("默认委托 trend-backtest；也可用 OpenBB/AKShare 直接写入本地 parquet。")
     if st.button("下载或更新当前目标与搜索范围行情", key="cross_download"):
         with st.spinner("正在抓取行情并写入本地 parquet..."):
             update_result = update_local_bars(
@@ -234,7 +252,9 @@ def _render_cross_section_tab(
                 start=start,
                 end=end,
                 trend_repo=Path(trend_repo),
+                data_root=Path(data_root),
                 provider=provider,
+                download_engine=download_engine,
             )
         st.cache_data.clear()
         st.session_state.pop("cross_data_check", None)
@@ -280,7 +300,10 @@ def _render_cross_section_tab(
 
     st.dataframe(_centered(_format_results(result.results)), use_container_width=True, hide_index=True)
     st.plotly_chart(_score_chart(result.results), use_container_width=True)
-    st.plotly_chart(_path_comparison_chart(bars, result), use_container_width=True)
+    components.html(
+        _lightweight_chart_html(_lightweight_chart_series(bars, result)),
+        height=440,
+    )
     if not result.skipped.empty:
         with st.expander("查看跳过的标的"):
             st.dataframe(_centered(result.skipped), use_container_width=True, hide_index=True)
@@ -449,15 +472,16 @@ def _date_text(value: object) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
-def _path_comparison_chart(
+def _lightweight_chart_series(
     bars: pd.DataFrame,
     result: CrossSectionSearchResult,
-) -> go.Figure:
+    top_n: int = 5,
+) -> list[dict[str, object]]:
     start = result.start
     end = inclusive_end_timestamp(result.end)
-    symbols = [result.target_symbol, *result.results["symbol"].head(5).tolist()]
-    target_length = result.window_size
-    fig = go.Figure()
+    symbols = [result.target_symbol, *result.results["symbol"].head(top_n).tolist()]
+    target_dates = _target_chart_dates(bars, result)
+    series: list[dict[str, object]] = []
     for symbol in symbols:
         window = bars.loc[
             (bars["stock_code"] == symbol)
@@ -467,17 +491,69 @@ def _path_comparison_chart(
         if window.empty:
             continue
         path = normalized_close_path(window)
-        if len(path) != target_length:
-            path = resample_path(path, target_length)
+        if len(path) != result.window_size:
+            path = resample_path(path, result.window_size)
+        dates = target_dates[: len(path)]
+        if len(dates) != len(path):
+            dates = [f"{index + 1}" for index in range(len(path))]
         label = f"{symbol}（目标）" if symbol == result.target_symbol else symbol
-        fig.add_scatter(
-            x=list(range(1, len(path) + 1)),
-            y=path,
-            mode="lines",
-            name=label,
+        series.append(
+            {
+                "title": label,
+                "data": [
+                    {"time": str(date), "value": float(round(value, 6))}
+                    for date, value in zip(dates, path)
+                ],
+            }
         )
-    fig.update_layout(title="目标 vs Top 5 归一化走势", xaxis_title="窗口序号", yaxis_title="起点=100")
-    return fig
+    return series
+
+
+def _target_chart_dates(bars: pd.DataFrame, result: CrossSectionSearchResult) -> list[str]:
+    target = bars.loc[
+        (bars["stock_code"] == result.target_symbol)
+        & (bars["date"] >= result.start)
+        & (bars["date"] <= inclusive_end_timestamp(result.end))
+    ].sort_values("date")
+    if target.empty:
+        return []
+    return [pd.Timestamp(value).strftime("%Y-%m-%d") for value in target["date"].tolist()]
+
+
+def _lightweight_chart_html(series: list[dict[str, object]]) -> str:
+    series_json = json.dumps(series, ensure_ascii=False)
+    return f"""
+<div id="similarity-chart" style="width:100%;height:400px;"></div>
+<div style="font-size:12px;color:#666;margin-top:6px;">
+  Powered by <a href="https://www.tradingview.com/" target="_blank">TradingView</a> Lightweight Charts
+</div>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const container = document.getElementById('similarity-chart');
+const chart = LightweightCharts.createChart(container, {{
+  layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#1f2937' }},
+  grid: {{ vertLines: {{ color: '#eef2f7' }}, horzLines: {{ color: '#eef2f7' }} }},
+  rightPriceScale: {{ borderColor: '#d1d5db' }},
+  timeScale: {{ borderColor: '#d1d5db' }},
+  width: container.clientWidth,
+  height: 400
+}});
+const colors = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#17becf'];
+const series = {series_json};
+series.forEach((item, index) => {{
+  const line = chart.addSeries(LightweightCharts.LineSeries, {{
+    title: item.title,
+    color: colors[index % colors.length],
+    lineWidth: index === 0 ? 3 : 2
+  }});
+  line.setData(item.data);
+}});
+chart.timeScale().fitContent();
+window.addEventListener('resize', () => {{
+  chart.applyOptions({{ width: container.clientWidth }});
+}});
+</script>
+"""
 
 
 if __name__ == "__main__":

@@ -7,8 +7,13 @@ from typing import Callable
 
 import pandas as pd
 
-from ashare_cross_section_similarity.data import inclusive_end_timestamp, resolve_timeframe_root
-from ashare_cross_section_similarity.universe import unique_symbols
+from ashare_cross_section_similarity.data import (
+    CANONICAL_COLUMNS,
+    inclusive_end_timestamp,
+    resolve_timeframe_root,
+)
+from ashare_cross_section_similarity.openbb_source import fetch_openbb_bars
+from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 CommandRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 
@@ -66,12 +71,26 @@ def update_local_bars(
     start: str,
     end: str,
     trend_repo: str | Path | None = None,
+    data_root: str | Path = "data/market/daily",
     provider: str = "",
+    download_engine: str = "trend",
     runner: CommandRunner | None = None,
 ) -> pd.DataFrame:
     normalized_symbols = unique_symbols(symbols)
     if not normalized_symbols:
         return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
+    if download_engine not in {"trend", "openbb"}:
+        raise ValueError("download_engine 仅支持 trend 或 openbb。")
+    if download_engine == "openbb":
+        return _update_local_bars_with_openbb(
+            symbols=normalized_symbols,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+            data_root=data_root,
+            provider=provider or "akshare",
+        )
 
     repo = Path(trend_repo).expanduser() if trend_repo else default_trend_repo()
     command = build_update_command(
@@ -112,6 +131,75 @@ def update_local_bars(
             for symbol in normalized_symbols
         ]
     )
+
+
+def _update_local_bars_with_openbb(
+    *,
+    symbols: list[str],
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+    data_root: str | Path,
+    provider: str,
+) -> pd.DataFrame:
+    root = resolve_timeframe_root(data_root, timeframe) / adjust
+    root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        try:
+            frame = fetch_openbb_bars(
+                symbols=(symbol,),
+                start=start,
+                end=end,
+                provider=provider,
+                timeframe=timeframe,
+            )
+            frame = frame.loc[frame["stock_code"] == symbol, CANONICAL_COLUMNS]
+            if frame.empty:
+                rows.append(_download_row(symbol, "failed", 0, 0, "OpenBB 未返回行情数据"))
+                continue
+            saved = _write_symbol_bars(root / f"{symbol}.parquet", frame)
+            rows.append(
+                _download_row(
+                    symbol,
+                    "success",
+                    int(len(saved)),
+                    int(len(frame)),
+                    f"OpenBB/{provider} 行情已写入本地 parquet。",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            rows.append(_download_row(symbol, "failed", 0, 0, str(exc)))
+    return pd.DataFrame(rows)
+
+
+def _write_symbol_bars(file_path: Path, frame: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    if file_path.exists():
+        frames.append(_normalize_download_frame(pd.read_parquet(file_path)))
+    frames.append(_normalize_download_frame(frame))
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged[CANONICAL_COLUMNS].drop_duplicates(subset=["stock_code", "date"], keep="last")
+    merged = merged.sort_values(["stock_code", "date"]).reset_index(drop=True)
+    merged.to_parquet(file_path, index=False)
+    return merged
+
+
+def _normalize_download_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "stock_code" not in result.columns and "symbol" in result.columns:
+        result = result.rename(columns={"symbol": "stock_code"})
+    if "stock_code" not in result.columns:
+        raise ValueError("行情数据缺少 stock_code 或 symbol 列。")
+    result["stock_code"] = result["stock_code"].map(normalize_symbol)
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    for column in ["open", "high", "low", "close", "volume", "amount"]:
+        if column not in result.columns:
+            result[column] = pd.NA
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    result = result.dropna(subset=["date", "stock_code", "open", "high", "low", "close"])
+    return result[CANONICAL_COLUMNS]
 
 
 def data_check(
@@ -177,5 +265,21 @@ def _check_row(
         "rows": rows,
         "start": start,
         "end": end,
+        "message": message,
+    }
+
+
+def _download_row(
+    symbol: str,
+    status: str,
+    rows: int,
+    new_rows: int,
+    message: str,
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "status": status,
+        "rows": rows,
+        "new_rows": new_rows,
         "message": message,
     }

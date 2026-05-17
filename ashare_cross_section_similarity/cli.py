@@ -135,7 +135,9 @@ def _run_download(args: argparse.Namespace) -> int:
         start=args.start,
         end=args.end,
         trend_repo=args.trend_repo,
+        data_root=args.data_root,
         provider=args.provider,
+        download_engine=args.download_engine,
     )
     print(result.to_string(index=False))
     if args.output:
@@ -143,7 +145,7 @@ def _run_download(args: argparse.Namespace) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(output_path, index=False)
         print(f"下载日志已写入：{output_path}")
-    failed = int((result["status"] != "success").sum()) if not result.empty else 0
+    failed = int((result["status"] == "failed").sum()) if not result.empty else 0
     return 1 if failed else 0
 
 
@@ -221,8 +223,15 @@ def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_download_data_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data-root", default="data/market/daily", help="OpenBB 下载写入的本地行情根目录")
     parser.add_argument("--timeframe", default="1d", choices=["1d", "30m", "15m", "5m", "1m"])
     parser.add_argument("--adjust", default="qfq")
+    parser.add_argument(
+        "--download-engine",
+        default="trend",
+        choices=["trend", "openbb"],
+        help="下载引擎：trend 委托原 trend-backtest；openbb 直接通过 OpenBB 写入 parquet。",
+    )
 
 
 def _add_universe_args(parser: argparse.ArgumentParser) -> None:
@@ -244,7 +253,7 @@ def _add_download_symbol_args(parser: argparse.ArgumentParser) -> None:
         default=str(default_trend_repo()),
         help="原 trend-backtest 仓库路径，download 会调用其中 scripts/update_data.py",
     )
-    parser.add_argument("--provider", default="", help="传给原 update_data.py 的数据源，如 akshare 或 tdx")
+    parser.add_argument("--provider", default="", help="下载源；trend 可填 akshare/tdx，openbb 默认 akshare")
 
 
 def _resolve_universe(args: argparse.Namespace) -> list[str]:
