@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 from ashare_cross_section_similarity.data import available_symbols, load_local_bars
-from ashare_cross_section_similarity.downloader import data_check, update_local_bars
+from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 from ashare_cross_section_similarity.universe import (
     fetch_concept_constituents,
@@ -75,11 +75,12 @@ def _run_download(args: argparse.Namespace) -> int:
         raise SystemExit("未得到下载代码，请提供 --symbols 或 universe 参数。")
     result = update_local_bars(
         symbols=symbols,
-        data_root=args.data_root,
         timeframe=args.timeframe,
         adjust=args.adjust,
         start=args.start,
         end=args.end,
+        trend_repo=args.trend_repo,
+        provider=args.provider,
     )
     print(result.to_string(index=False))
     if args.output:
@@ -130,7 +131,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     search_parser.add_argument("--output", default="", help="CSV 输出路径")
 
     download_parser = subparsers.add_parser("download", help="抓取行情并落地本地 parquet")
-    _add_common_data_args(download_parser)
+    _add_download_data_args(download_parser)
     _add_download_symbol_args(download_parser)
 
     check_parser = subparsers.add_parser("check", help="检查本地 parquet 覆盖情况")
@@ -150,6 +151,11 @@ def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--adjust", default="qfq")
 
 
+def _add_download_data_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--timeframe", default="1d", choices=["1d", "30m", "15m", "5m", "1m"])
+    parser.add_argument("--adjust", default="qfq")
+
+
 def _add_universe_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--universe-symbols", default="", help="逗号分隔的搜索范围代码")
     parser.add_argument("--universe-file", default="", help="包含证券代码列的 csv/xlsx/parquet 文件")
@@ -164,6 +170,12 @@ def _add_download_symbol_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", required=True, help="开始时间")
     parser.add_argument("--end", required=True, help="结束时间")
     parser.add_argument("--output", default="", help="CSV 输出路径")
+    parser.add_argument(
+        "--trend-repo",
+        default=str(default_trend_repo()),
+        help="原 trend-backtest 仓库路径，download 会调用其中 scripts/update_data.py",
+    )
+    parser.add_argument("--provider", default="", help="传给原 update_data.py 的数据源，如 akshare 或 tdx")
 
 
 def _resolve_universe(args: argparse.Namespace) -> list[str]:

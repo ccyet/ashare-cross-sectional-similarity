@@ -8,7 +8,7 @@ import streamlit as st
 
 from ashare_cross_section_similarity.cli import _resolve_universe
 from ashare_cross_section_similarity.data import load_local_bars
-from ashare_cross_section_similarity.downloader import data_check, update_local_bars
+from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 
 
@@ -18,9 +18,11 @@ def main() -> None:
     st.caption("选定某个个股/板块代理的一段走势，在同一时间窗口内搜索其他个股或板块代理的相似走势。")
     with st.sidebar:
         st.header("运行设置")
-        data_root = st.text_input("本地行情根目录", value="data/market/daily")
+        trend_repo = st.text_input("原 trend-backtest 仓库", value=str(default_trend_repo()))
+        data_root = st.text_input("本地行情根目录", value=str(Path(trend_repo) / "data" / "market" / "daily"))
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
+        provider = st.text_input("下载源", value="", help="留空使用原 trend-backtest 配置；也可填 akshare 或 tdx。")
         target_symbol = st.text_input("目标代码", value="300750.SZ")
         start = st.text_input("区间开始", value="2024-01-01")
         end = st.text_input("区间结束", value="2024-03-31")
@@ -79,11 +81,12 @@ def main() -> None:
         with st.spinner("正在抓取行情并写入本地 parquet..."):
             update_result = update_local_bars(
                 symbols=symbols,
-                data_root=Path(data_root),
                 timeframe=timeframe,
                 adjust=adjust,
                 start=start,
                 end=end,
+                trend_repo=Path(trend_repo),
+                provider=provider,
             )
         st.dataframe(update_result, use_container_width=True, hide_index=True)
 

@@ -18,12 +18,18 @@ def test_parse_download_command() -> None:
             "2024-01-01",
             "--end",
             "2024-01-31",
+            "--trend-repo",
+            "/tmp/trend-backtest",
+            "--provider",
+            "tdx",
         ]
     )
 
     assert args.command == "download"
     assert args.symbols == "000001.SZ,600519.SH"
     assert args.timeframe == "1d"
+    assert args.trend_repo == "/tmp/trend-backtest"
+    assert args.provider == "tdx"
 
 
 def test_parse_check_command() -> None:

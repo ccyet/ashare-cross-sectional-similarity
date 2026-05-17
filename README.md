@@ -6,7 +6,7 @@
 
 当前版本已经包含完整闭环：
 
-- 数据抓取：通过 AkShare 拉取日线和近端分钟线
+- 数据抓取：不重写抓取逻辑，直接委托原 `trend-backtest/scripts/update_data.py`
 - 数据落地：统一写入本地 parquet
 - 数据检查：检查目标区间覆盖、缺文件、区间缺失
 - 相似搜索：在同一时间窗口内做横截面相似排序
@@ -49,7 +49,7 @@ python -m pip install -r requirements.txt
 
 ## 3. 数据要求
 
-默认读取本地 parquet；缺数据时可以用本库直接下载。
+默认读取本地 parquet；缺数据时可以在本库页面或 CLI 中触发下载。下载动作会调用原 `trend-backtest` 的 `scripts/update_data.py`，数据源、TDX/AkShare 路由和落地目录仍以原库配置为准。
 
 推荐直接复用 `trend-backtest` 的行情目录：
 
@@ -78,7 +78,7 @@ volume, amount
 
 ```bash
 python -m ashare_cross_section_similarity download \
-  --data-root data/market/daily \
+  --trend-repo /Users/a1234/Desktop/trend-backtest \
   --timeframe 1d \
   --symbols 300750.SZ,000001.SZ,600519.SH \
   --start 2024-01-01 \
@@ -93,15 +93,16 @@ python -m ashare_cross_section_similarity download \
 
 说明：
 
-- 日线支持股票、指数、ETF。
-- 分钟线支持股票、ETF；指数分钟线不同数据源覆盖不稳定，建议用指数 ETF 或本地 parquet。
-- 30m 长历史不建议完全依赖 AkShare，最好提前准备本地长历史 parquet。
+- 本命令不会在新库内重写行情抓取逻辑。
+- 它只把参数转发给原库 `scripts/update_data.py`。
+- 具体支持哪些周期、使用 AkShare 还是 TDX、落到哪个目录，以原 `trend-backtest/config/data_source.yaml` 和原脚本实现为准。
+- 如需指定原脚本 provider，可加 `--provider akshare` 或 `--provider tdx`。
 
 ### 4.2 按指数、行业或概念范围下载
 
 ```bash
 python -m ashare_cross_section_similarity download \
-  --data-root data/market/daily \
+  --trend-repo /Users/a1234/Desktop/trend-backtest \
   --timeframe 1d \
   --universe-index 000300 \
   --start 2024-01-01 \
@@ -110,7 +111,7 @@ python -m ashare_cross_section_similarity download \
 
 ```bash
 python -m ashare_cross_section_similarity download \
-  --data-root data/market/daily \
+  --trend-repo /Users/a1234/Desktop/trend-backtest \
   --timeframe 1d \
   --universe-industry 半导体 \
   --start 2024-01-01 \
@@ -212,13 +213,14 @@ streamlit run streamlit_app.py
 页面操作顺序：
 
 1. 填本地行情目录。
-2. 选择周期，默认日线。
-3. 填目标代码和区间。
-4. 填搜索范围：代码列表、文件、指数成分、行业板块或概念板块。
-5. 查看数据检查表。
-6. 如缺数据，点击“下载或更新当前目标与搜索范围行情”。
-7. 点击“运行横截面搜索”。
-8. 查看 Top 相似标的表格、相似度柱状图，并下载 CSV。
+2. 填原 `trend-backtest` 仓库路径。
+3. 选择周期，默认日线。
+4. 填目标代码和区间。
+5. 填搜索范围：代码列表、文件、指数成分、行业板块或概念板块。
+6. 查看数据检查表。
+7. 如缺数据，点击“下载或更新当前目标与搜索范围行情”，系统会调用原库 `update_data.py`。
+8. 点击“运行横截面搜索”。
+9. 查看 Top 相似标的表格、相似度柱状图，并下载 CSV。
 
 ## 7. 输出字段解释
 
@@ -238,7 +240,7 @@ streamlit run streamlit_app.py
 - 第一版只做“同一时间窗口”的横截面比较，不做历史回溯。
 - 指数成分、行业板块、概念板块来自 AkShare 当前接口，不保证历史成分时点准确。
 - ETF 成分暂不自动抓取，建议先用 `--universe-file` 输入 ETF 持仓或自定义成分。
-- 30m 全市场横截面依赖本地长历史 parquet；AkShare 分钟数据更适合近端补充。
+- 数据抓取能力不在本库内二次实现；抓取失败、分钟线长历史、TDX 环境等边界都按原 `trend-backtest` 处理。
 - 结果是研究工具，不是买卖建议。
 
 ## 9. 开发验证
