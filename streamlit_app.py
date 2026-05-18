@@ -389,7 +389,7 @@ def _render_cross_section_tab(
         st.warning("没有找到可用结果。请检查本地数据覆盖、搜索范围和区间设置。")
         return
 
-    stock_names = _cached_stock_name_map(tuple(result.results["symbol"].astype(str).tolist()))
+    stock_names = _cached_stock_name_map(tuple(unique_symbols([result.target_symbol, *result.results["symbol"].astype(str).tolist()])))
     st.dataframe(_centered(_format_results(result.results, stock_names)), use_container_width=True, hide_index=True)
     st.markdown("**5. 有效结果计量**")
     metric_columns = st.columns(4)
@@ -410,9 +410,9 @@ def _render_cross_section_tab(
             use_container_width=True,
             hide_index=True,
         )
-    st.plotly_chart(_cross_section_price_chart(bars, result, top_n=int(top_n)), use_container_width=True)
+    st.plotly_chart(_cross_section_price_chart(bars, result, top_n=int(top_n), stock_names=stock_names), use_container_width=True)
     components.html(
-        _lightweight_kline_chart_html(_lightweight_kline_series(bars, result)),
+        _lightweight_kline_chart_html(_lightweight_kline_series(bars, result, stock_names=stock_names)),
         height=820,
     )
     if not result.skipped.empty:
@@ -937,6 +937,7 @@ def _cross_section_price_chart(
     bars: pd.DataFrame,
     result: CrossSectionSearchResult,
     top_n: int = 20,
+    stock_names: dict[str, str] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     symbols = unique_symbols([result.target_symbol, *result.results["symbol"].head(top_n).tolist()])
@@ -951,7 +952,7 @@ def _cross_section_price_chart(
             x=symbol_bars["date"],
             y=symbol_bars["close"],
             mode="lines",
-            name=f"{symbol}（目标）" if is_target else symbol,
+            name=_stock_chart_label(symbol, stock_names, is_target=is_target),
             line={"width": 4 if is_target else 1.8},
             opacity=1.0 if is_target else 0.72,
         )
@@ -1011,11 +1012,20 @@ def _date_text(value: object) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
+def _stock_chart_label(symbol: str, stock_names: dict[str, str] | None = None, *, is_target: bool = False) -> str:
+    normalized = normalize_symbol(symbol)
+    name = (stock_names or {}).get(normalized, "").strip()
+    if not name:
+        return f"{normalized}（目标）" if is_target else normalized
+    return f"{name}（{normalized}，目标）" if is_target else f"{name}（{normalized}）"
+
+
 def _lightweight_kline_series(
     bars: pd.DataFrame,
     result: CrossSectionSearchResult,
     top_n: int = 6,
     forward_bars: int = 10,
+    stock_names: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     start = result.start
     end = inclusive_end_timestamp(result.end)
@@ -1030,7 +1040,7 @@ def _lightweight_kline_series(
             continue
         chart_window = symbol_bars.head(len(window) + forward_bars)
         window_end_time = pd.Timestamp(window["date"].iloc[-1]).strftime("%Y-%m-%d")
-        label = f"{symbol}（目标）" if symbol == result.target_symbol else symbol
+        label = _stock_chart_label(symbol, stock_names, is_target=symbol == result.target_symbol)
         series.append(
             {
                 "title": label,
