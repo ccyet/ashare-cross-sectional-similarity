@@ -110,7 +110,7 @@ python -m py_compile streamlit_app.py ashare_cross_section_similarity/*.py scrip
 git diff --check
 ```
 
-2026-05-18 最新验证结果：`109 passed`，`ruff check .` 通过。
+2026-05-18 最新验证结果：`110 passed`，`ruff check .` 通过。
 
 ## 已知边界
 

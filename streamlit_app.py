@@ -1159,10 +1159,15 @@ def _set_download_job_status(job: dict[str, object], status: str) -> None:
     job["status"] = status
 
 
-def _run_download_job_step(job: dict[str, object]) -> pd.DataFrame:
+def _run_download_job_step(
+    job: dict[str, object],
+    *,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+) -> pd.DataFrame:
     if job.get("status") != "running":
         return pd.DataFrame()
     symbols = list(job.get("symbols", []))
+    total = len(symbols)
     cursor = int(job.get("cursor", 0))
     batch_size = int(job.get("batch_size", DOWNLOAD_BATCH_SIZE))
     if batch_size < 1:
@@ -1171,6 +1176,11 @@ def _run_download_job_step(job: dict[str, object]) -> pd.DataFrame:
     if not batch_symbols:
         job["status"] = "completed"
         return pd.DataFrame()
+
+    def report_progress(completed: int, _batch_total: int, symbol: str, status: str) -> None:
+        if progress_callback is not None:
+            progress_callback(cursor + completed, total, symbol, status)
+
     result = _download_symbols_with_progress(
         symbols=batch_symbols,
         timeframe=str(job["timeframe"]),
@@ -1181,6 +1191,7 @@ def _run_download_job_step(job: dict[str, object]) -> pd.DataFrame:
         data_root=Path(job["data_root"]),
         provider=str(job["provider"]),
         download_engine=str(job["download_engine"]),
+        progress_callback=report_progress,
     )
     rows = list(job.get("rows", []))
     rows.extend(result.to_dict("records"))
@@ -1216,23 +1227,38 @@ def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFra
         st.session_state.pop(job_key, None)
         st.rerun()
 
-    if status == "running":
-        with st.spinner("正在下载下一批行情..."):
-            _run_download_job_step(job)
-        st.cache_data.clear()
-        if job.get("status") == "running":
-            st.rerun()
-
     total = len(list(job.get("symbols", [])))
     cursor = int(job.get("cursor", 0))
-    status = str(job.get("status", ""))
     ratio = cursor / total if total else 1.0
     label = {
         "running": "下载中",
         "paused": "已暂停",
         "completed": "下载完成",
     }.get(status, status)
-    st.progress(ratio, text=f"{cursor}/{total} {label}")
+    progress_bar = st.progress(ratio, text=f"{cursor}/{total} {label}")
+    progress_text = st.empty()
+
+    if status == "running":
+        def report_progress(completed: int, total_count: int, symbol: str, row_status: str) -> None:
+            action = "正在下载" if row_status == "running" else "已完成"
+            step_ratio = completed / total_count if total_count else 1.0
+            progress_bar.progress(step_ratio, text=f"{completed}/{total_count} {action} {symbol}")
+            progress_text.caption(f"当前标的：{symbol}；状态：{row_status}")
+
+        with st.spinner("正在下载下一批行情..."):
+            _run_download_job_step(job, progress_callback=report_progress)
+        st.cache_data.clear()
+        total = len(list(job.get("symbols", [])))
+        cursor = int(job.get("cursor", 0))
+        status = str(job.get("status", ""))
+        label = {
+            "running": "下载中",
+            "paused": "已暂停",
+            "completed": "下载完成",
+        }.get(status, status)
+        progress_bar.progress(cursor / total if total else 1.0, text=f"{cursor}/{total} {label}")
+        if job.get("status") == "running":
+            st.rerun()
 
     result = _download_job_result_frame(job)
     if not result.empty:

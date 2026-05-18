@@ -1059,3 +1059,68 @@ def test_download_job_can_pause_between_batches(monkeypatch) -> None:
     assert second_result["symbol"].tolist() == ["000002.SZ"]
     assert job["status"] == "completed"
     assert job["cursor"] == 2
+
+
+def test_download_job_reports_overall_progress_across_batches(monkeypatch) -> None:
+    def fake_update_local_bars(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"symbol": symbol, "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"}
+                for symbol in kwargs["symbols"]
+            ]
+        )
+
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                }
+                for symbol in kwargs["symbols"]
+            ]
+        )
+
+    monkeypatch.setattr("streamlit_app.update_local_bars", fake_update_local_bars)
+    monkeypatch.setattr("streamlit_app.data_check", fake_data_check)
+    job = _create_download_job(
+        symbols=["000001.SZ", "000002.SZ", "000003.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-01-01",
+        end="2024-01-31",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="trend",
+        batch_size=2,
+    )
+    progress: list[tuple[int, int, str, str]] = []
+
+    _run_download_job_step(
+        job,
+        progress_callback=lambda completed, total, symbol, status: progress.append((completed, total, symbol, status)),
+    )
+
+    assert progress == [
+        (0, 3, "000001.SZ 等 2 个", "running"),
+        (1, 3, "000001.SZ", "available"),
+        (2, 3, "000002.SZ", "available"),
+    ]
+    assert job["cursor"] == 2
+
+    progress.clear()
+    _run_download_job_step(
+        job,
+        progress_callback=lambda completed, total, symbol, status: progress.append((completed, total, symbol, status)),
+    )
+
+    assert progress == [
+        (2, 3, "000003.SZ", "running"),
+        (3, 3, "000003.SZ", "available"),
+    ]
+    assert job["status"] == "completed"
