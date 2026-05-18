@@ -11,6 +11,7 @@ from streamlit_app import (
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
+    _cross_section_result_metrics,
     _cross_section_price_chart,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
@@ -59,6 +60,19 @@ def test_directory_choice_value_uses_custom_fallback_when_blank() -> None:
     assert _directory_choice_value("/tmp/trend", "", "/tmp/default") == "/tmp/trend"
     assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "/tmp/custom", "/tmp/default") == "/tmp/custom"
     assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "", "/tmp/default") == "/tmp/default"
+
+
+def test_cross_section_result_metrics_are_one_row_pair() -> None:
+    result = CrossSectionSearchResult(
+        target_symbol="000001.SZ",
+        start=pd.Timestamp("2024-01-01"),
+        end=pd.Timestamp("2024-01-03"),
+        window_size=3,
+        results=pd.DataFrame({"symbol": ["000002.SZ", "000003.SZ"]}),
+        skipped=pd.DataFrame(),
+    )
+
+    assert _cross_section_result_metrics(result) == [("目标窗口 K 线数", "3"), ("有效结果数", "2")]
 
 
 def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:

@@ -451,8 +451,8 @@ def _render_cross_section_tab(
         return
 
     st.markdown("**4. 搜索结果**")
-    st.metric("目标窗口 K 线数", result.window_size)
-    st.metric("有效结果数", len(result.results))
+    for column, (label, value) in zip(st.columns(2), _cross_section_result_metrics(result)):
+        column.metric(label, value)
     if result.results.empty:
         st.warning("没有找到可用结果。请检查本地数据覆盖、搜索范围和区间设置。")
         return
@@ -833,6 +833,10 @@ def _cross_section_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]
         ("后10根胜率", _percent_text((returns_10.dropna() > 0).mean())),
         ("Top6后10根均值", _percent_text(returns_10.head(6).mean())),
     ]
+
+
+def _cross_section_result_metrics(result: CrossSectionSearchResult) -> list[tuple[str, str]]:
+    return [("目标窗口 K 线数", f"{result.window_size:,}"), ("有效结果数", f"{len(result.results):,}")]
 
 
 def _cross_section_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
