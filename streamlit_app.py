@@ -411,10 +411,13 @@ def _render_cross_section_tab(
             hide_index=True,
         )
     st.plotly_chart(_cross_section_price_chart(bars, result, top_n=int(top_n), stock_names=stock_names), use_container_width=True)
+    kline_series = _lightweight_kline_series(bars, result, stock_names=stock_names)
     components.html(
-        _lightweight_kline_chart_html(_lightweight_kline_series(bars, result, stock_names=stock_names)),
-        height=820,
+        _lightweight_kline_chart_html(kline_series),
+        height=_kline_chart_component_height(kline_series),
+        scrolling=False,
     )
+    st.markdown("")
     if not result.skipped.empty:
         with st.expander("查看跳过的标的"):
             st.dataframe(_centered(result.skipped), use_container_width=True, hide_index=True)
@@ -1071,6 +1074,15 @@ def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
 {panels}
 </div>
 """
+
+
+def _kline_chart_component_height(series: list[dict[str, object]]) -> int:
+    if not series:
+        return 160
+    panel_height = 300
+    gap = 12
+    rows = math.ceil(len(series) / 2)
+    return rows * panel_height + max(0, rows - 1) * gap + 32
 
 
 def _kline_empty_message() -> str:

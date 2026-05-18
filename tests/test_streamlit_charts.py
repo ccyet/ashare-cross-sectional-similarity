@@ -17,6 +17,7 @@ from streamlit_app import (
     _format_cross_section_stats,
     _format_results,
     _forward_stats_load_end,
+    _kline_chart_component_height,
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
     _pin_symbol_row,
@@ -225,6 +226,11 @@ def test_lightweight_kline_chart_empty_series_has_visible_message() -> None:
 
     assert "没有可绘制的K线数据" in html
     assert "Powered by" not in html
+
+
+def test_kline_chart_component_height_scales_with_panel_count() -> None:
+    assert _kline_chart_component_height([]) == 160
+    assert _kline_chart_component_height([{}] * 7) >= 1200
 
 
 def test_format_results_formats_forward_returns_as_percentages() -> None:
