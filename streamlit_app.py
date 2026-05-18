@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 from datetime import date
+from fnmatch import fnmatch
 from html import escape
 from pathlib import Path
 from typing import Callable
@@ -100,14 +101,8 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
     st.session_state[default_key] = default_text
     st.caption(label)
     _render_selected_path(str(st.session_state[state_key]))
-    if st.button(f"选择{label}", key=f"{key}_pick"):
-        try:
-            selected = _pick_directory(st.session_state[state_key], title=f"选择{label}")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"文件夹选择器打开失败：{exc}")
-        else:
-            if selected:
-                st.session_state[state_key] = selected
+    with st.popover(f"选择{label}", use_container_width=True):
+        _render_directory_browser(label, key, state_key, st.session_state[state_key])
     return str(st.session_state[state_key])
 
 
@@ -123,17 +118,87 @@ def _render_file_picker(
     st.caption(label)
     _render_selected_path(str(st.session_state[state_key]) if st.session_state[state_key] else "未选择")
     button_col, clear_col = st.columns([2, 1])
-    if button_col.button(f"选择{label}", key=f"{key}_pick"):
-        try:
-            selected = _pick_file(st.session_state[state_key] or initial_path, title=f"选择{label}", filetypes=filetypes)
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"文件选择器打开失败：{exc}")
-        else:
-            if selected:
-                st.session_state[state_key] = selected
+    with button_col.popover(f"选择{label}", use_container_width=True):
+        _render_file_browser(label, key, state_key, st.session_state[state_key] or initial_path, filetypes)
     if st.session_state[state_key] and clear_col.button("清除", key=f"{key}_clear"):
         st.session_state[state_key] = ""
     return str(st.session_state[state_key])
+
+
+def _render_directory_browser(label: str, key: str, state_key: str, current_path: str | Path) -> None:
+    browser_dir_key = f"{key}_browser_dir"
+    if browser_dir_key not in st.session_state:
+        st.session_state[browser_dir_key] = _picker_initial_directory(current_path, Path.home())
+    current_dir = Path(str(st.session_state[browser_dir_key])).expanduser()
+    if not current_dir.exists() or not current_dir.is_dir():
+        current_dir = Path(_picker_initial_directory(current_path, Path.home()))
+        st.session_state[browser_dir_key] = str(current_dir)
+    st.caption(f"当前目录：{current_dir}")
+    nav_col, select_col = st.columns(2)
+    if nav_col.button("上一级", key=f"{key}_parent", disabled=current_dir.parent == current_dir):
+        st.session_state[browser_dir_key] = str(current_dir.parent)
+        st.rerun()
+    if select_col.button("选择当前目录", key=f"{key}_select_current"):
+        st.session_state[state_key] = str(current_dir)
+        st.rerun()
+    entries = _directory_picker_entries(current_dir)
+    if not entries:
+        st.info("当前目录下没有可进入的子文件夹。")
+        return
+    selected = st.selectbox(
+        "子文件夹",
+        [str(path) for path in entries],
+        key=f"{key}_dir_choice",
+        format_func=lambda value: Path(value).name,
+    )
+    if st.button("进入子文件夹", key=f"{key}_enter_dir"):
+        st.session_state[browser_dir_key] = selected
+        st.rerun()
+
+
+def _render_file_browser(
+    label: str,
+    key: str,
+    state_key: str,
+    current_path: str | Path,
+    filetypes: list[tuple[str, str | tuple[str, ...]]],
+) -> None:
+    browser_dir_key = f"{key}_browser_dir"
+    if browser_dir_key not in st.session_state:
+        st.session_state[browser_dir_key] = _picker_initial_directory(current_path, Path.home())
+    current_dir = Path(str(st.session_state[browser_dir_key])).expanduser()
+    if not current_dir.exists() or not current_dir.is_dir():
+        current_dir = Path(_picker_initial_directory(current_path, Path.home()))
+        st.session_state[browser_dir_key] = str(current_dir)
+    st.caption(f"当前目录：{current_dir}")
+    if st.button("上一级", key=f"{key}_file_parent", disabled=current_dir.parent == current_dir):
+        st.session_state[browser_dir_key] = str(current_dir.parent)
+        st.rerun()
+    directories, files = _file_picker_entries(current_dir, filetypes)
+    if directories:
+        selected_dir = st.selectbox(
+            "子文件夹",
+            [str(path) for path in directories],
+            key=f"{key}_file_dir_choice",
+            format_func=lambda value: Path(value).name,
+        )
+        if st.button("进入子文件夹", key=f"{key}_file_enter_dir"):
+            st.session_state[browser_dir_key] = selected_dir
+            st.rerun()
+    else:
+        st.info("当前目录下没有可进入的子文件夹。")
+    if files:
+        selected_file = st.selectbox(
+            "文件",
+            [str(path) for path in files],
+            key=f"{key}_file_choice",
+            format_func=lambda value: Path(value).name,
+        )
+        if st.button(f"选择{label}", key=f"{key}_select_file"):
+            st.session_state[state_key] = selected_file
+            st.rerun()
+    else:
+        st.info("当前目录下没有符合类型的文件。")
 
 
 def _render_selected_path(path: str) -> None:
@@ -141,49 +206,6 @@ def _render_selected_path(path: str) -> None:
         f"<div style='font-size:12px;line-height:1.35;word-break:break-all;color:#374151;margin:-0.25rem 0 0.35rem 0;'>{escape(path)}</div>",
         unsafe_allow_html=True,
     )
-
-
-def _pick_directory(initial_path: str | Path, *, title: str) -> str:
-    return _open_native_path_dialog("directory", initial_path, title=title) or ""
-
-
-def _pick_file(
-    initial_path: str | Path,
-    *,
-    title: str,
-    filetypes: list[tuple[str, str | tuple[str, ...]]],
-) -> str:
-    return _open_native_path_dialog("file", initial_path, title=title, filetypes=filetypes) or ""
-
-
-def _open_native_path_dialog(
-    dialog_type: str,
-    initial_path: str | Path,
-    *,
-    title: str,
-    filetypes: list[tuple[str, str | tuple[str, ...]]] | None = None,
-) -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        try:
-            root.attributes("-topmost", True)
-            root.update()
-        except tk.TclError:
-            pass
-        initial_dir = _picker_initial_directory(initial_path, Path.home())
-        if dialog_type == "directory":
-            selected = filedialog.askdirectory(title=title, initialdir=initial_dir, mustexist=True)
-        elif dialog_type == "file":
-            selected = filedialog.askopenfilename(title=title, initialdir=initial_dir, filetypes=filetypes or [])
-        else:
-            raise ValueError(f"未知选择器类型：{dialog_type}")
-    finally:
-        root.destroy()
-    return str(selected or "")
 
 
 def _picker_initial_directory(value: str | Path, fallback: str | Path) -> str:
@@ -201,6 +223,43 @@ def _picker_initial_directory(value: str | Path, fallback: str | Path) -> str:
                 break
             candidate = candidate.parent
     return str(Path.home())
+
+
+def _directory_picker_entries(directory: str | Path) -> list[Path]:
+    current_dir = Path(str(directory)).expanduser()
+    try:
+        entries = [path for path in current_dir.iterdir() if path.is_dir()]
+    except OSError:
+        return []
+    return sorted(entries, key=lambda path: path.name.lower())
+
+
+def _file_picker_entries(
+    directory: str | Path,
+    filetypes: list[tuple[str, str | tuple[str, ...]]],
+) -> tuple[list[Path], list[Path]]:
+    current_dir = Path(str(directory)).expanduser()
+    directories = _directory_picker_entries(current_dir)
+    patterns = _filetype_patterns(filetypes)
+    try:
+        files = [path for path in current_dir.iterdir() if path.is_file() and _path_matches_filetypes(path, patterns)]
+    except OSError:
+        files = []
+    return directories, sorted(files, key=lambda path: path.name.lower())
+
+
+def _filetype_patterns(filetypes: list[tuple[str, str | tuple[str, ...]]]) -> list[str]:
+    patterns: list[str] = []
+    for _label, raw_patterns in filetypes:
+        if isinstance(raw_patterns, str):
+            patterns.append(raw_patterns)
+        else:
+            patterns.extend(raw_patterns)
+    return patterns or ["*"]
+
+
+def _path_matches_filetypes(path: Path, patterns: list[str]) -> bool:
+    return "*" in patterns or any(fnmatch(path.name, pattern) for pattern in patterns)
 
 
 def _path_text(value: str | Path) -> str:

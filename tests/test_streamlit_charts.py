@@ -15,7 +15,9 @@ from streamlit_app import (
     _cross_section_price_chart,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
+    _directory_picker_entries,
     _download_symbols_with_progress,
+    _file_picker_entries,
     _format_cross_section_stats,
     _format_results,
     _date_tolerance_load_start,
@@ -54,6 +56,28 @@ def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_pat
     assert _picker_initial_directory(folder, tmp_path) == str(folder)
     assert _picker_initial_directory(file_path, tmp_path) == str(folder)
     assert _picker_initial_directory(tmp_path / "missing" / "universe.csv", folder) == str(tmp_path)
+
+
+def test_directory_picker_entries_lists_child_directories_only(tmp_path: Path) -> None:
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "universe.csv").write_text("symbol\n000001.SZ\n")
+
+    entries = _directory_picker_entries(tmp_path)
+
+    assert [path.name for path in entries] == ["a", "b"]
+
+
+def test_file_picker_entries_filters_supported_files(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "universe.csv").write_text("symbol\n000001.SZ\n")
+    (tmp_path / "prices.parquet").write_bytes(b"placeholder")
+    (tmp_path / "ignore.txt").write_text("ignore")
+
+    directories, files = _file_picker_entries(tmp_path, [("数据文件", ("*.csv", "*.parquet"))])
+
+    assert [path.name for path in directories] == ["sub"]
+    assert [path.name for path in files] == ["prices.parquet", "universe.csv"]
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:
