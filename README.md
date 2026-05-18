@@ -354,7 +354,7 @@ streamlit run streamlit_app.py
 
 ## 9. Docker 服务
 
-本分支提供 Docker 服务化运行方式，默认把本地 `./docker-data` 挂载到容器内 `/data`，并把行情根目录设为 `/data/market/daily`。
+本分支提供 Docker 服务化运行方式，默认把本机 `/Users/a1234/Desktop/trend-backtest/data` 挂载到容器内 `/data`，并把行情根目录设为 `/data/market/daily`。
 
 启动：
 
@@ -374,10 +374,16 @@ http://localhost:8502
 ASHARE_PORT=8510 docker compose up --build
 ```
 
+如需挂载其他行情目录，例如自建数据目录：
+
+```bash
+ASHARE_HOST_DATA_DIR=/path/to/trend-backtest/data docker compose up --build
+```
+
 在 Docker 服务里有两种使用自定义价格数据的方式：
 
 1. 页面左侧 `上传自定义价格数据`，上传符合规范的 `csv / parquet`。
-2. 把已有 parquet 放入 `./docker-data/market/daily/qfq/`，文件名使用规范化代码，如 `000001.SZ.parquet`。
+2. 把已有 parquet 放入挂载目录的 `market/daily/qfq/`，文件名使用规范化代码，如 `000001.SZ.parquet`。
 
 ## 10. 输出字段解释
 
