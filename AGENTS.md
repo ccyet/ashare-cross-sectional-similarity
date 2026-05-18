@@ -29,6 +29,7 @@ streamlit run streamlit_app.py
 - 价格数据至少包含 `date, symbol 或 stock_code, open, high, low, close`；`volume, amount` 可缺失。
 - 历史页和横截面页应复用 `data_check`、`load_local_bars`、`_download_symbols_with_progress` 等同一套本地数据逻辑。
 - Streamlit 本地行情缓存必须带 parquet 文件指纹，避免本地文件更新后页面仍显示旧范围。
+- 下载引擎支持 `trend`、`openbb`、`tdx`；TDX 直连复用本机通达信 `tqcenter`，路径通过侧栏目录选择、`--provider` 或 `TDX_TQCENTER_PATH` 指向 `PYPlugins/user`。
 
 ## 当前页面能力
 

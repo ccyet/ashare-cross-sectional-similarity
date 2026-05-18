@@ -289,8 +289,8 @@ def _add_download_data_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--download-engine",
         default="trend",
-        choices=["trend", "openbb"],
-        help="下载引擎：trend 委托原 trend-backtest；openbb 直接通过 OpenBB 写入 parquet。",
+        choices=["trend", "openbb", "tdx"],
+        help="下载引擎：trend 委托原 trend-backtest；openbb/tdx 直接写入 parquet。",
     )
 
 
@@ -313,7 +313,11 @@ def _add_download_symbol_args(parser: argparse.ArgumentParser) -> None:
         default=str(default_trend_repo()),
         help="原 trend-backtest 仓库路径，download 会调用其中 scripts/update_data.py",
     )
-    parser.add_argument("--provider", default="", help="下载源；trend 可填 akshare/tdx，openbb 默认 akshare")
+    parser.add_argument(
+        "--provider",
+        default="",
+        help="下载源；trend 可填 akshare/tdx，openbb 默认 akshare，tdx 可填 PYPlugins/user 路径。",
+    )
 
 
 def _resolve_universe(args: argparse.Namespace) -> list[str]:

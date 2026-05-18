@@ -4,7 +4,7 @@
 
 当前版本包含完整闭环：
 
-- 数据抓取：默认委托原 `trend-backtest/scripts/update_data.py`，也可选用 OpenBB 直接写入本地 parquet
+- 数据抓取：默认委托原 `trend-backtest/scripts/update_data.py`，也可选用 OpenBB 或 TDX 直接写入本地 parquet
 - 数据落地：统一写入本地 parquet
 - 数据检查：历史时序和横截面共用同一套本地覆盖检查、下载修复和 parquet 缓存失效逻辑
 - 历史时序搜索：同一标的自己的历史阶段相似度回溯，支持自定义起止区间和快捷近 N 根
@@ -91,11 +91,19 @@ python -m pip install openbb openbb_akshare
 python -c "import openbb; openbb.build()"
 ```
 
+TDX 抓取链路复用本机通达信量化终端的 `tqcenter`，不新增 pip 依赖。使用前需安装并登录通达信终端，并让程序能找到 `PYPlugins/user` 目录：
+
+```bash
+export TDX_TQCENTER_PATH=/path/to/TdxInstall/PYPlugins/user
+```
+
 ## 4. 数据要求
 
 默认读取本地 parquet；缺数据时可以在本库页面或 CLI 中触发下载。下载动作默认调用原 `trend-backtest` 的 `scripts/update_data.py`，数据源、TDX/AkShare 路由和落地目录仍以原库配置为准。
 
 如果使用 `--download-engine openbb`，程序会通过 OpenBB 的统一接口抓取行情，并按本库目录结构直接写入 parquet。A 股默认使用 `openbb_akshare` 扩展。
+
+如果使用 `--download-engine tdx`，程序会直接导入本机通达信 `tqcenter`，调用 `tq.get_market_data` 抓取 `1d/30m/15m/5m/1m` K 线，并写入同一套本地 parquet。
 
 推荐直接复用 `trend-backtest` 的行情目录：
 
@@ -141,8 +149,7 @@ python -m ashare_cross_section_similarity download \
 
 说明：
 
-- 本命令不会在新库内重写行情抓取逻辑。
-- 它只把参数转发给原库 `scripts/update_data.py`。
+- 默认 `--download-engine trend` 只把参数转发给原库 `scripts/update_data.py`。
 - 具体支持哪些周期、使用 AkShare 还是 TDX、落到哪个目录，以原 `trend-backtest/config/data_source.yaml` 和原脚本实现为准。
 - 如需指定原脚本 provider，可加 `--provider akshare` 或 `--provider tdx`。
 
@@ -154,6 +161,19 @@ python -m ashare_cross_section_similarity download \
   --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
   --timeframe 1d \
   --provider akshare \
+  --symbols 300750.SZ,000001.SZ,600519.SH \
+  --start 2024-01-01 \
+  --end 2024-03-31
+```
+
+也可以直接用本机 TDX 写入本地 parquet：
+
+```bash
+python -m ashare_cross_section_similarity download \
+  --download-engine tdx \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --timeframe 1d \
+  --provider /path/to/TdxInstall/PYPlugins/user \
   --symbols 300750.SZ,000001.SZ,600519.SH \
   --start 2024-01-01 \
   --end 2024-03-31
@@ -354,7 +374,7 @@ streamlit run streamlit_app.py
 1. 填本地行情目录。
 2. 填原 `trend-backtest` 仓库路径。
 3. 选择周期，默认日线。
-4. 选择下载引擎：默认调用原库 `update_data.py`，也可选择 OpenBB。
+4. 选择下载引擎：默认调用原库 `update_data.py`，也可选择 OpenBB 或 TDX 本地。
 5. 在对应工作台填写目标代码、窗口或区间；横截面工作台还需填写搜索范围。
 6. 如需使用自有行情，在左侧 `上传自定义价格数据` 中导入 `csv / parquet`。
 7. 查看或点击数据检查。
@@ -416,7 +436,7 @@ ASHARE_HOST_DATA_DIR=/path/to/trend-backtest/data docker compose up --build
 - 历史时序搜索和横截面搜索分开运行，不自动合成总评分。
 - 指数成分、行业板块、概念板块来自 AkShare 当前接口，不保证历史成分时点准确。
 - ETF 成分暂不自动抓取，建议先用 `--universe-file` 输入 ETF 持仓或自定义成分。
-- 默认数据抓取仍按原 `trend-backtest` 处理；OpenBB 链路为可选增强，依赖本机 OpenBB 与对应 provider 扩展是否可用。
+- 默认数据抓取仍按原 `trend-backtest` 处理；OpenBB 与 TDX 直连链路为可选增强，分别依赖本机 OpenBB/provider 扩展和通达信 `tqcenter` 是否可用。
 - 结果是研究工具，不是买卖建议。
 
 ## 12. 开发验证

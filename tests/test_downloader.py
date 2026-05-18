@@ -129,6 +129,50 @@ def test_update_local_bars_can_fetch_and_write_with_openbb_engine(tmp_path: Path
     assert saved["close"].tolist() == [1, 2]
 
 
+def test_update_local_bars_can_fetch_and_write_with_tdx_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_tdx_bars",
+        return_value=bars,
+    ) as fetch_tdx_bars:
+        result = update_local_bars(
+            symbols=("000001.SZ",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            provider="/Applications/Tdx/PYPlugins/user",
+            download_engine="tdx",
+        )
+
+    fetch_tdx_bars.assert_called_once_with(
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-02",
+        timeframe="1d",
+        adjust="qfq",
+        tqcenter_path="/Applications/Tdx/PYPlugins/user",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "000001.SZ", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "000001.SZ.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
 def test_openbb_engine_merges_with_existing_parquet_using_canonical_schema(
     tmp_path: Path,
 ) -> None:

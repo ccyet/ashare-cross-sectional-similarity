@@ -64,15 +64,27 @@ def main() -> None:
         adjust = st.text_input("复权", value="qfq")
         download_engine = st.selectbox(
             "下载引擎",
-            ["trend", "openbb"],
-            format_func=lambda value: "trend-backtest" if value == "trend" else "OpenBB",
+            ["trend", "openbb", "tdx"],
+            format_func=lambda value: {
+                "trend": "trend-backtest",
+                "openbb": "OpenBB",
+                "tdx": "TDX 本地",
+            }[value],
         )
-        provider_default = "akshare" if download_engine == "openbb" else ""
-        provider = st.text_input(
-            "下载源",
-            value=provider_default,
-            help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
-        )
+        if download_engine == "tdx":
+            provider = _render_directory_picker(
+                "通达信 PYPlugins/user 目录",
+                os.environ.get("TDX_TQCENTER_PATH", ""),
+                "tdx_tqcenter",
+            )
+            st.caption("可选择通达信安装目录、PYPlugins 或 PYPlugins/user；留空则尝试系统导入路径。")
+        else:
+            provider_default = "akshare" if download_engine == "openbb" else ""
+            provider = st.text_input(
+                "下载源",
+                value=provider_default,
+                help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
+            )
         _render_price_upload(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
     history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
@@ -616,7 +628,7 @@ def _render_cross_section_tab(
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
     st.markdown("**2. 数据抓取 / 更新**")
-    st.caption("先检查覆盖，只补缺文件、覆盖不足、区间无数据或读取失败的标的；默认委托 trend-backtest。")
+    st.caption("先检查覆盖，只补缺文件、覆盖不足、区间无数据或读取失败的标的；按侧栏下载引擎执行。")
     if st.button("检查并下载缺失行情", key="cross_download"):
         download_end = coverage_end
         normalized_targets = unique_symbols([target_symbol])

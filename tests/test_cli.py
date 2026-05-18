@@ -93,6 +93,30 @@ def test_parse_openbb_download_command() -> None:
     assert args.provider == "akshare"
 
 
+def test_parse_tdx_download_command() -> None:
+    args = _parse_args(
+        [
+            "download",
+            "--download-engine",
+            "tdx",
+            "--data-root",
+            "/tmp/market/daily",
+            "--symbols",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--provider",
+            "/Applications/Tdx/PYPlugins/user",
+        ]
+    )
+
+    assert args.command == "download"
+    assert args.download_engine == "tdx"
+    assert args.provider == "/Applications/Tdx/PYPlugins/user"
+
+
 def test_parse_check_command() -> None:
     args = _parse_args(
         [
