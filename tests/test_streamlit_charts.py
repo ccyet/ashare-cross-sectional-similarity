@@ -20,6 +20,7 @@ from streamlit_app import (
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
     _pin_symbol_row,
+    _stock_name_map_from_table,
     _symbols_requiring_download,
 )
 
@@ -197,6 +198,31 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
     assert formatted["区间收益"].iloc[0] == "12.34%"
     assert formatted["后3根收益"].iloc[0] == "5.67%"
     assert formatted["区间开始"].iloc[0] == "2024-01-01"
+
+
+def test_format_results_renames_symbol_and_inserts_stock_name() -> None:
+    formatted = _format_results(
+        pd.DataFrame(
+            {
+                "symbol": ["000001.SZ", "000002.SZ"],
+                "区间收益": [0.1, 0.2],
+            }
+        ),
+        {"000001.SZ": "平安银行"},
+    )
+
+    assert formatted.columns[:3].tolist() == ["代码", "股票", "区间收益"]
+    assert formatted["代码"].tolist() == ["000001.SZ", "000002.SZ"]
+    assert formatted["股票"].tolist() == ["平安银行", ""]
+
+
+def test_stock_name_map_from_akshare_code_name_table() -> None:
+    names = _stock_name_map_from_table(
+        pd.DataFrame({"code": ["603186", "000001"], "name": ["华正新材", "平安银行"]}),
+        ("603186.SH",),
+    )
+
+    assert names == {"603186.SH": "华正新材"}
 
 
 def test_format_results_formats_feature_numbers_for_display() -> None:

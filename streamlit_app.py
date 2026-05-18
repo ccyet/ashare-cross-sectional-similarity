@@ -389,7 +389,8 @@ def _render_cross_section_tab(
         st.warning("没有找到可用结果。请检查本地数据覆盖、搜索范围和区间设置。")
         return
 
-    st.dataframe(_centered(_format_results(result.results)), use_container_width=True, hide_index=True)
+    stock_names = _cached_stock_name_map(tuple(result.results["symbol"].astype(str).tolist()))
+    st.dataframe(_centered(_format_results(result.results, stock_names)), use_container_width=True, hide_index=True)
     st.markdown("**5. 有效结果计量**")
     metric_columns = st.columns(4)
     for column, (label, value) in zip(metric_columns, _cross_section_overview_metrics(result.results)):
@@ -520,6 +521,20 @@ def _cached_load_local_bars(
         start=start,
         end=end,
     )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_stock_name_map(symbols: tuple[str, ...]) -> dict[str, str]:
+    normalized = tuple(unique_symbols(symbols))
+    if not normalized:
+        return {}
+    try:
+        import akshare as ak
+
+        table = ak.stock_info_a_code_name()
+    except Exception:  # noqa: BLE001
+        return {}
+    return _stock_name_map_from_table(table, normalized)
 
 
 def _load_target_bars_for_quick_window(
@@ -697,7 +712,23 @@ def _quick_window_max_calendar_days(window_size: int) -> int:
     return max(window_size + 2, int(math.ceil(window_size * 2.2)))
 
 
-def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
+def _stock_name_map_from_table(table: pd.DataFrame, symbols: tuple[str, ...]) -> dict[str, str]:
+    if table.empty:
+        return {}
+    code_column = next((column for column in ("code", "stock_code", "symbol", "证券代码", "代码", "股票代码") if column in table.columns), "")
+    name_column = next((column for column in ("name", "stock_name", "股票名称", "证券简称", "名称", "简称") if column in table.columns), "")
+    if not code_column or not name_column:
+        return {}
+    wanted = set(unique_symbols(symbols))
+    result: dict[str, str] = {}
+    for _, row in table[[code_column, name_column]].dropna(subset=[code_column]).iterrows():
+        symbol = normalize_symbol(row[code_column])
+        if symbol in wanted:
+            result[symbol] = "" if pd.isna(row[name_column]) else str(row[name_column]).strip()
+    return result
+
+
+def _format_results(frame: pd.DataFrame, stock_names: dict[str, str] | None = None) -> pd.DataFrame:
     result = frame.copy()
     rename_map: dict[str, str] = {}
     percent_columns = [*PERCENT_COLUMNS]
@@ -712,6 +743,11 @@ def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ["区间开始", "区间结束"]:
         if column in result.columns:
             result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "symbol" in result.columns:
+        names = {normalize_symbol(symbol): name for symbol, name in (stock_names or {}).items()}
+        insert_at = result.columns.get_loc("symbol") + 1
+        result.insert(insert_at, "股票", result["symbol"].map(lambda symbol: names.get(normalize_symbol(symbol), "")))
+        result = result.rename(columns={"symbol": "代码"})
     return result
 
 
