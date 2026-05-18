@@ -38,6 +38,7 @@ from streamlit_app import (
     _lightweight_kline_series,
     _picker_initial_directory,
     _pin_symbol_row,
+    _pick_directory_with_system_dialog,
     _repair_partial_download_start,
     _stock_name_map_from_table,
     _symbols_requiring_download,
@@ -78,6 +79,60 @@ def test_directory_picker_entries_lists_child_directories_only(tmp_path: Path) -
     entries = _directory_picker_entries(tmp_path)
 
     assert [path.name for path in entries] == ["a", "b"]
+
+
+def test_pick_directory_with_system_dialog_returns_selected_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "trend"
+    folder.mkdir()
+    calls: dict[str, object] = {}
+
+    class FakeRoot:
+        def withdraw(self) -> None:
+            calls["withdraw"] = True
+
+        def attributes(self, *args: object) -> None:
+            calls["attributes"] = args
+
+        def destroy(self) -> None:
+            calls["destroy"] = True
+
+    def askdirectory(**kwargs: object) -> str:
+        calls["dialog"] = kwargs
+        return str(folder)
+
+    selected, error = _pick_directory_with_system_dialog(
+        "本地行情根目录",
+        folder,
+        tk_factory=FakeRoot,
+        askdirectory=askdirectory,
+    )
+
+    assert selected == str(folder)
+    assert error is None
+    assert calls["withdraw"] is True
+    assert calls["destroy"] is True
+    assert calls["dialog"] == {
+        "title": "选择本地行情根目录",
+        "initialdir": str(folder),
+        "mustexist": True,
+    }
+
+
+def test_pick_directory_with_system_dialog_reports_open_error() -> None:
+    def broken_tk() -> object:
+        raise RuntimeError("no display")
+
+    selected, error = _pick_directory_with_system_dialog(
+        "本地行情根目录",
+        "/tmp",
+        tk_factory=broken_tk,
+        askdirectory=lambda **_: "",
+    )
+
+    assert selected is None
+    assert error is not None
+    assert "无法打开系统文件夹选择器" in error
+    assert "no display" in error
 
 
 def test_file_picker_entries_filters_supported_files(tmp_path: Path) -> None:

@@ -111,7 +111,7 @@ def main() -> None:
 def _render_directory_picker(label: str, default_path: str | Path, key: str) -> str:
     state_key = f"{key}_path"
     default_key = f"{key}_default_path"
-    open_key = f"{key}_browser_open"
+    error_key = f"{key}_dialog_error"
     default_text = _path_text(default_path)
     previous_default = st.session_state.get(default_key)
     if state_key not in st.session_state or st.session_state.get(state_key) == previous_default:
@@ -120,11 +120,57 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
     st.caption(label)
     _render_selected_path(str(st.session_state[state_key]))
     if st.button(f"选择{label}", key=f"{key}_pick"):
-        st.session_state[open_key] = not bool(st.session_state.get(open_key))
-    if st.session_state.get(open_key):
-        with st.container(border=True):
-            _render_directory_browser(label, key, state_key, st.session_state[state_key])
+        selected_path, error = _pick_directory_with_system_dialog(label, st.session_state[state_key])
+        if error is not None:
+            st.session_state[error_key] = error
+        elif selected_path is not None:
+            st.session_state[state_key] = selected_path
+            st.session_state.pop(error_key, None)
+            st.rerun()
+        else:
+            st.session_state.pop(error_key, None)
+    if st.session_state.get(error_key):
+        st.error(st.session_state[error_key])
     return str(st.session_state[state_key])
+
+
+def _pick_directory_with_system_dialog(
+    label: str,
+    current_path: str | Path,
+    *,
+    tk_factory: Callable[[], object] | None = None,
+    askdirectory: Callable[..., str] | None = None,
+) -> tuple[str | None, str | None]:
+    root: object | None = None
+    try:
+        if tk_factory is None or askdirectory is None:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            tk_factory = tk.Tk
+            askdirectory = filedialog.askdirectory
+        root = tk_factory()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        selected_dir = askdirectory(
+            title=f"选择{label}",
+            initialdir=_picker_initial_directory(current_path, Path.home()),
+            mustexist=True,
+        )
+        if not selected_dir:
+            return None, None
+        return str(Path(selected_dir).expanduser()), None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"无法打开系统文件夹选择器：{exc}"
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 
 def _render_file_picker(
