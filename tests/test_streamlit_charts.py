@@ -20,6 +20,7 @@ from streamlit_app import (
     _format_results,
     _forward_stats_load_end,
     _directory_choice_value,
+    _directory_browser_options,
     _directory_options,
     _kline_chart_component_height,
     _lightweight_kline_chart_html,
@@ -60,6 +61,19 @@ def test_directory_choice_value_uses_custom_fallback_when_blank() -> None:
     assert _directory_choice_value("/tmp/trend", "", "/tmp/default") == "/tmp/trend"
     assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "/tmp/custom", "/tmp/default") == "/tmp/custom"
     assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "", "/tmp/default") == "/tmp/default"
+
+
+def test_directory_browser_options_include_parent_and_child_dirs(tmp_path: Path) -> None:
+    current = tmp_path / "trend"
+    child = current / "data"
+    child.mkdir(parents=True)
+    (current / "not-a-dir.txt").write_text("x")
+
+    options = _directory_browser_options(current, tmp_path)
+
+    assert options[:2] == [str(current), str(tmp_path)]
+    assert str(child) in options
+    assert str(current / "not-a-dir.txt") not in options
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:

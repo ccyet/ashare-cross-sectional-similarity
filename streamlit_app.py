@@ -43,27 +43,19 @@ def main() -> None:
     with st.sidebar:
         st.header("通用设置")
         trend_repo_default = os.environ.get("ASHARE_TREND_REPO", str(default_trend_repo()))
-        trend_repo_choice = st.selectbox(
+        trend_repo = _render_directory_input(
             "原 trend-backtest 仓库",
-            _trend_repo_options(trend_repo_default),
-            format_func=_directory_option_label,
-            key="trend_repo_choice",
+            trend_repo_default,
+            _trend_repo_candidates(),
+            "trend_repo",
         )
-        trend_repo_custom = ""
-        if trend_repo_choice == CUSTOM_DIRECTORY_OPTION:
-            trend_repo_custom = st.text_input("自定义 trend-backtest 仓库", value=trend_repo_default)
-        trend_repo = _directory_choice_value(trend_repo_choice, trend_repo_custom, trend_repo_default)
         data_root_default = os.environ.get("ASHARE_DATA_ROOT", str(Path(trend_repo) / "data" / "market" / "daily"))
-        data_root_choice = st.selectbox(
+        data_root = _render_directory_input(
             "本地行情根目录",
-            _data_root_options(data_root_default, trend_repo),
-            format_func=_directory_option_label,
-            key="data_root_choice",
+            data_root_default,
+            _data_root_candidates(trend_repo),
+            "data_root",
         )
-        data_root_custom = ""
-        if data_root_choice == CUSTOM_DIRECTORY_OPTION:
-            data_root_custom = st.text_input("自定义本地行情根目录", value=data_root_default)
-        data_root = _directory_choice_value(data_root_choice, data_root_custom, data_root_default)
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
         download_engine = st.selectbox(
@@ -100,26 +92,54 @@ def main() -> None:
         )
 
 
-def _trend_repo_options(default_path: str | Path) -> list[str]:
+def _render_directory_input(label: str, default_path: str | Path, candidates: list[str | Path], key: str) -> str:
+    choice = st.selectbox(
+        label,
+        _directory_options(default_path, candidates),
+        format_func=_directory_option_label,
+        key=f"{key}_choice",
+    )
+    if choice != CUSTOM_DIRECTORY_OPTION:
+        return _directory_choice_value(choice, "", default_path)
+    selected = _render_directory_browser(f"选择{label}", default_path, key)
+    manual = st.text_input(f"手动输入{label}（可选）", value="", key=f"{key}_manual")
+    return manual.strip() or selected
+
+
+def _render_directory_browser(label: str, default_path: str | Path, key: str) -> str:
+    state_key = f"{key}_browser_path"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = _nearest_existing_directory(default_path)
+    current = str(st.session_state[state_key])
+    selected = st.selectbox(
+        label,
+        _directory_browser_options(current, default_path),
+        format_func=_directory_browser_option_label,
+        key=f"{key}_browser_select",
+    )
+    if selected != current:
+        st.session_state[state_key] = selected
+    return selected
+
+
+def _trend_repo_candidates() -> list[Path]:
     desktop = Path.home() / "Desktop"
-    candidates = [
+    return [
         desktop / "trend-backtest",
         desktop / "trend",
         Path.cwd().parent / "trend-backtest",
         Path.cwd().parent / "trend",
     ]
-    return _directory_options(default_path, candidates)
 
 
-def _data_root_options(default_path: str | Path, trend_repo: str | Path) -> list[str]:
+def _data_root_candidates(trend_repo: str | Path) -> list[Path]:
     trend_repo_path = Path(trend_repo).expanduser()
     desktop = Path.home() / "Desktop"
-    candidates = [
+    return [
         trend_repo_path / "data" / "market" / "daily",
         desktop / "trend-backtest" / "data" / "market" / "daily",
         desktop / "trend" / "data" / "market" / "daily",
     ]
-    return _directory_options(default_path, candidates)
 
 
 def _directory_options(default_path: str | Path, candidates: list[str | Path]) -> list[str]:
@@ -135,6 +155,22 @@ def _directory_options(default_path: str | Path, candidates: list[str | Path]) -
     return options
 
 
+def _directory_browser_options(current_path: str | Path, fallback: str | Path) -> list[str]:
+    current = Path(_nearest_existing_directory(current_path, fallback))
+    options = [str(current)]
+    if current.parent != current:
+        options.append(str(current.parent))
+    try:
+        children = sorted(path for path in current.iterdir() if path.is_dir())
+    except OSError:
+        children = []
+    for child in children:
+        text = str(child)
+        if text not in options:
+            options.append(text)
+    return options
+
+
 def _directory_choice_value(choice: str, custom_value: str, fallback: str | Path) -> str:
     if choice == CUSTOM_DIRECTORY_OPTION:
         return custom_value.strip() or _directory_text(fallback)
@@ -145,8 +181,28 @@ def _directory_text(value: str | Path) -> str:
     return str(Path(str(value)).expanduser()) if str(value).strip() else ""
 
 
+def _nearest_existing_directory(value: str | Path, fallback: str | Path | None = None) -> str:
+    candidates = [Path(str(value)).expanduser()]
+    if fallback is not None:
+        candidates.append(Path(str(fallback)).expanduser())
+    candidates.append(Path.home())
+    for candidate in candidates:
+        path = candidate if not candidate.is_file() else candidate.parent
+        while True:
+            if path.exists() and path.is_dir():
+                return str(path)
+            if path.parent == path:
+                break
+            path = path.parent
+    return str(Path.home())
+
+
 def _directory_option_label(value: str) -> str:
     return "自定义..." if value == CUSTOM_DIRECTORY_OPTION else value
+
+
+def _directory_browser_option_label(value: str) -> str:
+    return value
 
 
 def _render_history_tab(
