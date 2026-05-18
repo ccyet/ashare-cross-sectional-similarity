@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
+from ashare_cross_section_similarity.history import HistorySearchResult
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
     _cross_section_bucket_summary,
@@ -20,6 +21,10 @@ from streamlit_app import (
     _file_picker_entries,
     _format_cross_section_stats,
     _format_results,
+    _history_bucket_summary,
+    _history_forward_summary,
+    _history_kline_series,
+    _history_quick_window_feedback,
     _date_tolerance_load_start,
     _forward_stats_load_end,
     _kline_chart_component_height,
@@ -91,6 +96,76 @@ def test_cross_section_result_metrics_are_one_row_pair() -> None:
     )
 
     assert _cross_section_result_metrics(result) == [("目标窗口 K 线数", "3"), ("有效结果数", "2")]
+
+
+def test_history_quick_window_feedback_uses_latest_local_bar() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12])
+
+    as_of, message = _history_quick_window_feedback(bars, "000001.SZ", 3)
+
+    assert as_of == pd.Timestamp("2024-01-03").date()
+    assert "000001.SZ 已选择近 3 根K线" in message
+
+
+def test_history_forward_summary_measures_return_drawdown_and_favorable() -> None:
+    frame = pd.DataFrame(
+        {
+            "窗口开始": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+            "窗口结束": pd.to_datetime(["2024-01-05", "2024-02-05", "2024-03-05"]),
+            "综合相似度": [0.9, 0.8, 0.7],
+            "t_plus_5_return": [0.10, -0.05, 0.20],
+            "t_plus_5_max_drawdown": [-0.03, -0.12, -0.02],
+            "t_plus_5_max_favorable": [0.12, 0.01, 0.25],
+        }
+    )
+
+    summary = _history_forward_summary(frame)
+
+    row = summary.loc[summary["观察窗口"] == "后5根"].iloc[0]
+    assert row["样本数"] == 3
+    assert row["平均收益"] == pd.Series([0.10, -0.05, 0.20]).mean()
+    assert row["胜率"] == 2 / 3
+    assert row["平均最大回撤"] == pd.Series([-0.03, -0.12, -0.02]).mean()
+    assert row["平均最大浮盈"] == pd.Series([0.12, 0.01, 0.25]).mean()
+    assert row["最好窗口"] == "2024-03-01 至 2024-03-05"
+
+
+def test_history_bucket_summary_compares_top_buckets() -> None:
+    frame = pd.DataFrame(
+        {
+            "综合相似度": [0.9, 0.8, 0.7, 0.6],
+            "t_plus_5_return": [0.10, -0.05, 0.20, 0.00],
+        }
+    )
+
+    summary = _history_bucket_summary(frame)
+
+    top3 = summary.loc[summary["分层"] == "Top3"].iloc[0]
+    assert top3["样本数"] == 3
+    assert top3["后5根平均收益"] == pd.Series([0.10, -0.05, 0.20]).mean()
+    assert top3["后5根胜率"] == 2 / 3
+
+
+def test_history_kline_series_uses_current_and_historical_windows() -> None:
+    bars = _bars("000001.SZ", list(range(10, 30)))
+    current = bars.iloc[10:15].reset_index(drop=True)
+    historical = bars.iloc[0:5].reset_index(drop=True)
+    result = HistorySearchResult(
+        symbol="000001.SZ",
+        as_of=pd.Timestamp("2024-01-15"),
+        window_size=5,
+        current_window=current,
+        historical_windows=[historical],
+        results=pd.DataFrame({"窗口开始": [historical["date"].min()], "窗口结束": [historical["date"].max()]}),
+    )
+
+    series = _history_kline_series(bars, result, forward_bars=2)
+
+    assert [item["title"] for item in series] == ["当前窗口", "样本1"]
+    assert series[0]["windowEndTime"] == "2024-01-15"
+    assert series[0]["forwardSize"] == 2
+    assert series[1]["windowEndTime"] == "2024-01-05"
+    assert series[1]["data"][-1]["time"] == "2024-01-07"
 
 
 def test_cross_section_load_range_includes_date_tolerance_buffer() -> None:

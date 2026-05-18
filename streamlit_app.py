@@ -22,7 +22,7 @@ from ashare_cross_section_similarity.data import (
 )
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
-from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
+from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
@@ -290,9 +290,29 @@ def _render_history_tab(
     st.caption("选定一个标的和当前窗口结束日，系统只在这个标的自己的历史里找相似阶段。")
     col1, col2, col3, col4 = st.columns(4)
     symbol = col1.text_input("目标代码", value="399006.SZ", key="history_symbol")
-    as_of = col2.text_input("当前窗口结束", value="2024-03-31", key="history_as_of")
+    as_of_input = {"key": "history_as_of_date"}
+    if "history_as_of_date" not in st.session_state:
+        as_of_input["value"] = date(2024, 3, 31)
+    as_of_date = col2.date_input("当前窗口结束", **as_of_input)
     window_size = col3.selectbox("主走势窗口", [5, 10, 20, 60, 120], index=2, key="history_window_size")
     top_n = col4.number_input("展示数量", min_value=1, max_value=50, value=10, step=1, key="history_top_n")
+    quick_cols = st.columns(7)
+    quick_cols[0].caption("快捷窗口")
+    quick_cols[1].button(
+        "最新收盘",
+        key="history_quick_latest",
+        on_click=_set_history_quick_window,
+        args=(data_root, timeframe, adjust, symbol, int(window_size)),
+    )
+    for button_col, quick_window_size in zip(quick_cols[2:], [5, 10, 20, 60, 120]):
+        button_col.button(
+            f"近{quick_window_size}根",
+            key=f"history_quick_{quick_window_size}",
+            on_click=_set_history_quick_window,
+            args=(data_root, timeframe, adjust, symbol, quick_window_size),
+        )
+    if st.session_state.get("history_quick_message"):
+        st.info(st.session_state["history_quick_message"])
 
     col5, col6, col7, col8 = st.columns(4)
     forward_windows = col5.text_input("后验观察窗口", value="5,20,60", key="history_forward_windows")
@@ -300,13 +320,14 @@ def _render_history_tab(
     exclusion_bars = col7.number_input("排除近邻K线", min_value=0, max_value=500, value=20, step=5, key="history_exclusion_bars")
     nearby_gap_days = col8.number_input("样本间隔天数", min_value=0, max_value=365, value=20, step=5, key="history_gap_days")
     path_weight = st.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="history_path_weight")
+    as_of = pd.Timestamp(as_of_date).strftime("%Y-%m-%d")
 
     st.markdown("**1. 数据检查**")
-    bars = load_local_bars(
-        data_root=Path(data_root),
+    bars = _cached_load_local_bars(
+        data_root=data_root,
         timeframe=timeframe,
         adjust=adjust,
-        symbols=[symbol],
+        symbols=(symbol,),
         start="1900-01-01",
         end=as_of,
     )
@@ -374,7 +395,32 @@ def _render_history_tab(
         return
 
     st.dataframe(_centered(_format_history_results(result.results)), use_container_width=True, hide_index=True)
+    st.markdown("**4. 有效样本计量**")
+    for column, (label, value) in zip(st.columns(4), _history_overview_metrics(result.results)):
+        column.metric(label, value)
+    summary_col, bucket_col = st.columns(2)
+    with summary_col:
+        st.caption("后验观察统计")
+        st.dataframe(_centered(_format_history_stats(_history_forward_summary(result.results))), use_container_width=True, hide_index=True)
+    with bucket_col:
+        st.caption("相似度分层表现")
+        st.dataframe(_centered(_format_history_stats(_history_bucket_summary(result.results))), use_container_width=True, hide_index=True)
+    st.markdown("**5. K线走势核验**")
+    chart_bars = _cached_load_local_bars(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        symbols=(result.symbol,),
+        start="1900-01-01",
+        end=_forward_stats_load_end(as_of),
+    )
     st.plotly_chart(_history_path_chart(result.current_window, result.historical_windows), use_container_width=True)
+    history_kline_series = _history_kline_series(chart_bars, result, forward_bars=max(horizons) if horizons else 0)
+    components.html(
+        _lightweight_kline_chart_html(history_kline_series),
+        height=_kline_chart_component_height(history_kline_series),
+        scrolling=False,
+    )
     st.download_button(
         "下载历史搜索 CSV",
         data=result.results.to_csv(index=False).encode("utf-8-sig"),
@@ -767,6 +813,48 @@ def _load_target_bars_for_quick_window(
     )
 
 
+def _set_history_quick_window(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    symbol: str,
+    window_size: int,
+) -> None:
+    bars = _load_target_bars_for_quick_window(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        target_symbol=symbol,
+    )
+    as_of, message = _history_quick_window_feedback(bars, symbol, window_size)
+    st.session_state["history_as_of_date"] = as_of
+    st.session_state["history_window_size"] = window_size
+    st.session_state["history_quick_message"] = message
+
+
+def _history_quick_window_feedback(
+    bars: pd.DataFrame,
+    symbol: str,
+    window_size: int,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, str]:
+    normalized = normalize_symbol(symbol)
+    if window_size < 1:
+        raise ValueError("window_size 至少需要 1。")
+    if bars.empty:
+        fallback = (pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()).date()
+        return fallback, f"{normalized} 未找到本地行情，已按当前日期设置窗口结束日。"
+    dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values()
+    if dates.empty:
+        fallback = (pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()).date()
+        return fallback, f"{normalized} 未找到有效行情日期，已按当前日期设置窗口结束日。"
+    selected = dates.tail(window_size)
+    as_of = selected.iloc[-1].date()
+    if len(selected) < window_size:
+        return as_of, f"{normalized} 本地仅有 {len(selected)} 根K线，不足近 {window_size} 根；已使用最新可用日期。"
+    return as_of, f"{normalized} 已选择近 {window_size} 根K线，窗口结束日：{as_of:%Y-%m-%d}。"
+
+
 def _set_cross_quick_window(
     data_root: str,
     timeframe: str,
@@ -997,6 +1085,83 @@ def _cross_section_result_metrics(result: CrossSectionSearchResult) -> list[tupl
     return [("目标窗口 K 线数", f"{result.window_size:,}"), ("有效结果数", f"{len(result.results):,}")]
 
 
+def _history_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]]:
+    if frame.empty:
+        return [("有效样本", "0"), ("平均相似度", "-"), ("后验胜率", "-"), ("Top3后验均值", "-")]
+    similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
+    return_columns = _forward_return_columns(frame)
+    if not return_columns:
+        return [("有效样本", f"{len(frame):,}"), ("平均相似度", _percent_text(similarity.mean())), ("后验胜率", "-"), ("Top3后验均值", "-")]
+    values = pd.to_numeric(frame[return_columns[0]], errors="coerce")
+    horizon = return_columns[0].removeprefix("t_plus_").removesuffix("_return")
+    return [
+        ("有效样本", f"{len(frame):,}"),
+        ("平均相似度", _percent_text(similarity.mean())),
+        (f"后{horizon}根胜率", _percent_text((values.dropna() > 0).mean())),
+        (f"Top3后{horizon}根均值", _percent_text(values.head(3).mean())),
+    ]
+
+
+def _history_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
+    for column in _forward_return_columns(frame):
+        horizon = column.removeprefix("t_plus_").removesuffix("_return")
+        values = pd.to_numeric(frame[column], errors="coerce")
+        valid = values.dropna()
+        if valid.empty:
+            continue
+        best_index = values.idxmax()
+        worst_index = values.idxmin()
+        drawdowns = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_drawdown"), errors="coerce")
+        favorable = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_favorable"), errors="coerce")
+        rows.append(
+            {
+                "观察窗口": f"后{horizon}根",
+                "样本数": int(valid.count()),
+                "平均收益": float(valid.mean()),
+                "中位收益": float(valid.median()),
+                "胜率": float((valid > 0).mean()),
+                "平均最大回撤": float(drawdowns.mean()) if not drawdowns.dropna().empty else float("nan"),
+                "平均最大浮盈": float(favorable.mean()) if not favorable.dropna().empty else float("nan"),
+                "最好窗口": _history_window_label(frame, best_index),
+                "最好收益": float(values.loc[best_index]),
+                "最差窗口": _history_window_label(frame, worst_index),
+                "最差收益": float(values.loc[worst_index]),
+                "相似度-收益相关": _series_corr(similarity, values),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _history_bucket_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    if frame.empty:
+        return pd.DataFrame(rows)
+    buckets = [("Top3", 3), ("Top6", 6), ("Top10", 10), ("全部", len(frame))]
+    return_columns = _forward_return_columns(frame)
+    for label, size in buckets:
+        sample = frame.head(size)
+        row: dict[str, object] = {
+            "分层": label,
+            "样本数": int(len(sample)),
+            "平均综合相似度": float(pd.to_numeric(sample.get("综合相似度"), errors="coerce").mean()),
+        }
+        for column in return_columns:
+            horizon = column.removeprefix("t_plus_").removesuffix("_return")
+            values = pd.to_numeric(sample[column], errors="coerce").dropna()
+            row[f"后{horizon}根平均收益"] = float(values.mean()) if not values.empty else float("nan")
+            row[f"后{horizon}根胜率"] = float((values > 0).mean()) if not values.empty else float("nan")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _history_window_label(frame: pd.DataFrame, index: int) -> str:
+    if "窗口开始" not in frame.columns or "窗口结束" not in frame.columns:
+        return ""
+    return f"{_date_text(frame.loc[index, '窗口开始'])} 至 {_date_text(frame.loc[index, '窗口结束'])}"
+
+
 def _cross_section_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
@@ -1054,6 +1219,24 @@ def _format_cross_section_stats(frame: pd.DataFrame) -> pd.DataFrame:
         column
         for column in result.columns
         if any(keyword in column for keyword in ("收益", "胜率", "相似度", "波动"))
+        and "相关" not in column
+        and column != "样本数"
+    ]
+    result = _format_percent_columns(result, percent_columns)
+    for column in result.columns:
+        if "相关" in column:
+            result[column] = pd.to_numeric(result[column], errors="coerce").map(
+                lambda value: "" if pd.isna(value) else f"{value:.2f}"
+            )
+    return result
+
+
+def _format_history_stats(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    percent_columns = [
+        column
+        for column in result.columns
+        if any(keyword in column for keyword in ("收益", "胜率", "相似度", "回撤", "浮盈"))
         and "相关" not in column
         and column != "样本数"
     ]
@@ -1230,6 +1413,51 @@ def _history_path_chart(current_window: pd.DataFrame, historical_windows: list[p
         fig.add_scatter(x=x_values, y=path, mode="lines", name=label, opacity=0.65)
     fig.update_layout(title="当前窗口 vs 历史相似窗口", xaxis_title="窗口内第 N 根K线", yaxis_title="标准化路径")
     return fig
+
+
+def _history_kline_series(
+    bars: pd.DataFrame,
+    result: HistorySearchResult,
+    top_n: int = 6,
+    forward_bars: int = 10,
+) -> list[dict[str, object]]:
+    symbol_bars = bars.loc[bars["stock_code"] == result.symbol].sort_values("date").reset_index(drop=True)
+    if symbol_bars.empty:
+        return []
+    windows: list[tuple[str, pd.DataFrame]] = [("当前窗口", result.current_window)]
+    windows.extend((f"样本{index}", window) for index, window in enumerate(result.historical_windows[:top_n], start=1))
+    series: list[dict[str, object]] = []
+    for title, window in windows:
+        if window.empty:
+            continue
+        start = pd.Timestamp(window["date"].min())
+        end = inclusive_end_timestamp(window["date"].max())
+        chart_source = symbol_bars.loc[symbol_bars["date"] >= start].sort_values("date")
+        if chart_source.empty:
+            continue
+        matching_window = chart_source.loc[chart_source["date"] <= end]
+        if matching_window.empty:
+            continue
+        chart_window = chart_source.head(len(matching_window) + forward_bars)
+        series.append(
+            {
+                "title": title,
+                "windowEndTime": pd.Timestamp(matching_window["date"].iloc[-1]).strftime("%Y-%m-%d"),
+                "windowSize": int(len(matching_window)),
+                "forwardSize": int(max(0, len(chart_window) - len(matching_window))),
+                "data": [
+                    {
+                        "time": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                    }
+                    for _, row in chart_window.iterrows()
+                ],
+            }
+        )
+    return series
 
 
 def _parse_horizons(value: str) -> list[int]:
