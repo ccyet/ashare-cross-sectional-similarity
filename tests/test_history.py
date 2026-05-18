@@ -97,6 +97,53 @@ def test_search_history_does_not_use_data_after_as_of_for_matching() -> None:
     assert result.results["窗口开始"].max() < pd.Timestamp("2024-01-11")
 
 
+def test_search_history_uses_explicit_window_start_instead_of_backsolving() -> None:
+    bars = _bars(
+        "000001.SZ",
+        [
+            10, 11, 12, 11, 13,
+            15, 14,
+            20, 22, 24, 22, 26,
+            30, 31, 32,
+        ],
+    )
+
+    result = search_history(
+        bars,
+        HistorySearchConfig(
+            symbol="000001.SZ",
+            as_of="2024-01-12",
+            window_size=2,
+            window_start="2024-01-08",
+            forward_windows=(1,),
+            top_n=1,
+            exclusion_bars=0,
+            nearby_gap_days=0,
+        ),
+    )
+
+    assert result.window_size == 5
+    assert result.current_window["date"].min() == pd.Timestamp("2024-01-08")
+    assert result.current_window["date"].max() == pd.Timestamp("2024-01-12")
+    assert result.results["K线数量"].iloc[0] == 5
+    assert result.results["窗口开始"].iloc[0] == pd.Timestamp("2024-01-01")
+
+
+def test_search_history_rejects_too_short_explicit_window() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12])
+
+    with pytest.raises(ValueError, match="选定区间"):
+        search_history(
+            bars,
+            HistorySearchConfig(
+                symbol="000001.SZ",
+                as_of="2024-01-02",
+                window_size=2,
+                window_start="2024-01-02",
+            ),
+        )
+
+
 def test_search_history_date_only_as_of_includes_full_intraday_session() -> None:
     bars = pd.DataFrame(
         {

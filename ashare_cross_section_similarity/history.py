@@ -28,6 +28,7 @@ class HistorySearchConfig:
     exclusion_bars: int = 20
     nearby_gap_days: int = 20
     path_weight: float = 0.7
+    window_start: str | pd.Timestamp | None = None
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class HistorySearchResult:
 
 
 def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySearchResult:
-    if config.window_size < 2:
+    if config.window_start is None and config.window_size < 2:
         raise ValueError("window_size 至少需要 2。")
     if config.candidate_n < 1:
         raise ValueError("candidate_n 至少需要 1。")
@@ -63,12 +64,10 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
 
     as_of = inclusive_end_timestamp(config.as_of)
     available = prepared.loc[prepared["date"] <= as_of].copy()
-    if len(available) < config.window_size:
+    if config.window_start is None and len(available) < config.window_size:
         raise ValueError("as-of 之前数据不足，无法形成当前窗口。")
 
-    as_of_index = int(available.index[-1])
-    current_start = as_of_index - config.window_size + 1
-    current_window = prepared.iloc[current_start : as_of_index + 1].reset_index(drop=True)
+    current_window, current_start, as_of_index, window_size = _current_history_window(prepared, available, config)
     target_path = z_normalize(normalized_close_path(current_window))
     target_features = window_features(current_window)
     max_forward = max(config.forward_windows) if config.forward_windows else 0
@@ -76,7 +75,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
     starts = _candidate_starts(
         as_of_index=as_of_index,
         current_start=current_start,
-        window_size=config.window_size,
+        window_size=window_size,
         max_forward=max_forward,
         exclusion_bars=config.exclusion_bars,
     )
@@ -84,7 +83,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         prepared=prepared,
         symbol=symbol,
         starts=starts,
-        window_size=config.window_size,
+        window_size=window_size,
         target_path=target_path,
         target_features=target_features,
         forward_windows=config.forward_windows,
@@ -93,7 +92,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         return HistorySearchResult(
             symbol=symbol,
             as_of=as_of,
-            window_size=config.window_size,
+            window_size=window_size,
             current_window=current_window,
             historical_windows=[],
             results=result_frame,
@@ -108,7 +107,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
     ).reset_index(drop=True)
     selected_indices = pd.to_numeric(scored["_candidate_index"], errors="coerce").dropna().astype(int).tolist()
     selected_windows = [
-        prepared.iloc[starts[index] : starts[index] + config.window_size].reset_index(drop=True)
+        prepared.iloc[starts[index] : starts[index] + window_size].reset_index(drop=True)
         for index in selected_indices
         if 0 <= int(index) < len(starts)
     ]
@@ -116,11 +115,33 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
     return HistorySearchResult(
         symbol=symbol,
         as_of=as_of,
-        window_size=config.window_size,
+        window_size=window_size,
         current_window=current_window,
         historical_windows=selected_windows,
         results=scored.reset_index(drop=True),
     )
+
+
+def _current_history_window(
+    prepared: pd.DataFrame,
+    available: pd.DataFrame,
+    config: HistorySearchConfig,
+) -> tuple[pd.DataFrame, int, int, int]:
+    if config.window_start is None:
+        as_of_index = int(available.index[-1])
+        current_start = as_of_index - config.window_size + 1
+        current_window = prepared.iloc[current_start : as_of_index + 1].reset_index(drop=True)
+        return current_window, current_start, as_of_index, config.window_size
+
+    start = pd.Timestamp(config.window_start)
+    as_of = inclusive_end_timestamp(config.as_of)
+    selected = prepared.loc[prepared["date"].between(start, as_of)]
+    if len(selected) < 2:
+        raise ValueError("选定区间内 K 线数量不足，至少需要 2 根。")
+    current_start = int(selected.index[0])
+    as_of_index = int(selected.index[-1])
+    current_window = selected.reset_index(drop=True)
+    return current_window, current_start, as_of_index, int(len(current_window))
 
 
 def _candidate_starts(

@@ -104,9 +104,10 @@ def test_cross_section_result_metrics_are_one_row_pair() -> None:
 def test_history_quick_window_feedback_uses_latest_local_bar() -> None:
     bars = _bars("000001.SZ", [10, 11, 12])
 
-    as_of, message = _history_quick_window_feedback(bars, "000001.SZ", 3)
+    start, end, message = _history_quick_window_feedback(bars, "000001.SZ", 3)
 
-    assert as_of == pd.Timestamp("2024-01-03").date()
+    assert start == pd.Timestamp("2024-01-01").date()
+    assert end == pd.Timestamp("2024-01-03").date()
     assert "000001.SZ 已选择近 3 根K线" in message
 
 

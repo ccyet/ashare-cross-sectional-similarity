@@ -291,22 +291,25 @@ def _render_history_tab(
     download_engine: str,
 ) -> None:
     st.subheader("同一标的历史时序相似")
-    st.caption("选定一个标的和当前窗口结束日，系统只在这个标的自己的历史里找相似阶段。")
+    st.caption("选定一个标的和一段自定义区间，系统只在这个标的自己的历史里找相似阶段。")
     col1, col2, col3, col4 = st.columns(4)
     symbol = col1.text_input("目标代码", value="399006.SZ", key="history_symbol")
-    as_of_input = {"key": "history_as_of_date"}
-    if "history_as_of_date" not in st.session_state:
-        as_of_input["value"] = date(2024, 3, 31)
-    as_of_date = col2.date_input("当前窗口结束", **as_of_input)
-    window_size = col3.selectbox("主走势窗口", [5, 10, 20, 60, 120], index=2, key="history_window_size")
+    start_input = {"key": "history_start_date"}
+    end_input = {"key": "history_end_date"}
+    if "history_start_date" not in st.session_state:
+        start_input["value"] = date(2024, 3, 4)
+    if "history_end_date" not in st.session_state:
+        end_input["value"] = date(2024, 3, 31)
+    start_date = col2.date_input("区间开始", **start_input)
+    end_date = col3.date_input("区间结束", **end_input)
     top_n = col4.number_input("展示数量", min_value=1, max_value=50, value=10, step=1, key="history_top_n")
     quick_cols = st.columns(7)
-    quick_cols[0].caption("快捷窗口")
+    quick_cols[0].caption("快捷区间")
     quick_cols[1].button(
         "最新收盘",
         key="history_quick_latest",
-        on_click=_set_history_quick_window,
-        args=(data_root, timeframe, adjust, symbol, int(window_size)),
+        on_click=_set_history_latest_end,
+        args=(data_root, timeframe, adjust, symbol),
     )
     for button_col, quick_window_size in zip(quick_cols[2:], [5, 10, 20, 60, 120]):
         button_col.button(
@@ -324,7 +327,8 @@ def _render_history_tab(
     exclusion_bars = col7.number_input("排除近邻K线", min_value=0, max_value=500, value=20, step=5, key="history_exclusion_bars")
     nearby_gap_days = col8.number_input("样本间隔天数", min_value=0, max_value=365, value=20, step=5, key="history_gap_days")
     path_weight = st.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="history_path_weight")
-    as_of = pd.Timestamp(as_of_date).strftime("%Y-%m-%d")
+    start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+    as_of = pd.Timestamp(end_date).strftime("%Y-%m-%d")
 
     st.markdown("**1. 数据检查**")
     bars = _cached_load_local_bars(
@@ -335,16 +339,17 @@ def _render_history_tab(
         start="1900-01-01",
         end=as_of,
     )
+    selected_window = bars.loc[bars["date"].between(pd.Timestamp(start), inclusive_end_timestamp(as_of))] if not bars.empty else bars
     if bars.empty:
-        st.error("未找到该标的在 as-of 之前的本地行情。请先下载或检查代码、周期、复权目录。")
+        st.error("未找到该标的在区间结束前的本地行情。请先下载或检查代码、周期、复权目录。")
     else:
         cols = st.columns(4)
         cols[0].metric("可用K线", f"{len(bars):,}")
         cols[1].metric("最早日期", _date_text(bars["date"].min()))
         cols[2].metric("最近日期", _date_text(bars["date"].max()))
-        cols[3].metric("窗口要求", f"{int(window_size)} 根")
-        if len(bars) < int(window_size):
-            st.warning("as-of 之前 K 线数量不足，无法形成当前窗口。")
+        cols[3].metric("选定区间K线", f"{len(selected_window):,} 根")
+        if len(selected_window) < 2:
+            st.warning("选定区间内 K 线数量不足，至少需要 2 根。")
 
     with st.expander("缺数据时下载或更新"):
         download_start = st.text_input("下载开始", value="2018-01-01", key="history_download_start")
@@ -375,7 +380,8 @@ def _render_history_tab(
             HistorySearchConfig(
                 symbol=symbol,
                 as_of=as_of,
-                window_size=int(window_size),
+                window_size=max(2, int(len(selected_window))),
+                window_start=start,
                 forward_windows=tuple(horizons),
                 candidate_n=int(candidate_n),
                 top_n=int(top_n),
@@ -851,10 +857,32 @@ def _set_history_quick_window(
         adjust=adjust,
         target_symbol=symbol,
     )
-    as_of, message = _history_quick_window_feedback(bars, symbol, window_size)
-    st.session_state["history_as_of_date"] = as_of
-    st.session_state["history_window_size"] = window_size
+    start, end, message = _history_quick_window_feedback(bars, symbol, window_size)
+    st.session_state["history_start_date"] = start
+    st.session_state["history_end_date"] = end
     st.session_state["history_quick_message"] = message
+
+
+def _set_history_latest_end(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    symbol: str,
+) -> None:
+    bars = _load_target_bars_for_quick_window(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        target_symbol=symbol,
+    )
+    normalized = normalize_symbol(symbol)
+    dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values() if not bars.empty else pd.Series(dtype="datetime64[ns]")
+    if dates.empty:
+        st.session_state["history_quick_message"] = f"{normalized} 未找到本地行情，无法设置最新收盘日。"
+        return
+    end = dates.iloc[-1].date()
+    st.session_state["history_end_date"] = end
+    st.session_state["history_quick_message"] = f"{normalized} 已将区间结束设为最新本地收盘日：{end:%Y-%m-%d}。"
 
 
 def _history_quick_window_feedback(
@@ -862,22 +890,23 @@ def _history_quick_window_feedback(
     symbol: str,
     window_size: int,
     today: pd.Timestamp | None = None,
-) -> tuple[date, str]:
+) -> tuple[date, date, str]:
     normalized = normalize_symbol(symbol)
     if window_size < 1:
         raise ValueError("window_size 至少需要 1。")
     if bars.empty:
         fallback = (pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()).date()
-        return fallback, f"{normalized} 未找到本地行情，已按当前日期设置窗口结束日。"
+        return fallback, fallback, f"{normalized} 未找到本地行情，已按当前日期设置区间。"
     dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values()
     if dates.empty:
         fallback = (pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()).date()
-        return fallback, f"{normalized} 未找到有效行情日期，已按当前日期设置窗口结束日。"
+        return fallback, fallback, f"{normalized} 未找到有效行情日期，已按当前日期设置区间。"
     selected = dates.tail(window_size)
-    as_of = selected.iloc[-1].date()
+    start = selected.iloc[0].date()
+    end = selected.iloc[-1].date()
     if len(selected) < window_size:
-        return as_of, f"{normalized} 本地仅有 {len(selected)} 根K线，不足近 {window_size} 根；已使用最新可用日期。"
-    return as_of, f"{normalized} 已选择近 {window_size} 根K线，窗口结束日：{as_of:%Y-%m-%d}。"
+        return start, end, f"{normalized} 本地仅有 {len(selected)} 根K线，不足近 {window_size} 根；已使用全部可用区间。"
+    return start, end, f"{normalized} 已选择近 {window_size} 根K线：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}。"
 
 
 def _set_cross_quick_window(
