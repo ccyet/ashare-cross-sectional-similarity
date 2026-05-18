@@ -221,6 +221,39 @@ def test_data_check_reports_missing_and_available_symbols(tmp_path: Path) -> Non
     ]
 
 
+def test_data_check_reports_partial_window_when_range_is_not_fully_covered(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-05", "2024-01-08"],
+            "stock_code": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = data_check(
+        symbols=("000001.SZ",),
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-01-01",
+        end="2024-01-10",
+    )
+
+    row = out.iloc[0]
+    assert row["status"] == "partial_window"
+    assert row["rows"] == 2
+    assert row["start"] == pd.Timestamp("2024-01-05")
+    assert row["end"] == pd.Timestamp("2024-01-08")
+    assert "覆盖不足" in row["message"]
+
+
 def test_data_check_reads_only_date_column(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)

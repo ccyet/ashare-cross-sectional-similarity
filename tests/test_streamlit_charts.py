@@ -35,6 +35,7 @@ from streamlit_app import (
     _lightweight_kline_series,
     _picker_initial_directory,
     _pin_symbol_row,
+    _repair_partial_download_start,
     _stock_name_map_from_table,
     _symbols_requiring_download,
 )
@@ -735,12 +736,36 @@ def test_pin_symbol_row_keeps_target_visible_at_top() -> None:
 def test_symbols_requiring_download_skips_available() -> None:
     check = pd.DataFrame(
         {
-            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000002.SZ"],
-            "status": ["available", "missing_file", "missing_window", "read_error", "missing_file"],
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000002.SZ"],
+            "status": ["available", "missing_file", "missing_window", "read_error", "partial_window", "missing_file"],
         }
     )
 
-    assert _symbols_requiring_download(check) == ["000002.SZ", "000003.SZ", "000004.SZ"]
+    assert _symbols_requiring_download(check) == ["000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"]
+
+
+def test_repair_partial_download_start_forces_gap_backfill_from_existing_min(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame({"date": ["2024-01-02", "2026-03-25"]}).to_parquet(qfq / "000012.SZ.parquet", index=False)
+    check_row = pd.Series(
+        {
+            "symbol": "000012.SZ",
+            "status": "partial_window",
+            "start": pd.Timestamp("2026-03-25"),
+            "end": pd.Timestamp("2026-05-15"),
+        }
+    )
+
+    repaired = _repair_partial_download_start(
+        check_row,
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        requested_start="2025-07-31",
+    )
+
+    assert repaired == "2024-01-01"
 
 
 def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> None:
@@ -800,7 +825,7 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
         result,
         pd.DataFrame(
             [
-                {"symbol": "000001.SZ", "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "下载命令执行后仍缺本地 parquet；本地 parquet 不存在"},
+                {"symbol": "000001.SZ", "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "下载命令执行后仍未完整覆盖；本地 parquet 不存在"},
                 {
                     "symbol": "000002.SZ",
                     "status": "available",

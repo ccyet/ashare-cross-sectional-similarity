@@ -19,6 +19,7 @@ from ashare_cross_section_similarity.data import (
     inclusive_end_timestamp,
     load_local_bars,
     read_price_data_file,
+    resolve_timeframe_root,
 )
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
@@ -33,7 +34,7 @@ from ashare_cross_section_similarity.universe import normalize_symbol, unique_sy
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
-DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
+DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "partial_window", "read_error"}
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
@@ -559,11 +560,12 @@ def _render_cross_section_tab(
         normalized_targets = unique_symbols([target_symbol])
         normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
         target_check = check.loc[check["symbol"] == normalized_target]
-        cols = st.columns(4)
+        cols = st.columns(5)
         cols[0].metric("搜索范围", f"{len(universe):,}")
-        cols[1].metric("可用标的", f"{int((check['status'] == 'available').sum()):,}")
-        cols[2].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
-        cols[3].metric("区间缺失", f"{int((check['status'] == 'missing_window').sum()):,}")
+        cols[1].metric("完整覆盖", f"{int((check['status'] == 'available').sum()):,}")
+        cols[2].metric("覆盖不足", f"{int((check['status'] == 'partial_window').sum()):,}")
+        cols[3].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
+        cols[4].metric("区间无数据", f"{int((check['status'] == 'missing_window').sum()):,}")
         if not target_check.empty:
             target_row = target_check.iloc[0]
             st.info(
@@ -578,7 +580,7 @@ def _render_cross_section_tab(
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
     st.markdown("**2. 数据抓取 / 更新**")
-    st.caption("先检查覆盖，只补缺文件、区间缺失或读取失败的标的；默认委托 trend-backtest。")
+    st.caption("先检查覆盖，只补缺文件、覆盖不足、区间无数据或读取失败的标的；默认委托 trend-backtest。")
     if st.button("检查并下载缺失行情", key="cross_download"):
         download_end = coverage_end
         normalized_targets = unique_symbols([target_symbol])
@@ -954,11 +956,28 @@ def _download_symbols_with_progress(
     for index, symbol in enumerate(normalized):
         if progress_callback is not None:
             progress_callback(index, total, symbol, "running")
+        before = data_check(
+            symbols=[symbol],
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+        download_start = start
+        if not before.empty:
+            download_start = _repair_partial_download_start(
+                before.iloc[0],
+                data_root=data_root,
+                timeframe=timeframe,
+                adjust=adjust,
+                requested_start=start,
+            )
         result = update_local_bars(
             symbols=[symbol],
             timeframe=timeframe,
             adjust=adjust,
-            start=start,
+            start=download_start,
             end=end,
             trend_repo=trend_repo,
             data_root=data_root,
@@ -977,7 +996,7 @@ def _download_symbols_with_progress(
             checked = result
         elif not result.empty and str(checked["status"].iloc[0]) != "available":
             message = str(checked["message"].iloc[0]) if "message" in checked.columns else ""
-            checked.loc[checked.index[0], "message"] = f"下载命令执行后仍缺本地 parquet；{message}".rstrip("；")
+            checked.loc[checked.index[0], "message"] = f"下载命令执行后仍未完整覆盖；{message}".rstrip("；")
         rows.append(checked.iloc[0].to_dict())
         status = str(checked["status"].iloc[0]) if not checked.empty and "status" in checked.columns else "unknown"
         if progress_callback is not None:
@@ -990,6 +1009,38 @@ def _symbols_requiring_download(check: pd.DataFrame) -> list[str]:
         return []
     missing = check.loc[check["status"].astype(str).isin(DOWNLOAD_REQUIRED_STATUSES), "symbol"]
     return unique_symbols(missing.astype(str).tolist())
+
+
+def _repair_partial_download_start(
+    check_row: pd.Series,
+    *,
+    data_root: str | Path,
+    timeframe: str,
+    adjust: str,
+    requested_start: str | pd.Timestamp,
+) -> str:
+    requested_start_ts = pd.Timestamp(requested_start)
+    if str(check_row.get("status", "")) != "partial_window":
+        return requested_start_ts.strftime("%Y-%m-%d")
+    actual_start = pd.to_datetime(check_row.get("start"), errors="coerce")
+    if pd.isna(actual_start) or actual_start.normalize() <= requested_start_ts.normalize():
+        return requested_start_ts.strftime("%Y-%m-%d")
+    symbol = normalize_symbol(str(check_row.get("symbol", "")))
+    if not symbol:
+        return requested_start_ts.strftime("%Y-%m-%d")
+    file_path = resolve_timeframe_root(data_root, timeframe) / adjust / f"{symbol}.parquet"
+    if not file_path.exists():
+        return requested_start_ts.strftime("%Y-%m-%d")
+    try:
+        dates = pd.to_datetime(pd.read_parquet(file_path, columns=["date"])["date"], errors="coerce").dropna()
+    except Exception:  # noqa: BLE001
+        return requested_start_ts.strftime("%Y-%m-%d")
+    if dates.empty:
+        return requested_start_ts.strftime("%Y-%m-%d")
+    earliest = dates.min().normalize()
+    if earliest < requested_start_ts.normalize():
+        return (earliest - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    return requested_start_ts.strftime("%Y-%m-%d")
 
 
 def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None = None) -> str:

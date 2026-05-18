@@ -214,6 +214,8 @@ def data_check(
     root = resolve_timeframe_root(data_root, timeframe) / adjust
     start_ts = pd.Timestamp(start)
     end_ts = inclusive_end_timestamp(end)
+    requested_start_day = start_ts.normalize()
+    requested_end_day = pd.Timestamp(end).normalize()
     rows: list[dict[str, object]] = []
     for symbol in unique_symbols(symbols):
         file_path = root / f"{symbol}.parquet"
@@ -224,8 +226,17 @@ def data_check(
             frame = pd.read_parquet(file_path, columns=["date"])
             frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
             window = frame.loc[frame["date"].between(start_ts, end_ts)]
-            status = "available" if not window.empty else "missing_window"
-            message = "" if status == "available" else "所选区间无行情"
+            if window.empty:
+                status = "missing_window"
+                message = "所选区间无行情"
+            else:
+                window_start_day = pd.Timestamp(window["date"].min()).normalize()
+                window_end_day = pd.Timestamp(window["date"].max()).normalize()
+                status = "available"
+                message = ""
+                if window_start_day > requested_start_day or window_end_day < requested_end_day:
+                    status = "partial_window"
+                    message = f"区间覆盖不足，实际覆盖 {_date_text(window_start_day)} 至 {_date_text(window_end_day)}"
             rows.append(
                 _check_row(
                     symbol,
@@ -239,6 +250,12 @@ def data_check(
         except Exception as exc:  # noqa: BLE001
             rows.append(_check_row(symbol, "read_error", 0, None, None, str(exc)))
     return pd.DataFrame(rows)
+
+
+def _date_text(value: object) -> str:
+    if pd.isna(value):
+        return "-"
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
 def _run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
