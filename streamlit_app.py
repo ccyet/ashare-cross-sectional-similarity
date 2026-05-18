@@ -36,6 +36,7 @@ PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "partial_window", "read_error"}
 DOWNLOAD_BATCH_SIZE = 100
+DOWNLOAD_JOB_STATUSES = {"running", "paused", "completed"}
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
@@ -445,14 +446,7 @@ def _render_history_tab(
     with st.expander("缺数据时下载或更新"):
         download_start = st.text_input("下载开始", value="2018-01-01", key="history_download_start")
         if st.button("下载或更新该标的行情", key="history_download"):
-            progress = st.progress(0.0)
-            status_text = st.empty()
-
-            def _history_download_progress(done: int, total: int, current_symbol: str, status: str) -> None:
-                progress.progress(done / total if total else 1.0)
-                status_text.write(f"{done}/{total} {current_symbol}：{status}")
-
-            update_result = _download_symbols_with_progress(
+            st.session_state["history_download_job"] = _create_download_job(
                 symbols=[normalized_symbol],
                 timeframe=timeframe,
                 adjust=adjust,
@@ -462,10 +456,9 @@ def _render_history_tab(
                 data_root=Path(data_root),
                 provider=provider,
                 download_engine=download_engine,
-                progress_callback=_history_download_progress,
             )
-            st.cache_data.clear()
-            st.dataframe(_centered(_format_data_check_status(update_result)), use_container_width=True, hide_index=True)
+            st.rerun()
+        _render_download_job("history_download_job", target_symbol=normalized_symbol)
 
     st.markdown("**2. 运行历史搜索**")
     if not st.button("运行历史时序搜索", type="primary", key="history_run"):
@@ -687,10 +680,9 @@ def _render_cross_section_tab(
 
     st.markdown("**2. 数据抓取 / 更新**")
     st.caption("先检查覆盖，只补缺文件、覆盖不足、区间无数据或读取失败的标的；按侧栏下载引擎执行。")
+    normalized_targets = unique_symbols([target_symbol])
+    normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
     if st.button("检查并下载缺失行情", key="cross_download"):
-        download_end = coverage_end
-        normalized_targets = unique_symbols([target_symbol])
-        normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
         check_for_download = check if check is not None and st.session_state.get("cross_data_check_key") == check_key else None
         if check_for_download is None:
             with st.spinner("先检查本地数据覆盖..."):
@@ -716,33 +708,25 @@ def _render_cross_section_tab(
             )
         else:
             st.info(f"本次仅下载缺失标的 {len(download_symbols):,} / {len(unique_symbols(symbols)):,} 个。")
-            progress_bar = st.progress(0.0, text=f"准备下载 {len(download_symbols):,} 个缺失标的")
-            progress_text = st.empty()
-
-            def report_progress(completed: int, total: int, symbol: str, status: str) -> None:
-                ratio = completed / total if total else 1.0
-                action = "正在下载" if status == "running" else "已完成"
-                progress_bar.progress(ratio, text=f"{completed}/{total} {action} {symbol}")
-                progress_text.caption(f"当前标的：{symbol}；状态：{status}")
-
-            update_result = _download_symbols_with_progress(
+            st.session_state["cross_download_job"] = _create_download_job(
                 symbols=download_symbols,
                 timeframe=timeframe,
                 adjust=adjust,
                 start=coverage_start,
-                end=download_end,
+                end=coverage_end,
                 trend_repo=Path(trend_repo),
                 data_root=Path(data_root),
                 provider=provider,
                 download_engine=download_engine,
-                progress_callback=report_progress,
             )
-            progress_bar.progress(1.0, text="下载任务已完成")
-            progress_text.caption(f"下载区间：{coverage_start} 至 {download_end}，用于覆盖日期容错和窗口后 3/5/10 根收益统计。")
-            st.cache_data.clear()
-            st.session_state.pop("cross_data_check", None)
-            st.session_state.pop("cross_data_check_key", None)
-            st.dataframe(_centered(_format_data_check_status(_pin_symbol_row(update_result, normalized_target))), use_container_width=True, hide_index=True)
+            st.rerun()
+
+    update_result = _render_download_job("cross_download_job", target_symbol=normalized_target)
+    job = st.session_state.get("cross_download_job")
+    if job is not None and job.get("status") == "completed":
+        st.session_state.pop("cross_data_check", None)
+        st.session_state.pop("cross_data_check_key", None)
+        if not update_result.empty and normalized_target in set(update_result.get("symbol", pd.Series(dtype=str)).astype(str)):
             target_status = update_result.loc[update_result["symbol"] == normalized_target, "status"]
             if not target_status.empty and target_status.iloc[0] != "available":
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
@@ -1136,6 +1120,129 @@ def _download_symbols_with_progress(
                 if progress_callback is not None:
                     progress_callback(completed, total, str(row.get("symbol", "")), status)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
+
+
+def _create_download_job(
+    *,
+    symbols: list[str] | tuple[str, ...],
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+    trend_repo: Path,
+    data_root: Path,
+    provider: str,
+    download_engine: str,
+    batch_size: int = DOWNLOAD_BATCH_SIZE,
+) -> dict[str, object]:
+    normalized = unique_symbols(symbols)
+    return {
+        "symbols": normalized,
+        "timeframe": timeframe,
+        "adjust": adjust,
+        "start": start,
+        "end": end,
+        "trend_repo": trend_repo,
+        "data_root": data_root,
+        "provider": provider,
+        "download_engine": download_engine,
+        "batch_size": batch_size,
+        "cursor": 0,
+        "rows": [],
+        "status": "running" if normalized else "completed",
+    }
+
+
+def _set_download_job_status(job: dict[str, object], status: str) -> None:
+    if status not in DOWNLOAD_JOB_STATUSES:
+        raise ValueError(f"未知下载任务状态：{status}")
+    job["status"] = status
+
+
+def _run_download_job_step(job: dict[str, object]) -> pd.DataFrame:
+    if job.get("status") != "running":
+        return pd.DataFrame()
+    symbols = list(job.get("symbols", []))
+    cursor = int(job.get("cursor", 0))
+    batch_size = int(job.get("batch_size", DOWNLOAD_BATCH_SIZE))
+    if batch_size < 1:
+        raise ValueError("batch_size 至少需要 1。")
+    batch_symbols = symbols[cursor : cursor + batch_size]
+    if not batch_symbols:
+        job["status"] = "completed"
+        return pd.DataFrame()
+    result = _download_symbols_with_progress(
+        symbols=batch_symbols,
+        timeframe=str(job["timeframe"]),
+        adjust=str(job["adjust"]),
+        start=str(job["start"]),
+        end=str(job["end"]),
+        trend_repo=Path(job["trend_repo"]),
+        data_root=Path(job["data_root"]),
+        provider=str(job["provider"]),
+        download_engine=str(job["download_engine"]),
+    )
+    rows = list(job.get("rows", []))
+    rows.extend(result.to_dict("records"))
+    job["rows"] = rows
+    job["cursor"] = min(cursor + len(batch_symbols), len(symbols))
+    if int(job["cursor"]) >= len(symbols):
+        job["status"] = "completed"
+    return result
+
+
+def _download_job_result_frame(job: dict[str, object]) -> pd.DataFrame:
+    rows = list(job.get("rows", []))
+    if not rows:
+        return pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
+    return pd.DataFrame(rows)
+
+
+def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFrame:
+    job = st.session_state.get(job_key)
+    if not isinstance(job, dict):
+        return pd.DataFrame()
+    status = str(job.get("status", ""))
+    button_cols = st.columns([1, 1, 3])
+    if status == "running":
+        if button_cols[0].button("暂停下载", key=f"{job_key}_pause"):
+            _set_download_job_status(job, "paused")
+            st.rerun()
+    elif status == "paused":
+        if button_cols[0].button("继续下载", key=f"{job_key}_resume"):
+            _set_download_job_status(job, "running")
+            st.rerun()
+    if button_cols[1].button("清除任务", key=f"{job_key}_clear"):
+        st.session_state.pop(job_key, None)
+        st.rerun()
+
+    if status == "running":
+        with st.spinner("正在下载下一批行情..."):
+            _run_download_job_step(job)
+        st.cache_data.clear()
+        if job.get("status") == "running":
+            st.rerun()
+
+    total = len(list(job.get("symbols", [])))
+    cursor = int(job.get("cursor", 0))
+    status = str(job.get("status", ""))
+    ratio = cursor / total if total else 1.0
+    label = {
+        "running": "下载中",
+        "paused": "已暂停",
+        "completed": "下载完成",
+    }.get(status, status)
+    st.progress(ratio, text=f"{cursor}/{total} {label}")
+
+    result = _download_job_result_frame(job)
+    if not result.empty:
+        display = _pin_symbol_row(result, target_symbol) if target_symbol else result
+        st.dataframe(_centered(_format_data_check_status(display)), use_container_width=True, hide_index=True)
+    if job.get("status") == "paused":
+        st.info("下载已暂停，点击继续下载会从下一批接着跑。")
+    elif job.get("status") == "completed":
+        st.success("下载任务已完成。")
+    return result
 
 
 def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:

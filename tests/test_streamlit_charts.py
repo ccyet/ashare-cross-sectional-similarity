@@ -16,6 +16,7 @@ from streamlit_app import (
     _cross_section_price_chart,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
+    _create_download_job,
     _date_input_args,
     _directory_picker_entries,
     _download_symbols_with_progress,
@@ -41,6 +42,8 @@ from streamlit_app import (
     _pin_symbol_row,
     _pick_directory_with_system_dialog,
     _repair_partial_download_start,
+    _run_download_job_step,
+    _set_download_job_status,
     _stock_name_map_from_table,
     _symbols_requiring_download,
 )
@@ -982,3 +985,77 @@ def test_download_symbols_with_progress_batches_symbols_with_same_start(monkeypa
             ]
         ),
     )
+
+
+def test_download_job_can_pause_between_batches(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_update_local_bars(**kwargs: object) -> pd.DataFrame:
+        symbols = tuple(kwargs["symbols"])
+        calls.append(symbols)
+        return pd.DataFrame(
+            [
+                {"symbol": symbol, "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"}
+                for symbol in symbols
+            ]
+        )
+
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                }
+                for symbol in kwargs["symbols"]
+            ]
+        )
+
+    monkeypatch.setattr("streamlit_app.update_local_bars", fake_update_local_bars)
+    monkeypatch.setattr("streamlit_app.data_check", fake_data_check)
+    job = _create_download_job(
+        symbols=["000001.SZ", "000002.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-01-01",
+        end="2024-01-31",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="trend",
+        batch_size=1,
+    )
+
+    _set_download_job_status(job, "paused")
+    paused_result = _run_download_job_step(job)
+
+    assert paused_result.empty
+    assert calls == []
+    assert job["status"] == "paused"
+    assert job["cursor"] == 0
+
+    _set_download_job_status(job, "running")
+    first_result = _run_download_job_step(job)
+
+    assert calls == [("000001.SZ",)]
+    assert first_result["symbol"].tolist() == ["000001.SZ"]
+    assert job["status"] == "running"
+    assert job["cursor"] == 1
+
+    _set_download_job_status(job, "paused")
+    second_paused_result = _run_download_job_step(job)
+
+    assert second_paused_result.empty
+    assert calls == [("000001.SZ",)]
+
+    _set_download_job_status(job, "running")
+    second_result = _run_download_job_step(job)
+
+    assert calls == [("000001.SZ",), ("000002.SZ",)]
+    assert second_result["symbol"].tolist() == ["000002.SZ"]
+    assert job["status"] == "completed"
+    assert job["cursor"] == 2
