@@ -251,6 +251,10 @@ def test_data_check_reports_partial_window_when_range_is_not_fully_covered(tmp_p
     assert row["rows"] == 2
     assert row["start"] == pd.Timestamp("2024-01-05")
     assert row["end"] == pd.Timestamp("2024-01-08")
+    assert row["requested_start"] == pd.Timestamp("2024-01-01")
+    assert row["requested_end"] == pd.Timestamp("2024-01-10")
+    assert row["local_start"] == pd.Timestamp("2024-01-05")
+    assert row["local_end"] == pd.Timestamp("2024-01-08")
     assert "覆盖不足" in row["message"]
 
 

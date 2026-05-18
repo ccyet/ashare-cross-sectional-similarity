@@ -330,6 +330,9 @@ def _render_history_tab(
     path_weight = st.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="history_path_weight")
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     as_of = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    if error := _date_range_error(start, as_of):
+        st.error(error)
+        return
 
     st.markdown("**1. 数据检查**")
     bars = _cached_load_local_bars(
@@ -499,6 +502,11 @@ def _render_cross_section_tab(
         st.info(st.session_state["cross_quick_message"])
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    if error := _date_range_error(start, end):
+        st.error(error)
+        st.session_state.pop("cross_data_check", None)
+        st.session_state.pop("cross_data_check_key", None)
+        return
     col4, col5, col6, col10 = st.columns(4)
     top_n = col4.number_input("展示数量", min_value=5, max_value=100, value=20, step=5, key="cross_top_n")
     date_tolerance_bars = col5.number_input(
@@ -543,6 +551,7 @@ def _render_cross_section_tab(
     check_key = (tuple(symbols), data_root, timeframe, adjust, coverage_start, coverage_end, start, end, tolerance_bars)
     if st.button("检查本地数据覆盖", key="cross_check"):
         try:
+            _cached_data_check.clear()
             st.session_state["cross_data_check_key"] = check_key
             st.session_state["cross_data_check"] = _cached_data_check(
                 tuple(symbols),
@@ -571,11 +580,12 @@ def _render_cross_section_tab(
             st.info(
                 f"目标标的 {normalized_target}：{target_row['status']}，"
                 f"{int(target_row['rows'])} 根，"
-                f"{_date_text(target_row['start'])} 至 {_date_text(target_row['end'])}"
+                f"请求 {_date_text(target_row.get('requested_start'))} 至 {_date_text(target_row.get('requested_end'))}；"
+                f"本地 {_date_text(target_row.get('local_start'))} 至 {_date_text(target_row.get('local_end'))}"
             )
         else:
             st.warning(f"目标标的 {normalized_target} 不在本次检查结果中，请确认目标代码输入。")
-        st.dataframe(_centered(_format_status(_pin_symbol_row(check, normalized_target, limit=200))), use_container_width=True, hide_index=True)
+        st.dataframe(_centered(_format_data_check_status(_pin_symbol_row(check, normalized_target, limit=200))), use_container_width=True, hide_index=True)
     else:
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
@@ -603,7 +613,7 @@ def _render_cross_section_tab(
         if not download_symbols:
             st.success("所选区间本地行情已覆盖，无需下载。")
             st.dataframe(
-                _centered(_format_status(_pin_symbol_row(check_for_download, normalized_target))),
+                _centered(_format_data_check_status(_pin_symbol_row(check_for_download, normalized_target))),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -635,7 +645,7 @@ def _render_cross_section_tab(
             st.cache_data.clear()
             st.session_state.pop("cross_data_check", None)
             st.session_state.pop("cross_data_check_key", None)
-            st.dataframe(_centered(_format_status(_pin_symbol_row(update_result, normalized_target))), use_container_width=True, hide_index=True)
+            st.dataframe(_centered(_format_data_check_status(_pin_symbol_row(update_result, normalized_target))), use_container_width=True, hide_index=True)
             target_status = update_result.loc[update_result["symbol"] == normalized_target, "status"]
             if not target_status.empty and target_status.iloc[0] != "available":
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
@@ -1535,6 +1545,35 @@ def _format_status(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _format_data_check_status(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "requested_start" not in result.columns:
+        result["requested_start"] = result.get("start", pd.NA)
+    if "requested_end" not in result.columns:
+        result["requested_end"] = result.get("end", pd.NA)
+    if "local_start" not in result.columns:
+        result["local_start"] = result.get("start", pd.NA)
+    if "local_end" not in result.columns:
+        result["local_end"] = result.get("end", pd.NA)
+    display_columns = [
+        column
+        for column in ["symbol", "status", "rows", "requested_start", "requested_end", "local_start", "local_end", "message"]
+        if column in result.columns
+    ]
+    result = result[display_columns]
+    for column in ["requested_start", "requested_end", "local_start", "local_end"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    return result.rename(
+        columns={
+            "requested_start": "请求开始",
+            "requested_end": "请求结束",
+            "local_start": "本地开始",
+            "local_end": "本地结束",
+        }
+    )
+
+
 def _format_import_status(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     for column in ["start", "end"]:
@@ -1724,6 +1763,10 @@ def _parse_horizons(value: str) -> list[int]:
     if not horizons or any(item <= 0 for item in horizons):
         raise ValueError("后验观察窗口必须是逗号分隔的正整数。")
     return horizons
+
+
+def _date_range_error(start: str | pd.Timestamp, end: str | pd.Timestamp) -> str:
+    return "区间开始不能晚于区间结束。" if pd.Timestamp(start) > pd.Timestamp(end) else ""
 
 
 def _date_text(value: object) -> str:

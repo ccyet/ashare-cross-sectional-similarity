@@ -220,12 +220,25 @@ def data_check(
     for symbol in unique_symbols(symbols):
         file_path = root / f"{symbol}.parquet"
         if not file_path.exists():
-            rows.append(_check_row(symbol, "missing_file", 0, None, None, "本地 parquet 不存在"))
+            rows.append(
+                _check_row(
+                    symbol,
+                    "missing_file",
+                    0,
+                    None,
+                    None,
+                    "本地 parquet 不存在",
+                    requested_start=requested_start_day,
+                    requested_end=requested_end_day,
+                )
+            )
             continue
         try:
             frame = pd.read_parquet(file_path, columns=["date"])
             frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
             window = frame.loc[frame["date"].between(start_ts, end_ts)]
+            local_start = frame["date"].min()
+            local_end = frame["date"].max()
             if window.empty:
                 status = "missing_window"
                 message = "所选区间无行情"
@@ -245,10 +258,25 @@ def data_check(
                     window["date"].min() if not window.empty else frame["date"].min(),
                     window["date"].max() if not window.empty else frame["date"].max(),
                     message,
+                    requested_start=requested_start_day,
+                    requested_end=requested_end_day,
+                    local_start=local_start,
+                    local_end=local_end,
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            rows.append(_check_row(symbol, "read_error", 0, None, None, str(exc)))
+            rows.append(
+                _check_row(
+                    symbol,
+                    "read_error",
+                    0,
+                    None,
+                    None,
+                    str(exc),
+                    requested_start=requested_start_day,
+                    requested_end=requested_end_day,
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -275,6 +303,11 @@ def _check_row(
     start: object,
     end: object,
     message: str,
+    *,
+    requested_start: object = None,
+    requested_end: object = None,
+    local_start: object = None,
+    local_end: object = None,
 ) -> dict[str, object]:
     return {
         "symbol": symbol,
@@ -282,6 +315,10 @@ def _check_row(
         "rows": rows,
         "start": start,
         "end": end,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "local_start": local_start if local_start is not None else start,
+        "local_end": local_end if local_end is not None else end,
         "message": message,
     }
 

@@ -20,6 +20,7 @@ from streamlit_app import (
     _download_symbols_with_progress,
     _file_picker_entries,
     _format_cross_section_stats,
+    _format_data_check_status,
     _format_results,
     _history_bucket_summary,
     _history_forward_summary,
@@ -29,6 +30,7 @@ from streamlit_app import (
     _size_spread_series,
     _size_spread_window_stats,
     _date_tolerance_load_start,
+    _date_range_error,
     _forward_stats_load_end,
     _kline_chart_component_height,
     _lightweight_kline_chart_html,
@@ -87,6 +89,32 @@ def test_file_picker_entries_filters_supported_files(tmp_path: Path) -> None:
 
     assert [path.name for path in directories] == ["sub"]
     assert [path.name for path in files] == ["prices.parquet", "universe.csv"]
+
+
+def test_date_range_error_reports_reversed_range() -> None:
+    assert _date_range_error("2026-08-11", "2026-05-15") == "区间开始不能晚于区间结束。"
+    assert _date_range_error("2026-05-15", "2026-08-11") == ""
+
+
+def test_format_data_check_status_separates_requested_and_local_ranges() -> None:
+    formatted = _format_data_check_status(
+        pd.DataFrame(
+            {
+                "symbol": ["000017.SZ"],
+                "status": ["missing_window"],
+                "rows": [0],
+                "requested_start": [pd.Timestamp("2026-08-11")],
+                "requested_end": [pd.Timestamp("2026-05-15")],
+                "local_start": [pd.Timestamp("2021-05-17")],
+                "local_end": [pd.Timestamp("2026-05-15")],
+                "message": ["所选区间无行情"],
+            }
+        )
+    )
+
+    assert formatted.columns.tolist() == ["symbol", "status", "rows", "请求开始", "请求结束", "本地开始", "本地结束", "message"]
+    assert formatted["请求开始"].iloc[0] == "2026-08-11"
+    assert formatted["本地开始"].iloc[0] == "2021-05-17"
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:
