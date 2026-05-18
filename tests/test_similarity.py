@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
+import ashare_cross_section_similarity.similarity as similarity_module
+from ashare_cross_section_similarity.features import FEATURE_COLUMNS, window_features
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 
 
@@ -165,6 +168,55 @@ def test_search_date_tolerance_picks_shifted_candidate_window() -> None:
     assert row["日期偏移"] == 3
     assert row["覆盖率"] == 1.0
     assert row["t_plus_3_return"] == pytest.approx(44 / 11 - 1)
+
+
+def test_search_date_tolerance_scores_offsets_without_per_offset_z_normalize(monkeypatch) -> None:
+    symbols = [f"{index:06d}.SZ" for index in range(1, 8)]
+    bars = pd.concat(
+        [
+            _bars(
+                symbol,
+                (np.linspace(10, 20, 30) * (1 + index * 0.01)).tolist(),
+            )
+            for index, symbol in enumerate(symbols)
+        ],
+        ignore_index=True,
+    )
+    call_count = 0
+    original_z_normalize = similarity_module.z_normalize
+
+    def counted_z_normalize(values: np.ndarray) -> np.ndarray:
+        nonlocal call_count
+        call_count += 1
+        return original_z_normalize(values)
+
+    monkeypatch.setattr(similarity_module, "z_normalize", counted_z_normalize)
+
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=tuple(symbols),
+            start="2024-01-08",
+            end="2024-01-17",
+            top_n=3,
+            min_coverage=1.0,
+            date_tolerance_bars=5,
+        ),
+    )
+
+    assert len(result.results) == 3
+    assert call_count <= 2
+
+
+def test_fast_cross_section_features_match_public_window_features() -> None:
+    bars = _bars("000001.SZ", [10, 11, 9, 12, 13], amounts=[1000, 1200, 1800, 1300, 1400])
+
+    expected = window_features(bars)
+    actual = similarity_module._fast_window_features(bars)
+
+    for column in FEATURE_COLUMNS:
+        assert actual[column] == pytest.approx(expected[column])
 
 
 def test_search_reports_forward_returns_after_historical_window() -> None:

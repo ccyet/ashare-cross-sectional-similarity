@@ -11,7 +11,6 @@ from ashare_cross_section_similarity.features import (
     FEATURE_COLUMNS,
     normalized_close_path,
     resample_path,
-    window_features,
     z_normalize,
 )
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
@@ -46,6 +45,7 @@ class CrossSectionSearchResult:
 class _CandidateWindow:
     frame: pd.DataFrame
     date_offset: int
+    path_distance: float | None = None
 
 
 def search_cross_section(
@@ -75,15 +75,16 @@ def search_cross_section(
     target_length = len(target_window)
     minimum_rows = max(2, math.ceil(target_length * config.min_coverage))
     target_path = z_normalize(normalized_close_path(target_window))
-    target_features = window_features(target_window)
+    target_features = _fast_window_features(target_window)
     rows: list[dict[str, object]] = []
     skipped: list[dict[str, str]] = []
 
     for symbol in unique_symbols(config.universe_symbols):
         if symbol == target_symbol:
             continue
+        symbol_bars = bars_by_symbol.get(symbol)
         candidate_match = _best_candidate_window(
-            bars_by_symbol.get(symbol, _empty_bars()),
+            symbol_bars if symbol_bars is not None else _empty_bars(),
             windows.get(symbol),
             start,
             target_length,
@@ -101,9 +102,11 @@ def search_cross_section(
                 }
             )
             continue
-        candidate_path = z_normalize(resample_path(normalized_close_path(candidate), target_length))
-        path_distance = float(np.linalg.norm(target_path - candidate_path) / math.sqrt(target_length))
-        features = window_features(candidate)
+        path_distance = candidate_match.path_distance
+        if path_distance is None:
+            candidate_path = z_normalize(resample_path(normalized_close_path(candidate), target_length))
+            path_distance = float(np.linalg.norm(target_path - candidate_path) / math.sqrt(target_length))
+        features = _fast_window_features(candidate)
         row: dict[str, object] = {
             "symbol": symbol,
             "区间开始": candidate["date"].min(),
@@ -153,26 +156,151 @@ def _best_candidate_window(
         return _CandidateWindow(strict_window, 0)
     if symbol_bars.empty:
         return None
-    anchor_positions = symbol_bars.index[symbol_bars["date"] >= start]
-    if len(anchor_positions) == 0:
+    date_values = symbol_bars["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    anchor_position = int(np.searchsorted(date_values, start.to_datetime64(), side="left"))
+    if anchor_position >= len(symbol_bars):
         return None
-    anchor_position = int(anchor_positions[0])
-    best: _CandidateWindow | None = None
     best_key: tuple[float, int, int] | None = None
-    for date_offset in range(-date_tolerance_bars, date_tolerance_bars + 1):
-        start_position = anchor_position + date_offset
-        if start_position < 0 or start_position >= len(symbol_bars):
+    best_start: int | None = None
+    best_length: int | None = None
+    best_distance: float | None = None
+    close = symbol_bars["close"].to_numpy(dtype=float, copy=False)
+    candidate_starts = np.arange(
+        anchor_position - date_tolerance_bars,
+        anchor_position + date_tolerance_bars + 1,
+        dtype=int,
+    )
+    candidate_starts = candidate_starts[
+        (candidate_starts >= 0)
+        & (candidate_starts < len(symbol_bars))
+        & ((len(symbol_bars) - candidate_starts) >= minimum_rows)
+    ]
+    full_starts = candidate_starts[candidate_starts + target_length <= len(symbol_bars)]
+    if len(full_starts):
+        close_windows = np.lib.stride_tricks.sliding_window_view(close, target_length)[full_starts]
+        path_matrix = _normalized_close_paths(close_windows)
+        distances = np.linalg.norm(_z_normalize_rows(path_matrix) - target_path, axis=1) / math.sqrt(target_length)
+        offsets = full_starts - anchor_position
+        order = np.lexsort((offsets, np.abs(offsets), distances))
+        best_index = int(order[0])
+        best_start = int(full_starts[best_index])
+        best_length = target_length
+        best_distance = float(distances[best_index])
+        best_offset = int(offsets[best_index])
+        best_key = (best_distance, abs(best_offset), best_offset)
+
+    partial_starts = candidate_starts[candidate_starts + target_length > len(symbol_bars)]
+    for start_position in partial_starts:
+        window_length = len(symbol_bars) - int(start_position)
+        if window_length < minimum_rows:
             continue
-        candidate = symbol_bars.iloc[start_position : start_position + target_length].reset_index(drop=True)
-        if len(candidate) < minimum_rows:
-            continue
-        path = z_normalize(resample_path(normalized_close_path(candidate), target_length))
+        candidate_close = close[int(start_position) :]
+        path = z_normalize(resample_path(_normalized_close_path(candidate_close), target_length))
         path_distance = float(np.linalg.norm(target_path - path) / math.sqrt(target_length))
+        date_offset = int(start_position) - anchor_position
         key = (path_distance, abs(date_offset), date_offset)
         if best_key is None or key < best_key:
-            best = _CandidateWindow(candidate, date_offset)
+            best_start = int(start_position)
+            best_length = int(window_length)
+            best_distance = path_distance
             best_key = key
-    return best
+
+    if best_start is None or best_length is None:
+        return None
+    date_offset = best_start - anchor_position
+    return _CandidateWindow(
+        symbol_bars.iloc[best_start : best_start + best_length].reset_index(drop=True),
+        date_offset,
+        best_distance,
+    )
+
+
+def _fast_window_features(window: pd.DataFrame) -> dict[str, float]:
+    close = window["close"].to_numpy(dtype=float, copy=False)
+    amount = window["amount"].to_numpy(dtype=float, copy=False)
+    volume = window["volume"].to_numpy(dtype=float, copy=False)
+    liquidity = np.where(np.isfinite(amount), amount, volume)
+    return _window_features_from_arrays(close, liquidity)
+
+
+def _window_features_from_arrays(close: np.ndarray, liquidity: np.ndarray) -> dict[str, float]:
+    close = np.asarray(close, dtype=float)
+    liquidity = np.asarray(liquidity, dtype=float)
+    path = _normalized_close_path(close)
+    returns = np.divide(
+        close[1:],
+        close[:-1],
+        out=np.full(max(0, len(close) - 1), np.nan, dtype=float),
+        where=(close[:-1] != 0) & np.isfinite(close[:-1]),
+    ) - 1.0
+    total_liquidity = float(np.nansum(liquidity)) if np.isfinite(liquidity).any() else 0.0
+    down_liquidity = float(np.nansum(np.where(returns < 0, liquidity[1:], 0.0))) if len(returns) else 0.0
+    down_share = down_liquidity / total_liquidity if total_liquidity else 0.0
+    slope = 0.0
+    if len(path) >= 2:
+        x_centered = np.arange(len(path), dtype=float) - (len(path) - 1) / 2
+        denominator = float(np.sum(x_centered**2))
+        if denominator:
+            slope = float(((path - np.nanmean(path)) @ x_centered) / denominator)
+    liquidity_mean = float(np.nanmean(liquidity)) if np.isfinite(liquidity).any() else 0.0
+    return {
+        "区间收益": float(path[-1] / path[0] - 1.0) if len(path) >= 2 and path[0] else 0.0,
+        "波动率": float(np.nanstd(returns)) if np.isfinite(returns).any() else 0.0,
+        "最大回撤": _max_drawdown(path),
+        "趋势斜率": slope if np.isfinite(slope) else 0.0,
+        "下跌放量占比": down_share if np.isfinite(down_share) else 0.0,
+        "量价相关": _safe_corr_arrays(returns, liquidity[1:]),
+        "成交规模": float(np.log1p(liquidity_mean)) if np.isfinite(liquidity_mean) else 0.0,
+    }
+
+
+def _normalized_close_path(close: np.ndarray) -> np.ndarray:
+    close = np.asarray(close, dtype=float)
+    if len(close) == 0:
+        return np.array([], dtype=float)
+    first = close[0]
+    if not np.isfinite(first) or first == 0:
+        return np.zeros(len(close), dtype=float)
+    return close / first * 100.0
+
+
+def _normalized_close_paths(close_windows: np.ndarray) -> np.ndarray:
+    first = close_windows[:, [0]]
+    valid = np.isfinite(first) & (first != 0)
+    return np.divide(close_windows, first, out=np.zeros_like(close_windows, dtype=float), where=valid) * 100.0
+
+
+def _z_normalize_rows(values: np.ndarray) -> np.ndarray:
+    means = np.nanmean(values, axis=1, keepdims=True)
+    stds = np.nanstd(values, axis=1, keepdims=True)
+    centered = values - means
+    valid = np.isfinite(stds) & (stds != 0)
+    return np.divide(centered, stds, out=centered.copy(), where=valid)
+
+
+def _max_drawdown(values: np.ndarray) -> float:
+    if len(values) == 0:
+        return 0.0
+    running_max = np.maximum.accumulate(values)
+    drawdowns = np.divide(values, running_max, out=np.full_like(values, np.nan), where=running_max != 0) - 1.0
+    if np.isnan(drawdowns).all():
+        return 0.0
+    return float(np.nanmin(drawdowns))
+
+
+def _safe_corr_arrays(left: np.ndarray, right: np.ndarray) -> float:
+    valid = np.isfinite(left) & np.isfinite(right)
+    if int(valid.sum()) < 2:
+        return 0.0
+    left_values = left[valid]
+    right_values = right[valid]
+    left_centered = left_values - float(left_values.mean())
+    right_centered = right_values - float(right_values.mean())
+    denominator = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+    if denominator == 0 or not np.isfinite(denominator):
+        return 0.0
+    corr = float(np.sum(left_centered * right_centered) / denominator)
+    return corr if np.isfinite(corr) else 0.0
 
 
 def _score_results(frame: pd.DataFrame, path_weight: float) -> pd.DataFrame:
