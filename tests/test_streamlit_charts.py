@@ -334,6 +334,34 @@ def test_cross_section_quick_window_feedback_reports_short_history() -> None:
     assert "不足近 120 根" in message
 
 
+def test_cross_section_quick_window_feedback_reports_sparse_recent_history() -> None:
+    dates = pd.to_datetime(
+        [
+            *pd.date_range("2024-01-02", periods=80, freq="B").strftime("%Y-%m-%d").tolist(),
+            *pd.date_range("2026-03-25", periods=40, freq="B").strftime("%Y-%m-%d").tolist(),
+        ]
+    )
+    bars = pd.DataFrame(
+        {
+            "date": dates,
+            "stock_code": ["300750.SZ"] * len(dates),
+            "open": range(len(dates)),
+            "high": range(len(dates)),
+            "low": range(len(dates)),
+            "close": range(len(dates)),
+            "volume": [1] * len(dates),
+            "amount": [1] * len(dates),
+        }
+    )
+
+    start, end, message = _cross_section_quick_window_feedback(bars, 120, "300750.SZ")
+
+    assert start.year == 2026
+    assert end.year == 2026
+    assert "本地数据疑似不连续" in message
+    assert "不足近 120 根" in message
+
+
 def test_cross_section_quick_window_feedback_reports_empty_fallback() -> None:
     start, end, message = _cross_section_quick_window_feedback(
         pd.DataFrame(),

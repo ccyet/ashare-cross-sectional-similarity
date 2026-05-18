@@ -606,7 +606,11 @@ def _cross_section_quick_window(
     window_size: int,
     today: pd.Timestamp | None = None,
 ) -> tuple[date, date]:
-    start, end, _selected_count, _total_count = _cross_section_quick_window_selection(bars, window_size, today)
+    start, end, _selected_count, _total_count, _is_sparse = _cross_section_quick_window_selection(
+        bars,
+        window_size,
+        today,
+    )
     return start, end
 
 
@@ -616,11 +620,18 @@ def _cross_section_quick_window_feedback(
     target_symbol: str,
     today: pd.Timestamp | None = None,
 ) -> tuple[date, date, str]:
-    start, end, selected_count, total_count = _cross_section_quick_window_selection(bars, window_size, today)
+    start, end, selected_count, total_count, is_sparse = _cross_section_quick_window_selection(bars, window_size, today)
     symbol = normalize_symbol(target_symbol)
     window_text = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
     if total_count == 0:
         return start, end, f"{symbol} 未找到本地行情，已按自然日近 {window_size} 天设置区间：{window_text}。"
+    if is_sparse:
+        return (
+            start,
+            end,
+            f"{symbol} 本地数据疑似不连续，近期仅有 {selected_count} 根K线，"
+            f"不足近 {window_size} 根；已使用近期可用区间：{window_text}。请先补齐行情数据。",
+        )
     if selected_count < window_size:
         return start, end, f"{symbol} 本地仅有 {selected_count} 根K线，不足近 {window_size} 根；已使用全部可用区间：{window_text}。"
     return start, end, f"{symbol} 已选择近 {window_size} 根K线：{window_text}。"
@@ -630,17 +641,31 @@ def _cross_section_quick_window_selection(
     bars: pd.DataFrame,
     window_size: int,
     today: pd.Timestamp | None = None,
-) -> tuple[date, date, int, int]:
+) -> tuple[date, date, int, int, bool]:
     if window_size < 1:
         raise ValueError("window_size 至少需要 1。")
     if not bars.empty and "date" in bars.columns:
         dates = pd.to_datetime(bars["date"], errors="coerce").dropna().sort_values().drop_duplicates()
         if not dates.empty:
             selected = dates.tail(window_size)
-            return selected.iloc[0].date(), selected.iloc[-1].date(), int(len(selected)), int(len(dates))
+            if len(selected) >= window_size and _quick_window_is_sparse(selected, window_size):
+                end = selected.iloc[-1]
+                start_limit = end - pd.Timedelta(days=_quick_window_max_calendar_days(window_size) - 1)
+                selected = dates.loc[dates >= start_limit]
+                return selected.iloc[0].date(), end.date(), int(len(selected)), int(len(dates)), True
+            return selected.iloc[0].date(), selected.iloc[-1].date(), int(len(selected)), int(len(dates)), False
     end = pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today).normalize()
     start = end - pd.Timedelta(days=window_size - 1)
-    return start.date(), end.date(), window_size, 0
+    return start.date(), end.date(), window_size, 0, False
+
+
+def _quick_window_is_sparse(selected_dates: pd.Series, window_size: int) -> bool:
+    calendar_days = int((selected_dates.iloc[-1] - selected_dates.iloc[0]).days) + 1
+    return calendar_days > _quick_window_max_calendar_days(window_size)
+
+
+def _quick_window_max_calendar_days(window_size: int) -> int:
+    return max(window_size + 2, int(math.ceil(window_size * 2.2)))
 
 
 def _format_results(frame: pd.DataFrame) -> pd.DataFrame:
