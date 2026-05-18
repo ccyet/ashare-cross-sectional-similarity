@@ -94,6 +94,7 @@ def main() -> None:
 def _render_directory_picker(label: str, default_path: str | Path, key: str) -> str:
     state_key = f"{key}_path"
     default_key = f"{key}_default_path"
+    open_key = f"{key}_browser_open"
     default_text = _path_text(default_path)
     previous_default = st.session_state.get(default_key)
     if state_key not in st.session_state or st.session_state.get(state_key) == previous_default:
@@ -101,8 +102,11 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
     st.session_state[default_key] = default_text
     st.caption(label)
     _render_selected_path(str(st.session_state[state_key]))
-    with st.popover(f"选择{label}", use_container_width=True):
-        _render_directory_browser(label, key, state_key, st.session_state[state_key])
+    if st.button(f"选择{label}", key=f"{key}_pick"):
+        st.session_state[open_key] = not bool(st.session_state.get(open_key))
+    if st.session_state.get(open_key):
+        with st.container(border=True):
+            _render_directory_browser(label, key, state_key, st.session_state[state_key])
     return str(st.session_state[state_key])
 
 
@@ -117,11 +121,16 @@ def _render_file_picker(
         st.session_state[state_key] = ""
     st.caption(label)
     _render_selected_path(str(st.session_state[state_key]) if st.session_state[state_key] else "未选择")
+    open_key = f"{key}_browser_open"
     button_col, clear_col = st.columns([2, 1])
-    with button_col.popover(f"选择{label}", use_container_width=True):
-        _render_file_browser(label, key, state_key, st.session_state[state_key] or initial_path, filetypes)
+    if button_col.button(f"选择{label}", key=f"{key}_pick"):
+        st.session_state[open_key] = not bool(st.session_state.get(open_key))
     if st.session_state[state_key] and clear_col.button("清除", key=f"{key}_clear"):
         st.session_state[state_key] = ""
+        st.session_state[open_key] = False
+    if st.session_state.get(open_key):
+        with st.container(border=True):
+            _render_file_browser(label, key, state_key, st.session_state[state_key] or initial_path, filetypes)
     return str(st.session_state[state_key])
 
 
@@ -140,6 +149,7 @@ def _render_directory_browser(label: str, key: str, state_key: str, current_path
         st.rerun()
     if select_col.button("选择当前目录", key=f"{key}_select_current"):
         st.session_state[state_key] = str(current_dir)
+        st.session_state[f"{key}_browser_open"] = False
         st.rerun()
     entries = _directory_picker_entries(current_dir)
     if not entries:
@@ -196,6 +206,7 @@ def _render_file_browser(
         )
         if st.button(f"选择{label}", key=f"{key}_select_file"):
             st.session_state[state_key] = selected_file
+            st.session_state[f"{key}_browser_open"] = False
             st.rerun()
     else:
         st.info("当前目录下没有符合类型的文件。")
