@@ -105,6 +105,68 @@ def test_search_uses_same_window_semantics_after_grouped_filtering() -> None:
     assert result.results["区间结束"].tolist() == [pd.Timestamp("2024-01-06")] * 3
 
 
+def test_search_date_tolerance_zero_keeps_strict_same_day_semantics() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [99, 10, 11, 12, 11, 13, 98]),
+            _bars("000002.SZ", [88, 20, 22, 24, 22, 26, 87]),
+            _bars("000003.SZ", [77, 10, 9, 8, 7, 6, 76]),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=("000002.SZ", "000003.SZ"),
+            start="2024-01-02",
+            end="2024-01-06",
+            top_n=2,
+            min_coverage=1.0,
+            date_tolerance_bars=0,
+        ),
+    )
+
+    assert result.window_size == 5
+    assert result.results["symbol"].tolist() == ["000002.SZ", "000003.SZ"]
+    assert result.results["区间开始"].tolist() == [pd.Timestamp("2024-01-02")] * 2
+    assert result.results["区间结束"].tolist() == [pd.Timestamp("2024-01-06")] * 2
+    assert result.results["日期偏移"].tolist() == [0, 0]
+    assert result.results["覆盖率"].tolist() == [1.0, 1.0]
+
+
+def test_search_date_tolerance_picks_shifted_candidate_window() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [6, 7, 8, 10, 12, 11, 13, 14, 15, 16, 17, 18]),
+            _bars("000002.SZ", [1, 1, 1, 2, 2, 2, 10, 12, 11, 22, 33, 44]),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=("000002.SZ",),
+            start="2024-01-04",
+            end="2024-01-06",
+            top_n=1,
+            min_coverage=1.0,
+            date_tolerance_bars=3,
+            forward_windows=(3,),
+        ),
+    )
+
+    row = result.results.iloc[0]
+    assert row["区间开始"] == pd.Timestamp("2024-01-07")
+    assert row["区间结束"] == pd.Timestamp("2024-01-09")
+    assert row["日期偏移"] == 3
+    assert row["覆盖率"] == 1.0
+    assert row["t_plus_3_return"] == pytest.approx(44 / 11 - 1)
+
+
 def test_search_reports_forward_returns_after_historical_window() -> None:
     bars = pd.concat(
         [

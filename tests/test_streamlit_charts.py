@@ -9,6 +9,7 @@ from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
+    _cross_section_load_end,
     _cross_section_overview_metrics,
     _cross_section_result_metrics,
     _cross_section_price_chart,
@@ -17,6 +18,7 @@ from streamlit_app import (
     _download_symbols_with_progress,
     _format_cross_section_stats,
     _format_results,
+    _date_tolerance_load_start,
     _forward_stats_load_end,
     _kline_chart_component_height,
     _lightweight_kline_chart_html,
@@ -65,6 +67,11 @@ def test_cross_section_result_metrics_are_one_row_pair() -> None:
     )
 
     assert _cross_section_result_metrics(result) == [("目标窗口 K 线数", "3"), ("有效结果数", "2")]
+
+
+def test_cross_section_load_range_includes_date_tolerance_buffer() -> None:
+    assert _date_tolerance_load_start("2024-01-10", 5) == "2023-12-30"
+    assert _cross_section_load_end("2024-01-10", 5, today=pd.Timestamp("2024-03-10")) == "2024-03-06"
 
 
 def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:
@@ -180,6 +187,35 @@ def test_cross_section_price_chart_uses_stock_name_labels() -> None:
     assert [trace.name for trace in fig.data] == ["平安银行（000001.SZ，目标）", "万科A（000002.SZ）", "000003.SZ"]
 
 
+def test_cross_section_price_chart_uses_candidate_hit_window_start() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [10, 11, 12, 13, 14, 15, 16]),
+            _bars("000002.SZ", [20, 21, 22, 23, 24, 25, 26]),
+        ],
+        ignore_index=True,
+    )
+    result = CrossSectionSearchResult(
+        target_symbol="000001.SZ",
+        start=pd.Timestamp("2024-01-02"),
+        end=pd.Timestamp("2024-01-04"),
+        window_size=3,
+        results=pd.DataFrame(
+            {
+                "symbol": ["000002.SZ"],
+                "区间开始": [pd.Timestamp("2024-01-04")],
+                "区间结束": [pd.Timestamp("2024-01-06")],
+            }
+        ),
+        skipped=pd.DataFrame(),
+    )
+
+    fig = _cross_section_price_chart(bars, result)
+
+    assert list(fig.data[0].y) == [11, 12, 13, 14, 15, 16]
+    assert list(fig.data[1].y) == [23, 24, 25, 26]
+
+
 def test_lightweight_kline_series_uses_stock_name_titles() -> None:
     bars = pd.concat([_bars("000001.SZ", [10, 11, 12, 13]), _bars("000002.SZ", [20, 21, 22, 23])], ignore_index=True)
     result = CrossSectionSearchResult(
@@ -200,6 +236,37 @@ def test_lightweight_kline_series_uses_stock_name_titles() -> None:
     assert [item["title"] for item in series] == ["平安银行（000001.SZ，目标）", "万科A（000002.SZ）"]
 
 
+def test_lightweight_kline_series_uses_candidate_hit_window_dates() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [10, 11, 12, 13, 14, 15, 16]),
+            _bars("000002.SZ", [20, 21, 22, 23, 24, 25, 26]),
+        ],
+        ignore_index=True,
+    )
+    result = CrossSectionSearchResult(
+        target_symbol="000001.SZ",
+        start=pd.Timestamp("2024-01-02"),
+        end=pd.Timestamp("2024-01-04"),
+        window_size=3,
+        results=pd.DataFrame(
+            {
+                "symbol": ["000002.SZ"],
+                "区间开始": [pd.Timestamp("2024-01-04")],
+                "区间结束": [pd.Timestamp("2024-01-06")],
+            }
+        ),
+        skipped=pd.DataFrame(),
+    )
+
+    series = _lightweight_kline_series(bars, result, forward_bars=1)
+
+    assert series[0]["windowEndTime"] == "2024-01-04"
+    assert series[0]["data"][0]["time"] == "2024-01-02"
+    assert series[1]["windowEndTime"] == "2024-01-06"
+    assert series[1]["data"][0]["time"] == "2024-01-04"
+
+
 def test_lightweight_kline_chart_marks_window_and_forward_area() -> None:
     html = _lightweight_kline_chart_html(
         [
@@ -218,7 +285,7 @@ def test_lightweight_kline_chart_marks_window_and_forward_area() -> None:
         ]
     )
 
-    assert "窗口结束" in html
+    assert "命中区间结束" in html
     assert "forwardShade" in html
     assert "positionWindowDivider" in html
 
@@ -266,6 +333,7 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
                 "symbol": ["000001.SZ"],
                 "区间开始": [pd.Timestamp("2024-01-01")],
                 "区间结束": [pd.Timestamp("2024-01-05")],
+                "覆盖率": [1.0],
                 "综合相似度": [0.81234],
                 "区间收益": [0.1234],
                 "t_plus_3_return": [0.0567],
@@ -274,9 +342,11 @@ def test_format_results_formats_forward_returns_as_percentages() -> None:
     )
 
     assert formatted["综合相似度"].iloc[0] == "81.23%"
+    assert formatted["覆盖率"].iloc[0] == "100.00%"
     assert formatted["区间收益"].iloc[0] == "12.34%"
     assert formatted["后3根收益"].iloc[0] == "5.67%"
-    assert formatted["区间开始"].iloc[0] == "2024-01-01"
+    assert formatted["命中区间开始"].iloc[0] == "2024-01-01"
+    assert formatted["命中区间结束"].iloc[0] == "2024-01-05"
 
 
 def test_format_results_renames_symbol_and_inserts_stock_name() -> None:

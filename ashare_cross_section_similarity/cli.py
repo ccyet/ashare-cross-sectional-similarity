@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import sys
 
@@ -51,8 +52,8 @@ def _run_search(args: argparse.Namespace) -> int:
         timeframe=args.timeframe,
         adjust=args.adjust,
         symbols=symbols_to_load,
-        start=args.start,
-        end=_forward_stats_load_end(args.end),
+        start=_date_tolerance_load_start(args.start, args.date_tolerance_bars),
+        end=_cross_section_load_end(args.end, args.date_tolerance_bars),
     )
     result = search_cross_section(
         bars,
@@ -64,6 +65,7 @@ def _run_search(args: argparse.Namespace) -> int:
             top_n=args.top_n,
             min_coverage=args.min_coverage,
             path_weight=args.path_weight,
+            date_tolerance_bars=args.date_tolerance_bars,
         ),
     )
     outcome_columns = [
@@ -73,6 +75,10 @@ def _run_search(args: argparse.Namespace) -> int:
     ]
     display_columns = [
         "symbol",
+        "区间开始",
+        "区间结束",
+        "日期偏移",
+        "覆盖率",
         "综合相似度",
         "路径相似度",
         "特征相似度",
@@ -223,6 +229,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     search_parser.add_argument("--top-n", type=int, default=20)
     search_parser.add_argument("--min-coverage", type=float, default=0.8)
     search_parser.add_argument("--path-weight", type=float, default=0.7)
+    search_parser.add_argument(
+        "--date-tolerance-bars",
+        type=int,
+        default=0,
+        help="候选标的窗口允许前后平移的交易日根数；CLI 默认 0，保持严格同日。",
+    )
     search_parser.add_argument("--output", default="", help="CSV 输出路径")
 
     history_parser = subparsers.add_parser("history", help="搜索同一标的的历史相似阶段")
@@ -358,3 +370,17 @@ def _forward_stats_load_end(end: str | pd.Timestamp) -> str:
     if end_ts >= today:
         return end_ts.strftime("%Y-%m-%d")
     return min(end_ts + pd.Timedelta(days=45), today).strftime("%Y-%m-%d")
+
+
+def _cross_section_load_end(end: str | pd.Timestamp, date_tolerance_bars: int) -> str:
+    return _forward_stats_load_end(pd.Timestamp(end) + pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars)))
+
+
+def _date_tolerance_load_start(start: str | pd.Timestamp, date_tolerance_bars: int) -> str:
+    return (pd.Timestamp(start) - pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars))).strftime("%Y-%m-%d")
+
+
+def _date_tolerance_calendar_days(date_tolerance_bars: int) -> int:
+    if date_tolerance_bars <= 0:
+        return 0
+    return max(date_tolerance_bars + 2, int(math.ceil(date_tolerance_bars * 2.2)))

@@ -33,6 +33,41 @@ def test_parse_download_command() -> None:
     assert args.provider == "tdx"
 
 
+def test_parse_search_date_tolerance_defaults_to_zero() -> None:
+    args = _parse_args(
+        [
+            "search",
+            "--target-symbol",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+        ]
+    )
+
+    assert args.command == "search"
+    assert args.date_tolerance_bars == 0
+
+
+def test_parse_search_date_tolerance_argument() -> None:
+    args = _parse_args(
+        [
+            "search",
+            "--target-symbol",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--date-tolerance-bars",
+            "5",
+        ]
+    )
+
+    assert args.date_tolerance_bars == 5
+
+
 def test_parse_openbb_download_command() -> None:
     args = _parse_args(
         [

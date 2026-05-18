@@ -29,6 +29,7 @@ class CrossSectionSearchConfig:
     min_coverage: float = 0.8
     path_weight: float = 0.7
     forward_windows: tuple[int, ...] = FORWARD_RETURN_WINDOWS
+    date_tolerance_bars: int = 0
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,12 @@ class CrossSectionSearchResult:
     window_size: int
     results: pd.DataFrame
     skipped: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class _CandidateWindow:
+    frame: pd.DataFrame
+    date_offset: int
 
 
 def search_cross_section(
@@ -53,6 +60,8 @@ def search_cross_section(
         raise ValueError("path_weight 必须在 0 到 1 之间。")
     if any(horizon <= 0 for horizon in config.forward_windows):
         raise ValueError("forward_windows 必须为正整数。")
+    if config.date_tolerance_bars < 0:
+        raise ValueError("date_tolerance_bars 不能为负数。")
     prepared = _prepare_bars(bars)
     target_symbol = normalize_symbol(config.target_symbol)
     start = pd.Timestamp(config.start)
@@ -73,7 +82,16 @@ def search_cross_section(
     for symbol in unique_symbols(config.universe_symbols):
         if symbol == target_symbol:
             continue
-        candidate = windows.get(symbol)
+        candidate_match = _best_candidate_window(
+            bars_by_symbol.get(symbol, _empty_bars()),
+            windows.get(symbol),
+            start,
+            target_length,
+            minimum_rows,
+            config.date_tolerance_bars,
+            target_path,
+        )
+        candidate = candidate_match.frame if candidate_match is not None else None
         candidate_rows = 0 if candidate is None else len(candidate)
         if candidate_rows < minimum_rows:
             skipped.append(
@@ -91,6 +109,8 @@ def search_cross_section(
             "区间开始": candidate["date"].min(),
             "区间结束": candidate["date"].max(),
             "K线数量": int(len(candidate)),
+            "日期偏移": int(candidate_match.date_offset),
+            "覆盖率": float(len(candidate) / target_length),
             "路径距离": path_distance,
         }
         for column in FEATURE_COLUMNS:
@@ -116,6 +136,43 @@ def search_cross_section(
         results=result_frame,
         skipped=skipped_frame,
     )
+
+
+def _best_candidate_window(
+    symbol_bars: pd.DataFrame,
+    strict_window: pd.DataFrame | None,
+    start: pd.Timestamp,
+    target_length: int,
+    minimum_rows: int,
+    date_tolerance_bars: int,
+    target_path: np.ndarray,
+) -> _CandidateWindow | None:
+    if date_tolerance_bars == 0:
+        if strict_window is None or strict_window.empty:
+            return None
+        return _CandidateWindow(strict_window, 0)
+    if symbol_bars.empty:
+        return None
+    anchor_positions = symbol_bars.index[symbol_bars["date"] >= start]
+    if len(anchor_positions) == 0:
+        return None
+    anchor_position = int(anchor_positions[0])
+    best: _CandidateWindow | None = None
+    best_key: tuple[float, int, int] | None = None
+    for date_offset in range(-date_tolerance_bars, date_tolerance_bars + 1):
+        start_position = anchor_position + date_offset
+        if start_position < 0 or start_position >= len(symbol_bars):
+            continue
+        candidate = symbol_bars.iloc[start_position : start_position + target_length].reset_index(drop=True)
+        if len(candidate) < minimum_rows:
+            continue
+        path = z_normalize(resample_path(normalized_close_path(candidate), target_length))
+        path_distance = float(np.linalg.norm(target_path - path) / math.sqrt(target_length))
+        key = (path_distance, abs(date_offset), date_offset)
+        if best_key is None or key < best_key:
+            best = _CandidateWindow(candidate, date_offset)
+            best_key = key
+    return best
 
 
 def _score_results(frame: pd.DataFrame, path_weight: float) -> pd.DataFrame:

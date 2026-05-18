@@ -30,7 +30,7 @@ from ashare_cross_section_similarity.similarity import (
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 
-PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比"]
+PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
@@ -351,10 +351,19 @@ def _render_cross_section_tab(
         st.info(st.session_state["cross_quick_message"])
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
-    col4, col5, col6 = st.columns(3)
+    col4, col5, col6, col10 = st.columns(4)
     top_n = col4.number_input("展示数量", min_value=5, max_value=100, value=20, step=5, key="cross_top_n")
-    min_coverage = col5.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05, key="cross_min_coverage")
-    path_weight = col6.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="cross_path_weight")
+    date_tolerance_bars = col5.number_input(
+        "日期容错",
+        min_value=0,
+        max_value=30,
+        value=5,
+        step=1,
+        key="cross_date_tolerance_bars",
+        help="避免精确日期带来的误判；系统不扩大目标走势，只允许候选窗口在前后 N 个交易日内平移匹配。",
+    )
+    min_coverage = col6.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05, key="cross_min_coverage")
+    path_weight = col10.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="cross_path_weight")
     universe_symbols = st.text_area("搜索范围代码", value="", help="逗号分隔；留空时尝试读取本地目录下全部 parquet。")
     col7, col8, col9 = st.columns(3)
     with col7:
@@ -378,9 +387,12 @@ def _render_cross_section_tab(
         st.error(f"搜索范围解析失败：{exc}")
         return
     symbols = [target_symbol, *universe]
+    tolerance_bars = int(date_tolerance_bars)
+    coverage_start = _date_tolerance_load_start(start, tolerance_bars)
+    coverage_end = _cross_section_load_end(end, tolerance_bars)
     st.markdown("**1. 数据检查**")
-    st.caption("点击后检查目标和搜索范围在所选区间内是否已有本地行情；缺数据时可直接在本页下载。")
-    check_key = (tuple(symbols), data_root, timeframe, adjust, start, end)
+    st.caption("点击后检查目标和搜索范围在目标区间、日期容错和后验观察范围内是否已有本地行情；缺数据时可直接在本页下载。")
+    check_key = (tuple(symbols), data_root, timeframe, adjust, coverage_start, coverage_end, start, end, tolerance_bars)
     if st.button("检查本地数据覆盖", key="cross_check"):
         try:
             st.session_state["cross_data_check_key"] = check_key
@@ -389,8 +401,8 @@ def _render_cross_section_tab(
                 data_root,
                 timeframe,
                 adjust,
-                start,
-                end,
+                coverage_start,
+                coverage_end,
             )
         except Exception as exc:  # noqa: BLE001
             st.error(f"数据检查失败：{exc}")
@@ -421,7 +433,7 @@ def _render_cross_section_tab(
     st.markdown("**2. 数据抓取 / 更新**")
     st.caption("先检查覆盖，只补缺文件、区间缺失或读取失败的标的；默认委托 trend-backtest。")
     if st.button("检查并下载缺失行情", key="cross_download"):
-        download_end = _forward_stats_load_end(end)
+        download_end = coverage_end
         normalized_targets = unique_symbols([target_symbol])
         normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
         check_for_download = check if check is not None and st.session_state.get("cross_data_check_key") == check_key else None
@@ -432,8 +444,8 @@ def _render_cross_section_tab(
                     data_root,
                     timeframe,
                     adjust,
-                    start,
-                    end,
+                    coverage_start,
+                    coverage_end,
                 )
             st.session_state["cross_data_check_key"] = check_key
             st.session_state["cross_data_check"] = check_for_download
@@ -461,7 +473,7 @@ def _render_cross_section_tab(
                 symbols=download_symbols,
                 timeframe=timeframe,
                 adjust=adjust,
-                start=start,
+                start=coverage_start,
                 end=download_end,
                 trend_repo=Path(trend_repo),
                 data_root=Path(data_root),
@@ -470,7 +482,7 @@ def _render_cross_section_tab(
                 progress_callback=report_progress,
             )
             progress_bar.progress(1.0, text="下载任务已完成")
-            progress_text.caption(f"下载截止：{download_end}，用于覆盖窗口后 3/5/10 根收益统计。")
+            progress_text.caption(f"下载区间：{coverage_start} 至 {download_end}，用于覆盖日期容错和窗口后 3/5/10 根收益统计。")
             st.cache_data.clear()
             st.session_state.pop("cross_data_check", None)
             st.session_state.pop("cross_data_check_key", None)
@@ -490,8 +502,8 @@ def _render_cross_section_tab(
             timeframe=timeframe,
             adjust=adjust,
             symbols=tuple(symbols),
-            start=start,
-            end=_forward_stats_load_end(end),
+            start=coverage_start,
+            end=coverage_end,
         )
         result = search_cross_section(
             bars,
@@ -503,6 +515,7 @@ def _render_cross_section_tab(
                 top_n=int(top_n),
                 min_coverage=float(min_coverage),
                 path_weight=float(path_weight),
+                date_tolerance_bars=tolerance_bars,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -775,6 +788,21 @@ def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None 
     return min(end_ts + pd.Timedelta(days=45), current_day).strftime("%Y-%m-%d")
 
 
+def _cross_section_load_end(end: str | pd.Timestamp, date_tolerance_bars: int, today: pd.Timestamp | None = None) -> str:
+    tolerant_end = pd.Timestamp(end) + pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars))
+    return _forward_stats_load_end(tolerant_end, today=today)
+
+
+def _date_tolerance_load_start(start: str | pd.Timestamp, date_tolerance_bars: int) -> str:
+    return (pd.Timestamp(start) - pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars))).strftime("%Y-%m-%d")
+
+
+def _date_tolerance_calendar_days(date_tolerance_bars: int) -> int:
+    if date_tolerance_bars <= 0:
+        return 0
+    return max(date_tolerance_bars + 2, int(math.ceil(date_tolerance_bars * 2.2)))
+
+
 def _cross_section_quick_window(
     bars: pd.DataFrame,
     window_size: int,
@@ -869,8 +897,9 @@ def _format_results(frame: pd.DataFrame, stock_names: dict[str, str] | None = No
             percent_columns.append(column)
     result = _format_percent_columns(result, percent_columns)
     result = _format_decimal_columns(result, DECIMAL_COLUMNS)
+    rename_map.update({"区间开始": "命中区间开始", "区间结束": "命中区间结束"})
     result = result.rename(columns=rename_map)
-    for column in ["区间开始", "区间结束"]:
+    for column in ["命中区间开始", "命中区间结束"]:
         if column in result.columns:
             result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
     if "symbol" in result.columns:
@@ -1075,10 +1104,10 @@ def _cross_section_price_chart(
 ) -> go.Figure:
     fig = go.Figure()
     symbols = unique_symbols([result.target_symbol, *result.results["symbol"].head(top_n).tolist()])
-    start = pd.Timestamp(result.start)
     end_marker = pd.Timestamp(result.end).strftime("%Y-%m-%d")
     for symbol in symbols:
-        symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= start)].sort_values("date")
+        window_start, _window_end = _cross_section_symbol_window(result, symbol)
+        symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= window_start)].sort_values("date")
         if symbol_bars.empty:
             continue
         is_target = symbol == result.target_symbol
@@ -1105,14 +1134,14 @@ def _cross_section_price_chart(
         y=1,
         xref="x",
         yref="paper",
-        text="窗口结束",
+        text="目标区间结束",
         showarrow=False,
         xanchor="left",
         yanchor="bottom",
         font={"color": "#2563eb", "size": 12},
     )
     fig.update_layout(
-        title="目标与Top相似标的收盘价走势",
+        title="目标区间与Top相似标的命中区间收盘价走势",
         xaxis_title="日期",
         yaxis_title="收盘价",
         hovermode="x unified",
@@ -1161,11 +1190,11 @@ def _lightweight_kline_series(
     forward_bars: int = 10,
     stock_names: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
-    start = result.start
-    end = inclusive_end_timestamp(result.end)
     symbols = [result.target_symbol, *result.results["symbol"].head(top_n).tolist()]
     series: list[dict[str, object]] = []
     for symbol in symbols:
+        start, end = _cross_section_symbol_window(result, symbol)
+        end = inclusive_end_timestamp(end)
         symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= start)].sort_values("date")
         if symbol_bars.empty:
             continue
@@ -1194,6 +1223,21 @@ def _lightweight_kline_series(
             }
         )
     return series
+
+
+def _cross_section_symbol_window(result: CrossSectionSearchResult, symbol: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    normalized = normalize_symbol(symbol)
+    if normalized == result.target_symbol:
+        return pd.Timestamp(result.start), pd.Timestamp(result.end)
+    if result.results.empty or "symbol" not in result.results.columns:
+        return pd.Timestamp(result.start), pd.Timestamp(result.end)
+    matched = result.results.loc[result.results["symbol"].map(normalize_symbol) == normalized]
+    if matched.empty:
+        return pd.Timestamp(result.start), pd.Timestamp(result.end)
+    row = matched.iloc[0]
+    start = row.get("区间开始", result.start)
+    end = row.get("区间结束", result.end)
+    return pd.Timestamp(start), pd.Timestamp(end)
 
 
 def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
@@ -1287,7 +1331,7 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
             )
         elements.append(
             f'<line class="positionWindowDivider" x1="{divider_x:.2f}" y1="{top:.2f}" x2="{divider_x:.2f}" y2="{top + plot_height:.2f}" stroke="#2563eb" stroke-width="1.5">'
-            "<title>窗口结束</title></line>"
+            "<title>命中区间结束</title></line>"
         )
 
     for index, row in enumerate(rows):
@@ -1311,7 +1355,7 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
 <div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#ffffff;">
   <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
   <svg viewBox="0 0 360 240" role="img" aria-label="{title} K线图" style="width:100%;height:240px;display:block;">{svg}</svg>
-  <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#4b5563;margin-top:4px;">窗口内 {window_size} 根 | 后续 {forward_size} 根</div>
+  <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#4b5563;margin-top:4px;">命中区间 {window_size} 根 | 后续 {forward_size} 根</div>
 </div>
 """
 
