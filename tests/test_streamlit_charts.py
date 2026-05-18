@@ -7,6 +7,7 @@ from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
+    CUSTOM_DIRECTORY_OPTION,
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
@@ -17,6 +18,8 @@ from streamlit_app import (
     _format_cross_section_stats,
     _format_results,
     _forward_stats_load_end,
+    _directory_choice_value,
+    _directory_options,
     _kline_chart_component_height,
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
@@ -39,6 +42,23 @@ def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
             "amount": [1] * len(closes),
         }
     )
+
+
+def test_directory_options_keep_default_first_and_custom_last(tmp_path: Path) -> None:
+    default_path = tmp_path / "trend-backtest"
+    default_path.mkdir()
+    other_path = tmp_path / "other-trend"
+    other_path.mkdir()
+
+    options = _directory_options(default_path, [other_path, default_path, tmp_path / "missing"])
+
+    assert options == [str(default_path), str(other_path), CUSTOM_DIRECTORY_OPTION]
+
+
+def test_directory_choice_value_uses_custom_fallback_when_blank() -> None:
+    assert _directory_choice_value("/tmp/trend", "", "/tmp/default") == "/tmp/trend"
+    assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "/tmp/custom", "/tmp/default") == "/tmp/custom"
+    assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "", "/tmp/default") == "/tmp/default"
 
 
 def test_lightweight_kline_series_uses_top_six_ohlc_points() -> None:

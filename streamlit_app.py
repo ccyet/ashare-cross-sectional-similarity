@@ -33,6 +33,7 @@ from ashare_cross_section_similarity.universe import normalize_symbol, unique_sy
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
+CUSTOM_DIRECTORY_OPTION = "__custom_directory__"
 
 
 def main() -> None:
@@ -42,9 +43,27 @@ def main() -> None:
     with st.sidebar:
         st.header("通用设置")
         trend_repo_default = os.environ.get("ASHARE_TREND_REPO", str(default_trend_repo()))
-        data_root_default = os.environ.get("ASHARE_DATA_ROOT", str(Path(trend_repo_default) / "data" / "market" / "daily"))
-        trend_repo = st.text_input("原 trend-backtest 仓库", value=trend_repo_default)
-        data_root = st.text_input("本地行情根目录", value=data_root_default)
+        trend_repo_choice = st.selectbox(
+            "原 trend-backtest 仓库",
+            _trend_repo_options(trend_repo_default),
+            format_func=_directory_option_label,
+            key="trend_repo_choice",
+        )
+        trend_repo_custom = ""
+        if trend_repo_choice == CUSTOM_DIRECTORY_OPTION:
+            trend_repo_custom = st.text_input("自定义 trend-backtest 仓库", value=trend_repo_default)
+        trend_repo = _directory_choice_value(trend_repo_choice, trend_repo_custom, trend_repo_default)
+        data_root_default = os.environ.get("ASHARE_DATA_ROOT", str(Path(trend_repo) / "data" / "market" / "daily"))
+        data_root_choice = st.selectbox(
+            "本地行情根目录",
+            _data_root_options(data_root_default, trend_repo),
+            format_func=_directory_option_label,
+            key="data_root_choice",
+        )
+        data_root_custom = ""
+        if data_root_choice == CUSTOM_DIRECTORY_OPTION:
+            data_root_custom = st.text_input("自定义本地行情根目录", value=data_root_default)
+        data_root = _directory_choice_value(data_root_choice, data_root_custom, data_root_default)
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
         adjust = st.text_input("复权", value="qfq")
         download_engine = st.selectbox(
@@ -79,6 +98,55 @@ def main() -> None:
             provider=provider,
             download_engine=download_engine,
         )
+
+
+def _trend_repo_options(default_path: str | Path) -> list[str]:
+    desktop = Path.home() / "Desktop"
+    candidates = [
+        desktop / "trend-backtest",
+        desktop / "trend",
+        Path.cwd().parent / "trend-backtest",
+        Path.cwd().parent / "trend",
+    ]
+    return _directory_options(default_path, candidates)
+
+
+def _data_root_options(default_path: str | Path, trend_repo: str | Path) -> list[str]:
+    trend_repo_path = Path(trend_repo).expanduser()
+    desktop = Path.home() / "Desktop"
+    candidates = [
+        trend_repo_path / "data" / "market" / "daily",
+        desktop / "trend-backtest" / "data" / "market" / "daily",
+        desktop / "trend" / "data" / "market" / "daily",
+    ]
+    return _directory_options(default_path, candidates)
+
+
+def _directory_options(default_path: str | Path, candidates: list[str | Path]) -> list[str]:
+    default_text = _directory_text(default_path)
+    options: list[str] = []
+    for value in [default_path, *candidates]:
+        text = _directory_text(value)
+        if not text or text in options:
+            continue
+        if text == default_text or Path(text).exists():
+            options.append(text)
+    options.append(CUSTOM_DIRECTORY_OPTION)
+    return options
+
+
+def _directory_choice_value(choice: str, custom_value: str, fallback: str | Path) -> str:
+    if choice == CUSTOM_DIRECTORY_OPTION:
+        return custom_value.strip() or _directory_text(fallback)
+    return choice.strip() or _directory_text(fallback)
+
+
+def _directory_text(value: str | Path) -> str:
+    return str(Path(str(value)).expanduser()) if str(value).strip() else ""
+
+
+def _directory_option_label(value: str) -> str:
+    return "自定义..." if value == CUSTOM_DIRECTORY_OPTION else value
 
 
 def _render_history_tab(
