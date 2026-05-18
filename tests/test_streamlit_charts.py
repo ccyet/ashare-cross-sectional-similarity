@@ -165,7 +165,10 @@ def test_history_kline_series_uses_current_and_historical_windows() -> None:
 
     series = _history_kline_series(bars, result, forward_bars=2)
 
-    assert [item["title"] for item in series] == ["当前窗口", "样本1"]
+    assert [item["title"] for item in series] == [
+        "当前窗口（2024-01-11 至 2024-01-15）",
+        "样本1（2024-01-01 至 2024-01-05）",
+    ]
     assert series[0]["windowEndTime"] == "2024-01-15"
     assert series[0]["forwardSize"] == 2
     assert series[1]["windowEndTime"] == "2024-01-05"

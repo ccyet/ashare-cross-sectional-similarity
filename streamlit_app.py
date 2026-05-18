@@ -1643,7 +1643,7 @@ def _history_kline_series(
         chart_window = chart_source.head(len(matching_window) + forward_bars)
         series.append(
             {
-                "title": title,
+                "title": _history_kline_title(title, matching_window),
                 "windowEndTime": pd.Timestamp(matching_window["date"].iloc[-1]).strftime("%Y-%m-%d"),
                 "windowSize": int(len(matching_window)),
                 "forwardSize": int(max(0, len(chart_window) - len(matching_window))),
@@ -1660,6 +1660,12 @@ def _history_kline_series(
             }
         )
     return series
+
+
+def _history_kline_title(label: str, window: pd.DataFrame) -> str:
+    if window.empty or "date" not in window.columns:
+        return label
+    return f"{label}（{_date_text(window['date'].min())} 至 {_date_text(window['date'].max())}）"
 
 
 def _parse_horizons(value: str) -> list[int]:
