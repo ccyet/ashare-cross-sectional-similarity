@@ -1845,7 +1845,22 @@ def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
         return _kline_empty_message()
     panels = "\n".join(_kline_svg_panel(item) for item in series)
     return f"""
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;width:100%;">
+<style>
+.klineGrid {{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  width: 100%;
+  align-items: start;
+}}
+@media (max-width: 980px) {{
+  .klineGrid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+}}
+@media (max-width: 640px) {{
+  .klineGrid {{ grid-template-columns: 1fr; }}
+}}
+</style>
+<div class="klineGrid">
 {panels}
 </div>
 """
@@ -1854,9 +1869,9 @@ def _lightweight_kline_chart_html(series: list[dict[str, object]]) -> str:
 def _kline_chart_component_height(series: list[dict[str, object]]) -> int:
     if not series:
         return 160
-    panel_height = 300
-    gap = 12
-    rows = math.ceil(len(series) / 2)
+    panel_height = 390
+    gap = 18
+    rows = math.ceil(len(series) / 3)
     return rows * panel_height + max(0, rows - 1) * gap + 32
 
 
@@ -1875,18 +1890,18 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
     forward_size = int(item.get("forwardSize") or 0)
     if not rows:
         return f"""
-<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#ffffff;">
+<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#ffffff;">
   <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
-  <div style="height:220px;display:flex;align-items:center;justify-content:center;color:#6b7280;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">没有可绘制的K线数据</div>
+  <div style="height:300px;display:flex;align-items:center;justify-content:center;color:#6b7280;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">没有可绘制的K线数据</div>
 </div>
 """
 
-    width = 360.0
-    height = 240.0
-    left = 42.0
-    right = 12.0
-    top = 14.0
-    bottom = 38.0
+    width = 420.0
+    height = 300.0
+    left = 48.0
+    right = 14.0
+    top = 16.0
+    bottom = 44.0
     plot_width = width - left - right
     plot_height = height - top - bottom
     low = min(row["low"] for row in rows)
@@ -1952,9 +1967,9 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
 
     svg = "\n".join(elements)
     return f"""
-<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#ffffff;">
+<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#ffffff;">
   <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
-  <svg viewBox="0 0 360 240" role="img" aria-label="{title} K线图" style="width:100%;height:240px;display:block;">{svg}</svg>
+  <svg viewBox="0 0 420 300" role="img" aria-label="{title} K线图" style="width:100%;height:300px;display:block;">{svg}</svg>
   <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#4b5563;margin-top:4px;">命中区间 {window_size} 根 | 后续 {forward_size} 根</div>
 </div>
 """

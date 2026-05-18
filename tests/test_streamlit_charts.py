@@ -508,6 +508,7 @@ def test_lightweight_kline_chart_renders_inline_svg_without_external_dependency(
     assert "<svg" in html
     assert "data-kline-panel" in html
     assert "data-kline-candle" in html
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in html
     assert "lightweight-charts" not in html
 
 
