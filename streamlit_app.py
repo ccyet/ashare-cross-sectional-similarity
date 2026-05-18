@@ -33,7 +33,7 @@ from ashare_cross_section_similarity.universe import normalize_symbol, unique_sy
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
-CUSTOM_DIRECTORY_OPTION = "__custom_directory__"
+UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 
 
 def main() -> None:
@@ -43,17 +43,15 @@ def main() -> None:
     with st.sidebar:
         st.header("通用设置")
         trend_repo_default = os.environ.get("ASHARE_TREND_REPO", str(default_trend_repo()))
-        trend_repo = _render_directory_input(
+        trend_repo = _render_directory_picker(
             "原 trend-backtest 仓库",
             trend_repo_default,
-            _trend_repo_candidates(),
             "trend_repo",
         )
         data_root_default = os.environ.get("ASHARE_DATA_ROOT", str(Path(trend_repo) / "data" / "market" / "daily"))
-        data_root = _render_directory_input(
+        data_root = _render_directory_picker(
             "本地行情根目录",
             data_root_default,
-            _data_root_candidates(trend_repo),
             "data_root",
         )
         timeframe = st.selectbox("周期", ["1d", "30m", "15m", "5m", "1m"], index=0)
@@ -92,117 +90,121 @@ def main() -> None:
         )
 
 
-def _render_directory_input(label: str, default_path: str | Path, candidates: list[str | Path], key: str) -> str:
-    choice = st.selectbox(
-        label,
-        _directory_options(default_path, candidates),
-        format_func=_directory_option_label,
-        key=f"{key}_choice",
-    )
-    if choice != CUSTOM_DIRECTORY_OPTION:
-        return _directory_choice_value(choice, "", default_path)
-    selected = _render_directory_browser(f"选择{label}", default_path, key)
-    manual = st.text_input(f"手动输入{label}（可选）", value="", key=f"{key}_manual")
-    return manual.strip() or selected
+def _render_directory_picker(label: str, default_path: str | Path, key: str) -> str:
+    state_key = f"{key}_path"
+    default_key = f"{key}_default_path"
+    default_text = _path_text(default_path)
+    previous_default = st.session_state.get(default_key)
+    if state_key not in st.session_state or st.session_state.get(state_key) == previous_default:
+        st.session_state[state_key] = default_text
+    st.session_state[default_key] = default_text
+    st.caption(label)
+    _render_selected_path(str(st.session_state[state_key]))
+    if st.button(f"选择{label}", key=f"{key}_pick"):
+        try:
+            selected = _pick_directory(st.session_state[state_key], title=f"选择{label}")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"文件夹选择器打开失败：{exc}")
+        else:
+            if selected:
+                st.session_state[state_key] = selected
+    return str(st.session_state[state_key])
 
 
-def _render_directory_browser(label: str, default_path: str | Path, key: str) -> str:
-    state_key = f"{key}_browser_path"
+def _render_file_picker(
+    label: str,
+    initial_path: str | Path,
+    key: str,
+    filetypes: list[tuple[str, str | tuple[str, ...]]],
+) -> str:
+    state_key = f"{key}_path"
     if state_key not in st.session_state:
-        st.session_state[state_key] = _nearest_existing_directory(default_path)
-    current = str(st.session_state[state_key])
-    selected = st.selectbox(
-        label,
-        _directory_browser_options(current, default_path),
-        format_func=_directory_browser_option_label,
-        key=f"{key}_browser_select",
+        st.session_state[state_key] = ""
+    st.caption(label)
+    _render_selected_path(str(st.session_state[state_key]) if st.session_state[state_key] else "未选择")
+    button_col, clear_col = st.columns([2, 1])
+    if button_col.button(f"选择{label}", key=f"{key}_pick"):
+        try:
+            selected = _pick_file(st.session_state[state_key] or initial_path, title=f"选择{label}", filetypes=filetypes)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"文件选择器打开失败：{exc}")
+        else:
+            if selected:
+                st.session_state[state_key] = selected
+    if st.session_state[state_key] and clear_col.button("清除", key=f"{key}_clear"):
+        st.session_state[state_key] = ""
+    return str(st.session_state[state_key])
+
+
+def _render_selected_path(path: str) -> None:
+    st.markdown(
+        f"<div style='font-size:12px;line-height:1.35;word-break:break-all;color:#374151;margin:-0.25rem 0 0.35rem 0;'>{escape(path)}</div>",
+        unsafe_allow_html=True,
     )
-    if selected != current:
-        st.session_state[state_key] = selected
-    return selected
 
 
-def _trend_repo_candidates() -> list[Path]:
-    desktop = Path.home() / "Desktop"
-    return [
-        desktop / "trend-backtest",
-        desktop / "trend",
-        Path.cwd().parent / "trend-backtest",
-        Path.cwd().parent / "trend",
-    ]
+def _pick_directory(initial_path: str | Path, *, title: str) -> str:
+    return _open_native_path_dialog("directory", initial_path, title=title) or ""
 
 
-def _data_root_candidates(trend_repo: str | Path) -> list[Path]:
-    trend_repo_path = Path(trend_repo).expanduser()
-    desktop = Path.home() / "Desktop"
-    return [
-        trend_repo_path / "data" / "market" / "daily",
-        desktop / "trend-backtest" / "data" / "market" / "daily",
-        desktop / "trend" / "data" / "market" / "daily",
-    ]
+def _pick_file(
+    initial_path: str | Path,
+    *,
+    title: str,
+    filetypes: list[tuple[str, str | tuple[str, ...]]],
+) -> str:
+    return _open_native_path_dialog("file", initial_path, title=title, filetypes=filetypes) or ""
 
 
-def _directory_options(default_path: str | Path, candidates: list[str | Path]) -> list[str]:
-    default_text = _directory_text(default_path)
-    options: list[str] = []
-    for value in [default_path, *candidates]:
-        text = _directory_text(value)
-        if not text or text in options:
-            continue
-        if text == default_text or Path(text).exists():
-            options.append(text)
-    options.append(CUSTOM_DIRECTORY_OPTION)
-    return options
+def _open_native_path_dialog(
+    dialog_type: str,
+    initial_path: str | Path,
+    *,
+    title: str,
+    filetypes: list[tuple[str, str | tuple[str, ...]]] | None = None,
+) -> str:
+    import tkinter as tk
+    from tkinter import filedialog
 
-
-def _directory_browser_options(current_path: str | Path, fallback: str | Path) -> list[str]:
-    current = Path(_nearest_existing_directory(current_path, fallback))
-    options = [str(current)]
-    if current.parent != current:
-        options.append(str(current.parent))
+    root = tk.Tk()
+    root.withdraw()
     try:
-        children = sorted(path for path in current.iterdir() if path.is_dir())
-    except OSError:
-        children = []
-    for child in children:
-        text = str(child)
-        if text not in options:
-            options.append(text)
-    return options
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+        except tk.TclError:
+            pass
+        initial_dir = _picker_initial_directory(initial_path, Path.home())
+        if dialog_type == "directory":
+            selected = filedialog.askdirectory(title=title, initialdir=initial_dir, mustexist=True)
+        elif dialog_type == "file":
+            selected = filedialog.askopenfilename(title=title, initialdir=initial_dir, filetypes=filetypes or [])
+        else:
+            raise ValueError(f"未知选择器类型：{dialog_type}")
+    finally:
+        root.destroy()
+    return str(selected or "")
 
 
-def _directory_choice_value(choice: str, custom_value: str, fallback: str | Path) -> str:
-    if choice == CUSTOM_DIRECTORY_OPTION:
-        return custom_value.strip() or _directory_text(fallback)
-    return choice.strip() or _directory_text(fallback)
-
-
-def _directory_text(value: str | Path) -> str:
-    return str(Path(str(value)).expanduser()) if str(value).strip() else ""
-
-
-def _nearest_existing_directory(value: str | Path, fallback: str | Path | None = None) -> str:
-    candidates = [Path(str(value)).expanduser()]
-    if fallback is not None:
-        candidates.append(Path(str(fallback)).expanduser())
-    candidates.append(Path.home())
-    for candidate in candidates:
-        path = candidate if not candidate.is_file() else candidate.parent
+def _picker_initial_directory(value: str | Path, fallback: str | Path) -> str:
+    paths = [Path(str(value)).expanduser()] if str(value).strip() else []
+    paths.append(Path(str(fallback)).expanduser())
+    paths.append(Path.home())
+    for path in paths:
+        candidate = path.parent if path.exists() and path.is_file() else path
+        if not candidate.exists() and path.suffix:
+            candidate = path.parent
         while True:
-            if path.exists() and path.is_dir():
-                return str(path)
-            if path.parent == path:
+            if candidate.exists() and candidate.is_dir():
+                return str(candidate)
+            if candidate.parent == candidate:
                 break
-            path = path.parent
+            candidate = candidate.parent
     return str(Path.home())
 
 
-def _directory_option_label(value: str) -> str:
-    return "自定义..." if value == CUSTOM_DIRECTORY_OPTION else value
-
-
-def _directory_browser_option_label(value: str) -> str:
-    return value
+def _path_text(value: str | Path) -> str:
+    return str(Path(str(value)).expanduser()) if str(value).strip() else ""
 
 
 def _render_history_tab(
@@ -355,7 +357,8 @@ def _render_cross_section_tab(
     path_weight = col6.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="cross_path_weight")
     universe_symbols = st.text_area("搜索范围代码", value="", help="逗号分隔；留空时尝试读取本地目录下全部 parquet。")
     col7, col8, col9 = st.columns(3)
-    universe_file = col7.text_input("搜索范围文件", value="")
+    with col7:
+        universe_file = _render_file_picker("搜索范围文件", data_root, "cross_universe_file", UNIVERSE_FILE_TYPES)
     universe_index = col8.text_input("指数成分", value="", help="如 000300，需要 akshare。")
     universe_industry = col9.text_input("行业板块", value="", help="如 半导体，需要 akshare。")
     universe_concept = st.text_input("概念板块", value="", help="如 融资融券，需要 akshare。")

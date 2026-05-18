@@ -7,7 +7,6 @@ from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
-    CUSTOM_DIRECTORY_OPTION,
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_overview_metrics,
@@ -19,12 +18,10 @@ from streamlit_app import (
     _format_cross_section_stats,
     _format_results,
     _forward_stats_load_end,
-    _directory_choice_value,
-    _directory_browser_options,
-    _directory_options,
     _kline_chart_component_height,
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
+    _picker_initial_directory,
     _pin_symbol_row,
     _stock_name_map_from_table,
     _symbols_requiring_download,
@@ -46,34 +43,15 @@ def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
     )
 
 
-def test_directory_options_keep_default_first_and_custom_last(tmp_path: Path) -> None:
-    default_path = tmp_path / "trend-backtest"
-    default_path.mkdir()
-    other_path = tmp_path / "other-trend"
-    other_path.mkdir()
+def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_path: Path) -> None:
+    folder = tmp_path / "trend"
+    folder.mkdir()
+    file_path = folder / "universe.csv"
+    file_path.write_text("symbol\n000001.SZ\n")
 
-    options = _directory_options(default_path, [other_path, default_path, tmp_path / "missing"])
-
-    assert options == [str(default_path), str(other_path), CUSTOM_DIRECTORY_OPTION]
-
-
-def test_directory_choice_value_uses_custom_fallback_when_blank() -> None:
-    assert _directory_choice_value("/tmp/trend", "", "/tmp/default") == "/tmp/trend"
-    assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "/tmp/custom", "/tmp/default") == "/tmp/custom"
-    assert _directory_choice_value(CUSTOM_DIRECTORY_OPTION, "", "/tmp/default") == "/tmp/default"
-
-
-def test_directory_browser_options_include_parent_and_child_dirs(tmp_path: Path) -> None:
-    current = tmp_path / "trend"
-    child = current / "data"
-    child.mkdir(parents=True)
-    (current / "not-a-dir.txt").write_text("x")
-
-    options = _directory_browser_options(current, tmp_path)
-
-    assert options[:2] == [str(current), str(tmp_path)]
-    assert str(child) in options
-    assert str(current / "not-a-dir.txt") not in options
+    assert _picker_initial_directory(folder, tmp_path) == str(folder)
+    assert _picker_initial_directory(file_path, tmp_path) == str(folder)
+    assert _picker_initial_directory(tmp_path / "missing" / "universe.csv", folder) == str(tmp_path)
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:
