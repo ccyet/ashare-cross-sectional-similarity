@@ -32,6 +32,7 @@ from ashare_cross_section_similarity.universe import normalize_symbol, unique_sy
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
+DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
 
 
 def main() -> None:
@@ -291,44 +292,65 @@ def _render_cross_section_tab(
         st.info(f"当前搜索范围 {len(universe):,} 个标的。需要覆盖明细时点击检查。")
 
     st.markdown("**2. 数据抓取 / 更新**")
-    st.caption("默认委托 trend-backtest；也可用 OpenBB/AKShare 直接写入本地 parquet。")
-    if st.button("下载或更新当前目标与搜索范围行情", key="cross_download"):
+    st.caption("先检查覆盖，只补缺文件、区间缺失或读取失败的标的；默认委托 trend-backtest。")
+    if st.button("检查并下载缺失行情", key="cross_download"):
         download_end = _forward_stats_load_end(end)
-        progress_bar = st.progress(0.0, text=f"准备下载 {len(unique_symbols(symbols)):,} 个标的")
-        progress_text = st.empty()
-
-        def report_progress(completed: int, total: int, symbol: str, status: str) -> None:
-            ratio = completed / total if total else 1.0
-            action = "正在下载" if status == "running" else "已完成"
-            progress_bar.progress(ratio, text=f"{completed}/{total} {action} {symbol}")
-            progress_text.caption(f"当前标的：{symbol}；状态：{status}")
-
-        update_result = _download_symbols_with_progress(
-            symbols=symbols,
-            timeframe=timeframe,
-            adjust=adjust,
-            start=start,
-            end=download_end,
-            trend_repo=Path(trend_repo),
-            data_root=Path(data_root),
-            provider=provider,
-            download_engine=download_engine,
-            progress_callback=report_progress,
-        )
-        progress_bar.progress(1.0, text="下载任务已完成")
-        progress_text.caption(f"下载截止：{download_end}，用于覆盖窗口后 3/5/10 根收益统计。")
-        st.cache_data.clear()
-        st.session_state.pop("cross_data_check", None)
-        st.session_state.pop("cross_data_check_key", None)
         normalized_targets = unique_symbols([target_symbol])
-        if normalized_targets:
-            normalized_target = normalized_targets[0]
+        normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
+        check_for_download = check if check is not None and st.session_state.get("cross_data_check_key") == check_key else None
+        if check_for_download is None:
+            with st.spinner("先检查本地数据覆盖..."):
+                check_for_download = _cached_data_check(
+                    tuple(symbols),
+                    data_root,
+                    timeframe,
+                    adjust,
+                    start,
+                    end,
+                )
+            st.session_state["cross_data_check_key"] = check_key
+            st.session_state["cross_data_check"] = check_for_download
+
+        download_symbols = _symbols_requiring_download(check_for_download)
+        if not download_symbols:
+            st.success("所选区间本地行情已覆盖，无需下载。")
+            st.dataframe(
+                _centered(_format_status(_pin_symbol_row(check_for_download, normalized_target))),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(f"本次仅下载缺失标的 {len(download_symbols):,} / {len(unique_symbols(symbols)):,} 个。")
+            progress_bar = st.progress(0.0, text=f"准备下载 {len(download_symbols):,} 个缺失标的")
+            progress_text = st.empty()
+
+            def report_progress(completed: int, total: int, symbol: str, status: str) -> None:
+                ratio = completed / total if total else 1.0
+                action = "正在下载" if status == "running" else "已完成"
+                progress_bar.progress(ratio, text=f"{completed}/{total} {action} {symbol}")
+                progress_text.caption(f"当前标的：{symbol}；状态：{status}")
+
+            update_result = _download_symbols_with_progress(
+                symbols=download_symbols,
+                timeframe=timeframe,
+                adjust=adjust,
+                start=start,
+                end=download_end,
+                trend_repo=Path(trend_repo),
+                data_root=Path(data_root),
+                provider=provider,
+                download_engine=download_engine,
+                progress_callback=report_progress,
+            )
+            progress_bar.progress(1.0, text="下载任务已完成")
+            progress_text.caption(f"下载截止：{download_end}，用于覆盖窗口后 3/5/10 根收益统计。")
+            st.cache_data.clear()
+            st.session_state.pop("cross_data_check", None)
+            st.session_state.pop("cross_data_check_key", None)
             st.dataframe(_centered(_format_status(_pin_symbol_row(update_result, normalized_target))), use_container_width=True, hide_index=True)
             target_status = update_result.loc[update_result["symbol"] == normalized_target, "status"]
             if not target_status.empty and target_status.iloc[0] != "available":
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
-        else:
-            st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
 
     st.markdown("**3. 运行横截面搜索**")
     if not st.button("运行横截面搜索", type="primary", key="cross_run"):
@@ -591,6 +613,13 @@ def _download_symbols_with_progress(
         if progress_callback is not None:
             progress_callback(index + 1, total, symbol, status)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
+
+
+def _symbols_requiring_download(check: pd.DataFrame) -> list[str]:
+    if check.empty or not {"symbol", "status"}.issubset(check.columns):
+        return []
+    missing = check.loc[check["status"].astype(str).isin(DOWNLOAD_REQUIRED_STATUSES), "symbol"]
+    return unique_symbols(missing.astype(str).tolist())
 
 
 def _forward_stats_load_end(end: str | pd.Timestamp, today: pd.Timestamp | None = None) -> str:

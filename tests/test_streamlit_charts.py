@@ -20,6 +20,7 @@ from streamlit_app import (
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
     _pin_symbol_row,
+    _symbols_requiring_download,
 )
 
 
@@ -386,6 +387,17 @@ def test_pin_symbol_row_keeps_target_visible_at_top() -> None:
     pinned = _pin_symbol_row(frame, "000852.sh", limit=2)
 
     assert pinned["symbol"].tolist() == ["000852.SH", "000503.SZ"]
+
+
+def test_symbols_requiring_download_skips_available() -> None:
+    check = pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000002.SZ"],
+            "status": ["available", "missing_file", "missing_window", "read_error", "missing_file"],
+        }
+    )
+
+    assert _symbols_requiring_download(check) == ["000002.SZ", "000003.SZ", "000004.SZ"]
 
 
 def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> None:
