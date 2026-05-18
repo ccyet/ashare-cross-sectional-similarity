@@ -35,6 +35,10 @@ PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "read_error"}
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
+SIZE_SPREAD_START = "2016-01-01"
+SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
+SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
+SIZE_SPREAD_SYMBOLS = (SIZE_SPREAD_SMALL_SYMBOL, SIZE_SPREAD_LARGE_SYMBOL)
 
 
 def main() -> None:
@@ -405,7 +409,28 @@ def _render_history_tab(
     with bucket_col:
         st.caption("相似度分层表现")
         st.dataframe(_centered(_format_history_stats(_history_bucket_summary(result.results))), use_container_width=True, hide_index=True)
-    st.markdown("**5. K线走势核验**")
+    st.markdown("**5. 大小盘价差率**")
+    st.caption("以 2016-01-01 后首个共同交易日为基准，将中证1000和沪深300分别归一化后相减。")
+    size_spread_bars = _cached_load_local_bars(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        symbols=SIZE_SPREAD_SYMBOLS,
+        start=SIZE_SPREAD_START,
+        end=_forward_stats_load_end(as_of),
+    )
+    size_spread = _size_spread_series(size_spread_bars)
+    if size_spread.empty:
+        st.warning("缺少 000852.SH 或 000300.SH 的本地行情，暂不能计算大小盘价差率。")
+    else:
+        st.plotly_chart(_size_spread_chart(size_spread, result.current_window, result.historical_windows), use_container_width=True)
+        st.dataframe(
+            _centered(_format_size_spread_stats(_size_spread_window_stats(size_spread, result.current_window, result.historical_windows))),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("**6. K线走势核验**")
     chart_bars = _cached_load_local_bars(
         data_root=data_root,
         timeframe=timeframe,
@@ -1162,6 +1187,92 @@ def _history_window_label(frame: pd.DataFrame, index: int) -> str:
     return f"{_date_text(frame.loc[index, '窗口开始'])} 至 {_date_text(frame.loc[index, '窗口结束'])}"
 
 
+def _size_spread_series(
+    bars: pd.DataFrame,
+    *,
+    start: str | pd.Timestamp = SIZE_SPREAD_START,
+    small_symbol: str = SIZE_SPREAD_SMALL_SYMBOL,
+    large_symbol: str = SIZE_SPREAD_LARGE_SYMBOL,
+) -> pd.DataFrame:
+    columns = ["date", "中证1000归一收益", "沪深300归一收益", "大小盘价差率"]
+    if bars.empty:
+        return pd.DataFrame(columns=columns)
+    small = normalize_symbol(small_symbol)
+    large = normalize_symbol(large_symbol)
+    frame = bars.copy()
+    frame["stock_code"] = frame["stock_code"].map(normalize_symbol)
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.loc[
+        (frame["date"] >= pd.Timestamp(start))
+        & frame["stock_code"].isin([small, large])
+        & frame["close"].notna()
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    pivot = frame.pivot_table(index="date", columns="stock_code", values="close", aggfunc="last").sort_index()
+    if small not in pivot.columns or large not in pivot.columns:
+        return pd.DataFrame(columns=columns)
+    pivot = pivot.dropna(subset=[small, large])
+    if pivot.empty:
+        return pd.DataFrame(columns=columns)
+    base = pivot.iloc[0]
+    if base[small] <= 0 or base[large] <= 0:
+        return pd.DataFrame(columns=columns)
+    small_return = pivot[small] / base[small] - 1.0
+    large_return = pivot[large] / base[large] - 1.0
+    return pd.DataFrame(
+        {
+            "date": pivot.index,
+            "中证1000归一收益": small_return.to_numpy(dtype=float),
+            "沪深300归一收益": large_return.to_numpy(dtype=float),
+            "大小盘价差率": (small_return - large_return).to_numpy(dtype=float),
+        }
+    ).reset_index(drop=True)
+
+
+def _size_spread_window_stats(
+    spread: pd.DataFrame,
+    current_window: pd.DataFrame,
+    historical_windows: list[pd.DataFrame],
+    top_n: int = 6,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    if spread.empty or "大小盘价差率" not in spread.columns:
+        return pd.DataFrame(rows)
+    spread_frame = spread.copy()
+    spread_frame["date"] = pd.to_datetime(spread_frame["date"], errors="coerce")
+    spread_frame["大小盘价差率"] = pd.to_numeric(spread_frame["大小盘价差率"], errors="coerce")
+    spread_frame = spread_frame.dropna(subset=["date", "大小盘价差率"]).sort_values("date")
+    windows: list[tuple[str, pd.DataFrame]] = [("当前窗口", current_window)]
+    windows.extend((f"样本{index}", window) for index, window in enumerate(historical_windows[:top_n], start=1))
+    for label, window in windows:
+        if window.empty or "date" not in window.columns:
+            continue
+        start = pd.Timestamp(window["date"].min())
+        end = inclusive_end_timestamp(window["date"].max())
+        window_spread = spread_frame.loc[spread_frame["date"].between(start, end)]
+        if window_spread.empty:
+            continue
+        start_value = float(window_spread["大小盘价差率"].iloc[0])
+        end_value = float(window_spread["大小盘价差率"].iloc[-1])
+        as_of_history = spread_frame.loc[spread_frame["date"] <= window_spread["date"].iloc[-1], "大小盘价差率"].dropna()
+        percentile = float((as_of_history <= end_value).mean()) if not as_of_history.empty else float("nan")
+        rows.append(
+            {
+                "窗口": label,
+                "区间开始": window_spread["date"].iloc[0],
+                "区间结束": window_spread["date"].iloc[-1],
+                "起点价差率": start_value,
+                "终点价差率": end_value,
+                "区间变化": end_value - start_value,
+                "区间均值": float(window_spread["大小盘价差率"].mean()),
+                "终点历史分位": percentile,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _cross_section_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
@@ -1246,6 +1357,15 @@ def _format_history_stats(frame: pd.DataFrame) -> pd.DataFrame:
             result[column] = pd.to_numeric(result[column], errors="coerce").map(
                 lambda value: "" if pd.isna(value) else f"{value:.2f}"
             )
+    return result
+
+
+def _format_size_spread_stats(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    result = _format_percent_columns(result, ["起点价差率", "终点价差率", "区间变化", "区间均值", "终点历史分位"])
+    for column in ["区间开始", "区间结束"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
     return result
 
 
@@ -1400,6 +1520,59 @@ def _cross_section_price_chart(
         hovermode="x unified",
     )
     return fig
+
+
+def _size_spread_chart(
+    spread: pd.DataFrame,
+    current_window: pd.DataFrame,
+    historical_windows: list[pd.DataFrame],
+    top_n: int = 6,
+) -> go.Figure:
+    fig = go.Figure()
+    if spread.empty:
+        fig.update_layout(title="大小盘价差率")
+        return fig
+    spread_frame = spread.copy()
+    spread_frame["date"] = pd.to_datetime(spread_frame["date"], errors="coerce")
+    spread_frame["大小盘价差率"] = pd.to_numeric(spread_frame["大小盘价差率"], errors="coerce")
+    spread_frame = spread_frame.dropna(subset=["date", "大小盘价差率"]).sort_values("date")
+    fig.add_scatter(
+        x=spread_frame["date"],
+        y=spread_frame["大小盘价差率"],
+        mode="lines",
+        name="大小盘价差率",
+        line={"color": "#dc2626", "width": 2},
+    )
+    fig.add_hline(y=0, line={"color": "#6b7280", "dash": "dot", "width": 1})
+    _add_spread_window_vrect(fig, current_window, label="当前窗口", color="#2563eb", opacity=0.14)
+    for index, window in enumerate(historical_windows[:top_n], start=1):
+        _add_spread_window_vrect(fig, window, label=f"样本{index}", color="#64748b", opacity=0.07)
+    fig.update_layout(
+        title="大小盘价差率：中证1000 - 沪深300（2016-01-01归一）",
+        xaxis_title="日期",
+        yaxis_title="价差率",
+        yaxis={"tickformat": ".2%"},
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _add_spread_window_vrect(fig: go.Figure, window: pd.DataFrame, *, label: str, color: str, opacity: float) -> None:
+    if window.empty or "date" not in window.columns:
+        return
+    start = pd.Timestamp(window["date"].min())
+    end = pd.Timestamp(window["date"].max())
+    if pd.isna(start) or pd.isna(end):
+        return
+    fig.add_vrect(
+        x0=start,
+        x1=end,
+        fillcolor=color,
+        opacity=opacity,
+        line_width=0,
+        annotation_text=label,
+        annotation_position="top left",
+    )
 
 
 def _history_path_chart(current_window: pd.DataFrame, historical_windows: list[pd.DataFrame]) -> go.Figure:

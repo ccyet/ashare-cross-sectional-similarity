@@ -25,6 +25,9 @@ from streamlit_app import (
     _history_forward_summary,
     _history_kline_series,
     _history_quick_window_feedback,
+    _size_spread_chart,
+    _size_spread_series,
+    _size_spread_window_stats,
     _date_tolerance_load_start,
     _forward_stats_load_end,
     _kline_chart_component_height,
@@ -166,6 +169,68 @@ def test_history_kline_series_uses_current_and_historical_windows() -> None:
     assert series[0]["forwardSize"] == 2
     assert series[1]["windowEndTime"] == "2024-01-05"
     assert series[1]["data"][-1]["time"] == "2024-01-07"
+
+
+def test_size_spread_series_normalizes_from_first_common_trading_day() -> None:
+    bars = pd.concat(
+        [
+            _bars("000852.SH", [1000, 1100, 1050]),
+            _bars("000300.SH", [5000, 5050, 5500]),
+        ],
+        ignore_index=True,
+    )
+
+    spread = _size_spread_series(bars, start="2024-01-01")
+
+    assert spread["date"].tolist() == pd.date_range("2024-01-01", periods=3, freq="D").tolist()
+    assert spread["中证1000归一收益"].round(4).tolist() == [0.0, 0.1, 0.05]
+    assert spread["沪深300归一收益"].round(4).tolist() == [0.0, 0.01, 0.1]
+    assert spread["大小盘价差率"].round(4).tolist() == [0.0, 0.09, -0.05]
+
+
+def test_size_spread_series_returns_empty_when_one_index_is_missing() -> None:
+    spread = _size_spread_series(_bars("000852.SH", [1000, 1100, 1050]), start="2024-01-01")
+
+    assert spread.empty
+
+
+def test_size_spread_window_stats_measure_window_change_and_point_in_time_percentile() -> None:
+    spread = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=5, freq="D"),
+            "大小盘价差率": [0.0, 0.1, -0.05, 0.2, 0.15],
+        }
+    )
+    current = _bars("000001.SZ", [10, 11, 12]).iloc[1:4].reset_index(drop=True)
+    historical = _bars("000001.SZ", [10, 11, 12]).iloc[0:2].reset_index(drop=True)
+
+    stats = _size_spread_window_stats(spread, current, [historical])
+
+    current_row = stats.loc[stats["窗口"] == "当前窗口"].iloc[0]
+    assert current_row["区间开始"] == pd.Timestamp("2024-01-02")
+    assert current_row["区间结束"] == pd.Timestamp("2024-01-03")
+    assert current_row["起点价差率"] == 0.1
+    assert current_row["终点价差率"] == -0.05
+    assert round(current_row["区间变化"], 4) == -0.15
+    assert current_row["终点历史分位"] == 1 / 3
+
+
+def test_size_spread_chart_marks_current_and_historical_windows() -> None:
+    spread = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=5, freq="D"),
+            "大小盘价差率": [0.0, 0.1, -0.05, 0.2, 0.15],
+        }
+    )
+    current = _bars("000001.SZ", [10, 11, 12]).iloc[1:4].reset_index(drop=True)
+    historical = _bars("000001.SZ", [10, 11, 12]).iloc[0:2].reset_index(drop=True)
+
+    fig = _size_spread_chart(spread, current, [historical])
+
+    assert fig.data[0].name == "大小盘价差率"
+    assert list(fig.data[0].y) == [0.0, 0.1, -0.05, 0.2, 0.15]
+    assert fig.layout.yaxis.tickformat == ".2%"
+    assert len(fig.layout.shapes) >= 3
 
 
 def test_cross_section_load_range_includes_date_tolerance_buffer() -> None:
