@@ -26,6 +26,7 @@ from streamlit_app import (
     _history_forward_summary,
     _history_kline_series,
     _history_quick_window_feedback,
+    _local_data_fingerprint,
     _size_spread_chart,
     _size_spread_series,
     _size_spread_window_stats,
@@ -89,6 +90,19 @@ def test_file_picker_entries_filters_supported_files(tmp_path: Path) -> None:
 
     assert [path.name for path in directories] == ["sub"]
     assert [path.name for path in files] == ["prices.parquet", "universe.csv"]
+
+
+def test_local_data_fingerprint_changes_when_parquet_file_changes(tmp_path: Path) -> None:
+    root = tmp_path / "daily" / "qfq"
+    root.mkdir(parents=True)
+    path = root / "000001.SZ.parquet"
+    pd.DataFrame({"date": ["2024-01-01"]}).to_parquet(path, index=False)
+
+    first = _local_data_fingerprint(tmp_path / "daily", "1d", "qfq", ("000001.SZ",))
+    pd.DataFrame({"date": ["2024-01-01", "2024-01-02"]}).to_parquet(path, index=False)
+    second = _local_data_fingerprint(tmp_path / "daily", "1d", "qfq", ("000001.SZ",))
+
+    assert first != second
 
 
 def test_date_range_error_reports_reversed_range() -> None:

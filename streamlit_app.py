@@ -335,22 +335,35 @@ def _render_history_tab(
         return
 
     st.markdown("**1. 数据检查**")
+    normalized_symbol = normalize_symbol(symbol)
+    target_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, (normalized_symbol,))
+    target_check = _cached_data_check(
+        (normalized_symbol,),
+        data_root,
+        timeframe,
+        adjust,
+        start,
+        as_of,
+        target_fingerprint,
+    )
     bars = _cached_load_local_bars(
         data_root=data_root,
         timeframe=timeframe,
         adjust=adjust,
-        symbols=(symbol,),
+        symbols=(normalized_symbol,),
         start="1900-01-01",
         end=as_of,
+        data_fingerprint=target_fingerprint,
     )
     selected_window = bars.loc[bars["date"].between(pd.Timestamp(start), inclusive_end_timestamp(as_of))] if not bars.empty else bars
     if bars.empty:
         st.error("未找到该标的在区间结束前的本地行情。请先下载或检查代码、周期、复权目录。")
     else:
+        target_row = target_check.iloc[0] if not target_check.empty else None
         cols = st.columns(4)
         cols[0].metric("可用K线", f"{len(bars):,}")
-        cols[1].metric("最早日期", _date_text(bars["date"].min()))
-        cols[2].metric("最近日期", _date_text(bars["date"].max()))
+        cols[1].metric("本地开始", _date_text(target_row.get("local_start") if target_row is not None else bars["date"].min()))
+        cols[2].metric("本地结束", _date_text(target_row.get("local_end") if target_row is not None else bars["date"].max()))
         cols[3].metric("选定区间K线", f"{len(selected_window):,} 根")
         if len(selected_window) < 2:
             st.warning("选定区间内 K 线数量不足，至少需要 2 根。")
@@ -358,19 +371,27 @@ def _render_history_tab(
     with st.expander("缺数据时下载或更新"):
         download_start = st.text_input("下载开始", value="2018-01-01", key="history_download_start")
         if st.button("下载或更新该标的行情", key="history_download"):
-            with st.spinner("正在调用原 trend-backtest 更新行情..."):
-                update_result = update_local_bars(
-                    symbols=[symbol],
-                    timeframe=timeframe,
-                    adjust=adjust,
-                    start=download_start,
-                    end=as_of,
-                    trend_repo=Path(trend_repo),
-                    data_root=Path(data_root),
-                    provider=provider,
-                    download_engine=download_engine,
-                )
-            st.dataframe(_centered(_format_status(update_result)), use_container_width=True, hide_index=True)
+            progress = st.progress(0.0)
+            status_text = st.empty()
+
+            def _history_download_progress(done: int, total: int, current_symbol: str, status: str) -> None:
+                progress.progress(done / total if total else 1.0)
+                status_text.write(f"{done}/{total} {current_symbol}：{status}")
+
+            update_result = _download_symbols_with_progress(
+                symbols=[normalized_symbol],
+                timeframe=timeframe,
+                adjust=adjust,
+                start=download_start,
+                end=as_of,
+                trend_repo=Path(trend_repo),
+                data_root=Path(data_root),
+                provider=provider,
+                download_engine=download_engine,
+                progress_callback=_history_download_progress,
+            )
+            st.cache_data.clear()
+            st.dataframe(_centered(_format_data_check_status(update_result)), use_container_width=True, hide_index=True)
 
     st.markdown("**2. 运行历史搜索**")
     if not st.button("运行历史时序搜索", type="primary", key="history_run"):
@@ -421,6 +442,7 @@ def _render_history_tab(
         st.dataframe(_centered(_format_history_stats(_history_bucket_summary(result.results))), use_container_width=True, hide_index=True)
     st.markdown("**5. 大小盘价差率**")
     st.caption("以 2016-01-01 后首个共同交易日为基准，将中证1000和沪深300分别归一化后相减。")
+    size_spread_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, SIZE_SPREAD_SYMBOLS)
     size_spread_bars = _cached_load_local_bars(
         data_root=data_root,
         timeframe=timeframe,
@@ -428,6 +450,7 @@ def _render_history_tab(
         symbols=SIZE_SPREAD_SYMBOLS,
         start=SIZE_SPREAD_START,
         end=_forward_stats_load_end(as_of),
+        data_fingerprint=size_spread_fingerprint,
     )
     size_spread = _size_spread_series(size_spread_bars)
     if size_spread.empty:
@@ -448,6 +471,7 @@ def _render_history_tab(
         symbols=(result.symbol,),
         start="1900-01-01",
         end=_forward_stats_load_end(as_of),
+        data_fingerprint=target_fingerprint,
     )
     st.plotly_chart(_history_path_chart(result.current_window, result.historical_windows), use_container_width=True)
     history_kline_series = _history_kline_series(chart_bars, result, forward_bars=max(horizons) if horizons else 0)
@@ -543,12 +567,13 @@ def _render_cross_section_tab(
         st.error(f"搜索范围解析失败：{exc}")
         return
     symbols = [target_symbol, *universe]
+    symbols_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(symbols))
     tolerance_bars = int(date_tolerance_bars)
     coverage_start = _date_tolerance_load_start(start, tolerance_bars)
     coverage_end = _cross_section_load_end(end, tolerance_bars)
     st.markdown("**1. 数据检查**")
     st.caption("点击后检查目标和搜索范围在目标区间、日期容错和后验观察范围内是否已有本地行情；缺数据时可直接在本页下载。")
-    check_key = (tuple(symbols), data_root, timeframe, adjust, coverage_start, coverage_end, start, end, tolerance_bars)
+    check_key = (tuple(symbols), data_root, timeframe, adjust, coverage_start, coverage_end, start, end, tolerance_bars, symbols_fingerprint)
     if st.button("检查本地数据覆盖", key="cross_check"):
         try:
             _cached_data_check.clear()
@@ -560,6 +585,7 @@ def _render_cross_section_tab(
                 adjust,
                 coverage_start,
                 coverage_end,
+                symbols_fingerprint,
             )
         except Exception as exc:  # noqa: BLE001
             st.error(f"数据检查失败：{exc}")
@@ -605,6 +631,7 @@ def _render_cross_section_tab(
                     adjust,
                     coverage_start,
                     coverage_end,
+                    symbols_fingerprint,
                 )
             st.session_state["cross_data_check_key"] = check_key
             st.session_state["cross_data_check"] = check_for_download
@@ -663,6 +690,7 @@ def _render_cross_section_tab(
             symbols=tuple(symbols),
             start=coverage_start,
             end=coverage_end,
+            data_fingerprint=symbols_fingerprint,
         )
         result = search_cross_section(
             bars,
@@ -794,6 +822,7 @@ def _cached_data_check(
     adjust: str,
     start: str,
     end: str,
+    data_fingerprint: tuple[tuple[str, int, int], ...],
 ) -> pd.DataFrame:
     return data_check(
         symbols=symbols,
@@ -814,6 +843,7 @@ def _cached_load_local_bars(
     symbols: tuple[str, ...],
     start: str,
     end: str,
+    data_fingerprint: tuple[tuple[str, int, int], ...],
 ) -> pd.DataFrame:
     return load_local_bars(
         data_root=Path(data_root),
@@ -823,6 +853,25 @@ def _cached_load_local_bars(
         start=start,
         end=end,
     )
+
+
+def _local_data_fingerprint(
+    data_root: str | Path,
+    timeframe: str,
+    adjust: str,
+    symbols: tuple[str, ...] | list[str],
+) -> tuple[tuple[str, int, int], ...]:
+    root = resolve_timeframe_root(data_root, timeframe) / adjust
+    rows: list[tuple[str, int, int]] = []
+    for symbol in unique_symbols(symbols):
+        path = root / f"{symbol}.parquet"
+        try:
+            stat = path.stat()
+        except OSError:
+            rows.append((symbol, -1, -1))
+            continue
+        rows.append((symbol, int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(rows)
 
 
 @st.cache_data(show_spinner=False)
