@@ -198,17 +198,21 @@ def _update_local_bars_with_tdx(
     root = resolve_timeframe_root(data_root, timeframe) / adjust
     root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
+    try:
+        fetched = fetch_tdx_bars(
+            symbols=tuple(symbols),
+            start=start,
+            end=end,
+            timeframe=timeframe,
+            adjust=adjust,
+            tqcenter_path=tqcenter_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return pd.DataFrame([_download_row(symbol, "failed", 0, 0, str(exc)) for symbol in symbols])
+
     for symbol in symbols:
         try:
-            frame = fetch_tdx_bars(
-                symbols=(symbol,),
-                start=start,
-                end=end,
-                timeframe=timeframe,
-                adjust=adjust,
-                tqcenter_path=tqcenter_path,
-            )
-            frame = frame.loc[frame["stock_code"] == symbol, CANONICAL_COLUMNS]
+            frame = fetched.loc[fetched["stock_code"] == symbol, CANONICAL_COLUMNS]
             if frame.empty:
                 rows.append(_download_row(symbol, "failed", 0, 0, "TDX 未返回行情数据"))
                 continue

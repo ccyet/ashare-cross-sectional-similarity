@@ -14,6 +14,7 @@ from ashare_cross_section_similarity.data import CANONICAL_COLUMNS
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 TDX_TQCENTER_ENV_VAR = "TDX_TQCENTER_PATH"
+TDX_REQUEST_BATCH_SIZE = 100
 TIMEFRAME_PERIODS = {"1d": "1d", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
 ADJUST_MAP = {"": "none", "qfq": "front", "hfq": "back"}
 REQUIRED_FIELDS = ("Open", "High", "Low", "Close", "Volume", "Amount")
@@ -57,11 +58,14 @@ def fetch_tdx_bars(
 
     tq = tq_client or _load_tq(tqcenter_path)
     _ensure_initialized(tq)
+    normalized_symbols = unique_symbols(symbols)
+    if not normalized_symbols:
+        return pd.DataFrame(columns=CANONICAL_COLUMNS)
     frames: list[pd.DataFrame] = []
-    for symbol in unique_symbols(symbols):
+    for symbol_batch in _batched_symbols(normalized_symbols, TDX_REQUEST_BATCH_SIZE):
         payload = tq.get_market_data(
             field_list=list(REQUIRED_FIELDS),
-            stock_list=[symbol],
+            stock_list=symbol_batch,
             period=period,
             start_time=_format_market_time(start),
             end_time=_format_market_time(end),
@@ -69,9 +73,17 @@ def fetch_tdx_bars(
             dividend_type=dividend_type,
             fill_data=False,
         )
-        frame = _normalize_tdx_payload(payload, symbol=symbol, start=start, end=end)
-        if not frame.empty:
-            frames.append(frame)
+        allow_missing_symbol = len(symbol_batch) > 1
+        for symbol in symbol_batch:
+            frame = _normalize_tdx_payload(
+                payload,
+                symbol=symbol,
+                start=start,
+                end=end,
+                allow_missing_symbol=allow_missing_symbol,
+            )
+            if not frame.empty:
+                frames.append(frame)
     if not frames:
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
     return pd.concat(frames, ignore_index=True).sort_values(["stock_code", "date"]).reset_index(drop=True)
@@ -149,6 +161,12 @@ def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:
     return paths
 
 
+def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:
+    if batch_size < 1:
+        raise ValueError("batch_size 至少需要 1。")
+    return [symbols[index : index + batch_size] for index in range(0, len(symbols), batch_size)]
+
+
 def _ensure_initialized(tq: Any) -> None:
     global _INITIALIZED
     if _INITIALIZED:
@@ -185,6 +203,7 @@ def _normalize_tdx_payload(
     symbol: str,
     start: str,
     end: str,
+    allow_missing_symbol: bool = False,
 ) -> pd.DataFrame:
     normalized_symbol = normalize_symbol(symbol)
     if raw_data is None:
@@ -205,6 +224,8 @@ def _normalize_tdx_payload(
             raise ValueError(f"TDX 字段 {key} 应为 DataFrame，实际为 {type(value).__name__}。")
         columns = {str(column): column for column in value.columns}
         if normalized_symbol not in columns:
+            if allow_missing_symbol:
+                return pd.DataFrame(columns=CANONICAL_COLUMNS)
             raise ValueError(f"missing symbol column {normalized_symbol} in field {key}")
         selected_frames[field] = value
 

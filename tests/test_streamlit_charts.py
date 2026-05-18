@@ -16,6 +16,7 @@ from streamlit_app import (
     _cross_section_price_chart,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
+    _date_input_args,
     _directory_picker_entries,
     _download_symbols_with_progress,
     _file_picker_entries,
@@ -69,6 +70,24 @@ def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_pat
     assert _picker_initial_directory(folder, tmp_path) == str(folder)
     assert _picker_initial_directory(file_path, tmp_path) == str(folder)
     assert _picker_initial_directory(tmp_path / "missing" / "universe.csv", folder) == str(tmp_path)
+
+
+def test_date_input_args_allow_long_history_dates() -> None:
+    args = _date_input_args("history_start_date", pd.Timestamp("2024-03-04").date(), session_state={})
+
+    assert args["value"] == pd.Timestamp("2024-03-04").date()
+    assert args["min_value"] == pd.Timestamp("1990-01-01").date()
+
+
+def test_date_input_args_preserve_existing_session_value() -> None:
+    args = _date_input_args(
+        "history_start_date",
+        pd.Timestamp("2024-03-04").date(),
+        session_state={"history_start_date": pd.Timestamp("2008-01-02").date()},
+    )
+
+    assert "value" not in args
+    assert args["min_value"] == pd.Timestamp("1990-01-01").date()
 
 
 def test_directory_picker_entries_lists_child_directories_only(tmp_path: Path) -> None:
@@ -866,21 +885,29 @@ def test_repair_partial_download_start_forces_gap_backfill_from_existing_min(tmp
     assert repaired == "2024-01-01"
 
 
-def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> None:
+def test_download_symbols_with_progress_batches_symbols_with_same_start(monkeypatch) -> None:
     calls: list[tuple[tuple[str, ...], str]] = []
 
     def fake_update_local_bars(**kwargs: object) -> pd.DataFrame:
         calls.append((tuple(kwargs["symbols"]), str(kwargs["end"])))
-        symbol = kwargs["symbols"][0]
         return pd.DataFrame(
-            [{"symbol": symbol, "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"}]
+            [
+                {"symbol": symbol, "status": "delegated", "rows": 0, "new_rows": 0, "message": "ok"}
+                for symbol in kwargs["symbols"]
+            ]
         )
 
+    check_calls: list[tuple[str, ...]] = []
+
     def fake_data_check(**kwargs: object) -> pd.DataFrame:
-        symbol = kwargs["symbols"][0]
-        if symbol == "000001.SZ":
+        symbols = list(kwargs["symbols"])
+        check_calls.append(tuple(symbols))
+        if len(check_calls) == 1:
             return pd.DataFrame(
-                [{"symbol": symbol, "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "本地 parquet 不存在"}]
+                [
+                    {"symbol": symbol, "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "本地 parquet 不存在"}
+                    for symbol in symbols
+                ]
             )
         return pd.DataFrame(
             [
@@ -892,6 +919,7 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
                     "end": pd.Timestamp("2024-01-31"),
                     "message": "",
                 }
+                for symbol in symbols
             ]
         )
 
@@ -900,7 +928,7 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
     progress: list[tuple[int, int, str, str]] = []
 
     result = _download_symbols_with_progress(
-        symbols=["000001.SZ", "000001.SZ", "000002.SZ"],
+        symbols=["000001.SZ", "000001.SZ", "000002.SZ", "600519.SH"],
         timeframe="1d",
         adjust="qfq",
         start="2024-01-01",
@@ -912,20 +940,39 @@ def test_download_symbols_with_progress_downloads_each_symbol(monkeypatch) -> No
         progress_callback=lambda completed, total, symbol, status: progress.append((completed, total, symbol, status)),
     )
 
-    assert calls == [(("000001.SZ",), "2024-01-31"), (("000002.SZ",), "2024-01-31")]
+    assert check_calls == [
+        ("000001.SZ", "000002.SZ", "600519.SH"),
+        ("000001.SZ", "000002.SZ", "600519.SH"),
+    ]
+    assert calls == [(("000001.SZ", "000002.SZ", "600519.SH"), "2024-01-31")]
     assert progress == [
-        (0, 2, "000001.SZ", "running"),
-        (1, 2, "000001.SZ", "missing_file"),
-        (1, 2, "000002.SZ", "running"),
-        (2, 2, "000002.SZ", "available"),
+        (0, 3, "000001.SZ 等 3 个", "running"),
+        (1, 3, "000001.SZ", "available"),
+        (2, 3, "000002.SZ", "available"),
+        (3, 3, "600519.SH", "available"),
     ]
     assert_frame_equal(
         result,
         pd.DataFrame(
             [
-                {"symbol": "000001.SZ", "status": "missing_file", "rows": 0, "start": None, "end": None, "message": "下载命令执行后仍未完整覆盖；本地 parquet 不存在"},
+                {
+                    "symbol": "000001.SZ",
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                },
                 {
                     "symbol": "000002.SZ",
+                    "status": "available",
+                    "rows": 20,
+                    "start": pd.Timestamp("2024-01-01"),
+                    "end": pd.Timestamp("2024-01-31"),
+                    "message": "",
+                },
+                {
+                    "symbol": "600519.SH",
                     "status": "available",
                     "rows": 20,
                     "start": pd.Timestamp("2024-01-01"),

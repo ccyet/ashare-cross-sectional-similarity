@@ -35,11 +35,14 @@ from ashare_cross_section_similarity.universe import normalize_symbol, unique_sy
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
 DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "partial_window", "read_error"}
+DOWNLOAD_BATCH_SIZE = 100
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
 SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
 SIZE_SPREAD_SYMBOLS = (SIZE_SPREAD_SMALL_SYMBOL, SIZE_SPREAD_LARGE_SYMBOL)
+DATE_INPUT_MIN = date(1990, 1, 1)
+DATE_INPUT_MAX = date(2100, 12, 31)
 
 
 def main() -> None:
@@ -132,6 +135,23 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
     if st.session_state.get(error_key):
         st.error(st.session_state[error_key])
     return str(st.session_state[state_key])
+
+
+def _date_input_args(
+    key: str,
+    default_value: date,
+    *,
+    session_state: object | None = None,
+) -> dict[str, object]:
+    state = st.session_state if session_state is None else session_state
+    args: dict[str, object] = {
+        "key": key,
+        "min_value": DATE_INPUT_MIN,
+        "max_value": DATE_INPUT_MAX,
+    }
+    if key not in state:
+        args["value"] = default_value
+    return args
 
 
 def _pick_directory_with_system_dialog(
@@ -353,12 +373,8 @@ def _render_history_tab(
     st.caption("选定一个标的和一段自定义区间，系统只在这个标的自己的历史里找相似阶段。")
     col1, col2, col3, col4 = st.columns(4)
     symbol = col1.text_input("目标代码", value="399006.SZ", key="history_symbol")
-    start_input = {"key": "history_start_date"}
-    end_input = {"key": "history_end_date"}
-    if "history_start_date" not in st.session_state:
-        start_input["value"] = date(2024, 3, 4)
-    if "history_end_date" not in st.session_state:
-        end_input["value"] = date(2024, 3, 31)
+    start_input = _date_input_args("history_start_date", date(2024, 3, 4))
+    end_input = _date_input_args("history_end_date", date(2024, 3, 31))
     start_date = col2.date_input("区间开始", **start_input)
     end_date = col3.date_input("区间结束", **end_input)
     top_n = col4.number_input("展示数量", min_value=1, max_value=50, value=10, step=1, key="history_top_n")
@@ -563,12 +579,8 @@ def _render_cross_section_tab(
     if st.session_state.get("cross_quick_message_symbol") != normalized_target:
         st.session_state.pop("cross_quick_message", None)
         st.session_state["cross_quick_message_symbol"] = normalized_target
-    start_input = {"key": "cross_start_date"}
-    end_input = {"key": "cross_end_date"}
-    if "cross_start_date" not in st.session_state:
-        start_input["value"] = date(2024, 1, 1)
-    if "cross_end_date" not in st.session_state:
-        end_input["value"] = date(2024, 3, 31)
+    start_input = _date_input_args("cross_start_date", date(2024, 1, 1))
+    end_input = _date_input_args("cross_end_date", date(2024, 3, 31))
     start_date = col2.date_input("区间开始", **start_input)
     end_date = col3.date_input("区间结束", **end_input)
     quick_cols = st.columns(6)
@@ -1070,55 +1082,106 @@ def _download_symbols_with_progress(
         return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
     rows: list[dict[str, object]] = []
     total = len(normalized)
-    for index, symbol in enumerate(normalized):
-        if progress_callback is not None:
-            progress_callback(index, total, symbol, "running")
-        before = data_check(
-            symbols=[symbol],
-            data_root=data_root,
-            timeframe=timeframe,
-            adjust=adjust,
-            start=start,
-            end=end,
-        )
+    before = data_check(
+        symbols=normalized,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        start=start,
+        end=end,
+    )
+    before_rows = _frame_rows_by_symbol(before)
+    download_groups: dict[str, list[str]] = {}
+    for symbol in normalized:
+        check_row = before_rows.get(symbol)
         download_start = start
-        if not before.empty:
+        if check_row is not None:
             download_start = _repair_partial_download_start(
-                before.iloc[0],
+                check_row,
                 data_root=data_root,
                 timeframe=timeframe,
                 adjust=adjust,
                 requested_start=start,
             )
-        result = update_local_bars(
-            symbols=[symbol],
-            timeframe=timeframe,
-            adjust=adjust,
-            start=download_start,
-            end=end,
-            trend_repo=trend_repo,
-            data_root=data_root,
-            provider=provider,
-            download_engine=download_engine,
-        )
-        checked = data_check(
-            symbols=[symbol],
-            data_root=data_root,
-            timeframe=timeframe,
-            adjust=adjust,
-            start=start,
-            end=end,
-        )
-        if checked.empty:
-            checked = result
-        elif not result.empty and str(checked["status"].iloc[0]) != "available":
-            message = str(checked["message"].iloc[0]) if "message" in checked.columns else ""
-            checked.loc[checked.index[0], "message"] = f"下载命令执行后仍未完整覆盖；{message}".rstrip("；")
-        rows.append(checked.iloc[0].to_dict())
-        status = str(checked["status"].iloc[0]) if not checked.empty and "status" in checked.columns else "unknown"
-        if progress_callback is not None:
-            progress_callback(index + 1, total, symbol, status)
+        download_groups.setdefault(download_start, []).append(symbol)
+
+    completed = 0
+    for download_start, group_symbols in download_groups.items():
+        for batch_symbols in _batched_symbols(group_symbols, DOWNLOAD_BATCH_SIZE):
+            if progress_callback is not None:
+                progress_callback(completed, total, _progress_symbol_label(batch_symbols), "running")
+            result = update_local_bars(
+                symbols=batch_symbols,
+                timeframe=timeframe,
+                adjust=adjust,
+                start=download_start,
+                end=end,
+                trend_repo=trend_repo,
+                data_root=data_root,
+                provider=provider,
+                download_engine=download_engine,
+            )
+            checked = data_check(
+                symbols=batch_symbols,
+                data_root=data_root,
+                timeframe=timeframe,
+                adjust=adjust,
+                start=start,
+                end=end,
+            )
+            for row in _merge_download_check_rows(batch_symbols, result, checked):
+                rows.append(row)
+                completed += 1
+                status = str(row.get("status", "unknown"))
+                if progress_callback is not None:
+                    progress_callback(completed, total, str(row.get("symbol", "")), status)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
+
+
+def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:
+    if batch_size < 1:
+        raise ValueError("batch_size 至少需要 1。")
+    return [symbols[index : index + batch_size] for index in range(0, len(symbols), batch_size)]
+
+
+def _frame_rows_by_symbol(frame: pd.DataFrame) -> dict[str, pd.Series]:
+    if frame.empty or "symbol" not in frame.columns:
+        return {}
+    return {
+        normalize_symbol(str(row["symbol"])): row
+        for _, row in frame.iterrows()
+    }
+
+
+def _progress_symbol_label(symbols: list[str]) -> str:
+    if len(symbols) == 1:
+        return symbols[0]
+    return f"{symbols[0]} 等 {len(symbols)} 个"
+
+
+def _merge_download_check_rows(
+    symbols: list[str],
+    download_result: pd.DataFrame,
+    checked: pd.DataFrame,
+) -> list[dict[str, object]]:
+    download_rows = _frame_rows_by_symbol(download_result)
+    checked_rows = _frame_rows_by_symbol(checked)
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        result_row = download_rows.get(symbol)
+        check_row = checked_rows.get(symbol)
+        if check_row is None:
+            row = result_row.to_dict() if result_row is not None else {"symbol": symbol, "status": "unknown"}
+            rows.append(row)
+            continue
+        row = check_row.to_dict()
+        if result_row is not None and str(result_row.get("status", "")) == "failed":
+            row = result_row.to_dict()
+        elif result_row is not None and str(row.get("status", "")) != "available":
+            message = str(row.get("message", ""))
+            row["message"] = f"下载命令执行后仍未完整覆盖；{message}".rstrip("；")
+        rows.append(row)
+    return rows
 
 
 def _symbols_requiring_download(check: pd.DataFrame) -> list[str]:

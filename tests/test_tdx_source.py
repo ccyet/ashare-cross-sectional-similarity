@@ -91,6 +91,34 @@ def test_fetch_tdx_bars_supports_daily_period_and_lowercase_fields() -> None:
     assert out["close"].tolist() == [11.5, 12.5]
 
 
+def test_fetch_tdx_bars_requests_multiple_symbols_once() -> None:
+    index = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    fake = _FakeTq(
+        {
+            "Open": pd.DataFrame({"000001.SZ": [1.0, 1.1], "600519.SH": [10.0, 11.0]}, index=index),
+            "High": pd.DataFrame({"000001.SZ": [1.2, 1.3], "600519.SH": [12.0, 13.0]}, index=index),
+            "Low": pd.DataFrame({"000001.SZ": [0.9, 1.0], "600519.SH": [9.0, 10.0]}, index=index),
+            "Close": pd.DataFrame({"000001.SZ": [1.15, 1.25], "600519.SH": [11.5, 12.5]}, index=index),
+            "Volume": pd.DataFrame({"000001.SZ": [100.0, 120.0], "600519.SH": [1000.0, 1200.0]}, index=index),
+            "Amount": pd.DataFrame({"000001.SZ": [1000.0, 1220.0], "600519.SH": [10000.0, 12200.0]}, index=index),
+        }
+    )
+
+    out = fetch_tdx_bars(
+        symbols=("000001.SZ", "600519.SH"),
+        start="2024-01-01",
+        end="2024-01-03",
+        timeframe="1d",
+        adjust="qfq",
+        tq_client=fake,
+    )
+
+    assert len(fake.market_calls) == 1
+    assert fake.market_calls[0]["stock_list"] == ["000001.SZ", "600519.SH"]
+    assert out["stock_code"].tolist() == ["000001.SZ", "000001.SZ", "600519.SH", "600519.SH"]
+    assert out["close"].tolist() == [1.15, 1.25, 11.5, 12.5]
+
+
 def test_fetch_tdx_bars_reports_unsupported_timeframe() -> None:
     with pytest.raises(ValueError, match="timeframe 仅支持"):
         fetch_tdx_bars(
