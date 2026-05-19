@@ -347,6 +347,37 @@ def test_data_check_reports_partial_window_when_range_is_not_fully_covered(tmp_p
     assert "覆盖不足" in row["message"]
 
 
+def test_data_check_treats_non_trading_boundary_dates_as_covered(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-03-29", "2024-04-01"],
+            "stock_code": ["399006.SZ", "399006.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    ).to_parquet(qfq / "399006.SZ.parquet", index=False)
+
+    out = data_check(
+        symbols=("399006.SZ",),
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-03-29",
+        end="2024-03-31",
+    )
+
+    row = out.iloc[0]
+    assert row["status"] == "available"
+    assert row["rows"] == 1
+    assert row["message"] == ""
+
+
 def test_data_check_reads_only_date_column(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)

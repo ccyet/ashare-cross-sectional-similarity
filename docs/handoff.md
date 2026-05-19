@@ -76,7 +76,7 @@ python -m ashare_cross_section_similarity check \
   --end 2024-03-31
 ```
 
-下载全 A 日线：
+下载全 A 日线（默认同时补常用指数代理；只要股票可加 `--no-indexes`）：
 
 ```bash
 python scripts/download_all_a_daily.py \

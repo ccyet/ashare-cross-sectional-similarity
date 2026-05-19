@@ -293,6 +293,7 @@ def data_check(
         try:
             frame = pd.read_parquet(file_path, columns=["date"])
             frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            local_dates = frame["date"].dropna().dt.normalize()
             window = frame.loc[frame["date"].between(start_ts, end_ts)]
             local_start = frame["date"].min()
             local_end = frame["date"].max()
@@ -304,7 +305,13 @@ def data_check(
                 window_end_day = pd.Timestamp(window["date"].max()).normalize()
                 status = "available"
                 message = ""
-                if window_start_day > requested_start_day or window_end_day < requested_end_day:
+                missing_start = window_start_day > requested_start_day and not _has_boundary_date(
+                    local_dates, requested_start_day, before=True
+                )
+                missing_end = window_end_day < requested_end_day and not _has_boundary_date(
+                    local_dates, requested_end_day, before=False
+                )
+                if missing_start or missing_end:
                     status = "partial_window"
                     message = f"区间覆盖不足，实际覆盖 {_date_text(window_start_day)} 至 {_date_text(window_end_day)}"
             rows.append(
@@ -335,6 +342,14 @@ def data_check(
                 )
             )
     return pd.DataFrame(rows)
+
+
+def _has_boundary_date(dates: pd.Series, requested_day: pd.Timestamp, *, before: bool) -> bool:
+    if dates.empty:
+        return False
+    if before:
+        return bool((dates <= requested_day).any())
+    return bool((dates >= requested_day).any())
 
 
 def _date_text(value: object) -> str:

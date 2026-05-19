@@ -29,7 +29,13 @@ from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchResult,
     search_cross_section,
 )
-from ashare_cross_section_similarity.universe import fetch_all_a_symbols, normalize_symbol, unique_symbols
+from ashare_cross_section_similarity.universe import (
+    DEFAULT_ANALYSIS_INDEX_SYMBOLS,
+    fetch_all_a_symbols,
+    normalize_symbol,
+    symbols_with_analysis_indexes,
+    unique_symbols,
+)
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
@@ -450,6 +456,8 @@ def _render_history_tab(
     selected_window = bars.loc[bars["date"].between(pd.Timestamp(start), inclusive_end_timestamp(as_of))] if not bars.empty else bars
     if bars.empty:
         st.error("未找到该标的在区间结束前的本地行情。请先下载或检查代码、周期、复权目录。")
+        if hint := _symbol_data_hint(symbol, data_root=data_root, timeframe=timeframe, adjust=adjust):
+            st.warning(hint)
     else:
         target_row = target_check.iloc[0] if not target_check.empty else None
         cols = st.columns(4)
@@ -832,7 +840,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
     job_state = st.session_state.get("full_daily_tdx_job")
     keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
     with st.expander("TDX 全量日 K 线更新", expanded=keep_open):
-        st.caption("通过本机通达信更新全 A 股票 1d 日线，写入当前本地行情根目录。股票列表用 AkShare 获取，价格数据用 TDX 抓取。")
+        st.caption("通过本机通达信更新全 A 股票和常用指数 1d 日线，写入当前本地行情根目录。股票列表用 AkShare 获取，价格数据用 TDX 抓取。")
         tdx_path = _render_directory_picker(
             "通达信 PYPlugins/user 目录",
             os.environ.get("TDX_TQCENTER_PATH", ""),
@@ -856,16 +864,31 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             key="full_daily_tdx_batch_size",
         )
         skip_available = col4.checkbox("跳过已覆盖", value=True, key="full_daily_tdx_skip_available")
+        opt_col1, opt_col2 = st.columns([1, 3])
+        include_indexes = opt_col1.checkbox("同步常用指数", value=True, key="full_daily_tdx_include_indexes")
+        extra_symbols = opt_col2.text_input(
+            "额外代码",
+            value="",
+            key="full_daily_tdx_extra_symbols",
+            help="逗号、空格或换行分隔；用于补充指数、ETF 或其他代理标的，如 399006.SZ,000300.SH。",
+        )
+        if include_indexes:
+            st.caption("常用指数：" + "、".join(DEFAULT_ANALYSIS_INDEX_SYMBOLS))
         start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
         end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
         if error := _date_range_error(start, end):
             st.error(error)
             return
 
-        if st.button("通过 TDX 更新全 A 日 K", type="primary", key="full_daily_tdx_start_button"):
+        if st.button("通过 TDX 更新全量日 K", type="primary", key="full_daily_tdx_start_button"):
             try:
-                with st.spinner("获取全 A 股票列表并检查本地覆盖..."):
-                    all_symbols = fetch_all_a_symbols()
+                with st.spinner("获取股票列表并检查本地覆盖..."):
+                    stock_symbols = fetch_all_a_symbols()
+                    all_symbols = _full_daily_download_universe(
+                        stock_symbols,
+                        include_indexes=bool(include_indexes),
+                        extra_symbols=extra_symbols,
+                    )
                     download_symbols, checked = _prepare_full_daily_download_symbols(
                         symbols=all_symbols,
                         data_root=Path(data_root),
@@ -876,6 +899,8 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                     )
                 st.session_state["full_daily_tdx_summary"] = {
                     "total": len(unique_symbols(all_symbols)),
+                    "stock_total": len(unique_symbols(stock_symbols)),
+                    "index_total": len(DEFAULT_ANALYSIS_INDEX_SYMBOLS) if include_indexes else 0,
                     "download": len(download_symbols),
                     "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
                     "skip_available": bool(skip_available),
@@ -904,7 +929,8 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
         summary = st.session_state.get("full_daily_tdx_summary")
         if isinstance(summary, dict):
             st.info(
-                f"全 A {int(summary.get('total', 0)):,} 个；"
+                f"下载范围 {int(summary.get('total', 0)):,} 个；"
+                f"其中股票 {int(summary.get('stock_total', 0)):,} 个、常用指数 {int(summary.get('index_total', 0)):,} 个；"
                 f"待下载 {int(summary.get('download', 0)):,} 个；"
                 f"区间 {summary.get('start')} 至 {summary.get('end')}。"
             )
@@ -1036,6 +1062,25 @@ def _local_data_fingerprint(
             continue
         rows.append((symbol, int(stat.st_mtime_ns), int(stat.st_size)))
     return tuple(rows)
+
+
+def _symbol_data_hint(symbol: str, *, data_root: str | Path, timeframe: str, adjust: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if not normalized or "." not in normalized:
+        return ""
+    code = normalized.split(".", 1)[0]
+    root = resolve_timeframe_root(data_root, timeframe) / adjust
+    alternatives = [
+        candidate
+        for suffix in ("SH", "SZ", "BJ")
+        if (candidate := f"{code}.{suffix}") != normalized and (root / f"{candidate}.parquet").exists()
+    ]
+    if not alternatives:
+        return ""
+    return (
+        f"当前输入会解析为 {normalized}，但本地存在 {', '.join(alternatives)}。"
+        "如要查看指数或指定市场标的，请输入完整后缀代码。"
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -1497,6 +1542,26 @@ def _prepare_full_daily_download_symbols(
         end=end,
     )
     return _symbols_requiring_download(checked), checked
+
+
+def _full_daily_download_universe(
+    stock_symbols: list[str] | tuple[str, ...],
+    *,
+    include_indexes: bool,
+    extra_symbols: str,
+) -> list[str]:
+    return symbols_with_analysis_indexes(
+        stock_symbols,
+        include_indexes=include_indexes,
+        extra_symbols=_split_symbol_text(extra_symbols),
+    )
+
+
+def _split_symbol_text(value: str) -> list[str]:
+    text = str(value or "")
+    for separator in ("，", "、", ";", "；", "\n", "\t", " "):
+        text = text.replace(separator, ",")
+    return [item.strip() for item in text.split(",") if item.strip()]
 
 
 def _repair_partial_download_start(

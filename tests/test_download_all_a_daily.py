@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from scripts.download_all_a_daily import _batched, fetch_all_a_symbols, merge_download_check
+from scripts.download_all_a_daily import _batched, _download_universe, fetch_all_a_symbols, merge_download_check
 
 
 def test_fetch_all_a_symbols_normalizes_akshare_code_column() -> None:
@@ -11,6 +11,19 @@ def test_fetch_all_a_symbols_normalizes_akshare_code_column() -> None:
     )
 
     assert symbols == ["000001.SZ", "600519.SH", "688603.SH", "830799.BJ"]
+
+
+def test_download_universe_adds_analysis_indexes_and_extra_symbols() -> None:
+    symbols = _download_universe(
+        ["000001.SZ", "600519.SH"],
+        include_indexes=True,
+        extra_symbols="399006, 000300.SH",
+    )
+
+    assert symbols[:2] == ["000001.SZ", "600519.SH"]
+    assert "399006.SZ" in symbols
+    assert "000300.SH" in symbols
+    assert "000852.SH" in symbols
 
 
 def test_merge_download_check_marks_missing_after_successful_delegate() -> None:

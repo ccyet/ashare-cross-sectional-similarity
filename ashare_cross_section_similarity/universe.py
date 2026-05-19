@@ -16,6 +16,14 @@ SYMBOL_COLUMNS = (
     "品种代码",
     "股票代码",
 )
+DEFAULT_ANALYSIS_INDEX_SYMBOLS = (
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "000300.SH",
+    "000852.SH",
+    "000905.SH",
+)
 
 
 def normalize_symbol(value: object) -> str:
@@ -50,6 +58,19 @@ def unique_symbols(values: Iterable[object]) -> list[str]:
             seen.add(symbol)
             symbols.append(symbol)
     return symbols
+
+
+def symbols_with_analysis_indexes(
+    symbols: Iterable[object],
+    *,
+    include_indexes: bool = True,
+    extra_symbols: Iterable[object] = (),
+) -> list[str]:
+    values = list(symbols)
+    if include_indexes:
+        values.extend(DEFAULT_ANALYSIS_INDEX_SYMBOLS)
+    values.extend(extra_symbols)
+    return unique_symbols(values)
 
 
 def symbols_from_table(table: pd.DataFrame) -> list[str]:

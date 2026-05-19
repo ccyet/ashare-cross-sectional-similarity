@@ -17,21 +17,30 @@ from ashare_cross_section_similarity.downloader import (  # noqa: E402
     default_trend_repo,
     update_local_bars,
 )
-from ashare_cross_section_similarity.universe import fetch_all_a_symbols, unique_symbols  # noqa: E402
+from ashare_cross_section_similarity.universe import (  # noqa: E402
+    fetch_all_a_symbols,
+    symbols_with_analysis_indexes,
+    unique_symbols,
+)
 
 DEFAULT_START = "1990-01-01"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    all_symbols = fetch_all_a_symbols()
+    stock_symbols = fetch_all_a_symbols()
+    all_symbols = _download_universe(
+        stock_symbols,
+        include_indexes=bool(args.include_indexes),
+        extra_symbols=args.extra_symbols,
+    )
     if args.symbols_output:
         _write_symbols(args.symbols_output, all_symbols)
     symbols = all_symbols
     if args.limit:
         symbols = symbols[: args.limit]
     if args.dry_run:
-        print(f"全 A 股票数：{len(all_symbols):,}")
+        print(f"下载范围数：{len(all_symbols):,}")
         if args.limit:
             print(f"本次限制处理：{len(symbols):,}")
         print(f"前 10 个：{', '.join(all_symbols[:10])}")
@@ -120,6 +129,21 @@ def download_all_a_daily(
     return pd.concat(frames, ignore_index=True)
 
 
+def _download_universe(symbols: Iterable[object], *, include_indexes: bool, extra_symbols: str) -> list[str]:
+    return symbols_with_analysis_indexes(
+        symbols,
+        include_indexes=include_indexes,
+        extra_symbols=_split_symbol_text(extra_symbols),
+    )
+
+
+def _split_symbol_text(value: str) -> list[str]:
+    text = str(value or "")
+    for separator in ("，", "、", ";", "；", "\n", "\t", " "):
+        text = text.replace(separator, ",")
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
 def merge_download_check(download_result: pd.DataFrame, checked: pd.DataFrame) -> pd.DataFrame:
     if checked.empty:
         return download_result.copy()
@@ -172,10 +196,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=100, help="每批下载股票数")
     parser.add_argument("--output", default="outputs/all_a_daily_download_log.csv", help="下载和覆盖检查日志")
     parser.add_argument("--symbols-output", default="", help="可选：导出全 A 股票列表")
+    parser.add_argument("--no-indexes", dest="include_indexes", action="store_false", help="不额外加入常用指数代理")
+    parser.add_argument("--extra-symbols", default="", help="额外下载代码，逗号或换行分隔，如 399006.SZ,000300.SH")
     parser.add_argument("--skip-available", action="store_true", help="下载前跳过已覆盖区间的股票")
     parser.add_argument("--sleep", type=float, default=0.0, help="批次间暂停秒数")
     parser.add_argument("--limit", type=int, default=0, help="调试用，仅下载前 N 个")
-    parser.add_argument("--dry-run", action="store_true", help="只获取并打印全 A 股票列表，不下载")
+    parser.add_argument("--dry-run", action="store_true", help="只获取并打印下载范围，不下载")
+    parser.set_defaults(include_indexes=True)
     return parser.parse_args(argv)
 
 

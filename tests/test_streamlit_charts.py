@@ -26,6 +26,7 @@ from streamlit_app import (
     _format_cross_section_stats,
     _format_data_check_status,
     _format_results,
+    _full_daily_download_universe,
     _history_bucket_summary,
     _history_forward_summary,
     _history_kline_series,
@@ -49,6 +50,7 @@ from streamlit_app import (
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
+    _symbol_data_hint,
     _symbols_requiring_download,
 )
 
@@ -1222,3 +1224,32 @@ def test_prepare_full_daily_download_symbols_can_force_all_symbols() -> None:
 
     assert download_symbols == ["000001.SZ", "600519.SH"]
     assert checked.empty
+
+
+def test_full_daily_download_universe_includes_common_indexes() -> None:
+    symbols = _full_daily_download_universe(
+        ["000001.SZ", "600519.SH"],
+        include_indexes=True,
+        extra_symbols="399006, 000300.SH",
+    )
+
+    assert symbols[:2] == ["000001.SZ", "600519.SH"]
+    assert "399006.SZ" in symbols
+    assert "000300.SH" in symbols
+    assert "000852.SH" in symbols
+
+
+def test_symbol_data_hint_points_to_existing_alternate_suffix(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame({"date": ["2024-01-02"], "stock_code": ["000300.SH"]}).to_parquet(qfq / "000300.SH.parquet")
+
+    hint = _symbol_data_hint(
+        "000300",
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+    )
+
+    assert "000300.SZ" in hint
+    assert "000300.SH" in hint

@@ -216,7 +216,7 @@ python -m ashare_cross_section_similarity check \
 
 ### 5.4 下载全 A 股票历史日线
 
-脚本会用 AkShare 获取当前全 A 股票列表，按批次委托本库下载器抓取 `1d/qfq` 日线，并在每批结束后复查本地 parquet 覆盖情况，日志写入 CSV。Streamlit 页面也提供 `TDX 全量日 K 线更新` 入口，默认跳过已覆盖区间，只补缺文件、覆盖不足、区间无数据或读取失败的标的。
+脚本会用 AkShare 获取当前全 A 股票列表，并默认补入常用指数代理（上证、深成指、创业板、中证1000、沪深300、中证500），按批次委托本库下载器抓取 `1d/qfq` 日线，并在每批结束后复查本地 parquet 覆盖情况，日志写入 CSV。Streamlit 页面也提供 `TDX 全量日 K 线更新` 入口，默认跳过已覆盖区间，只补缺文件、覆盖不足、区间无数据或读取失败的标的。
 
 先做 dry-run：
 
@@ -260,6 +260,8 @@ python scripts/download_all_a_daily.py \
 | 参数 | 含义 |
 | --- | --- |
 | `--skip-available` | 下载前跳过本地已覆盖区间的股票 |
+| `--no-indexes` | 只下载股票，不额外补常用指数代理 |
+| `--extra-symbols` | 额外下载指数、ETF 或代理标的，逗号或换行分隔 |
 | `--limit` | 调试时只下载前 N 个股票 |
 | `--sleep` | 批次之间暂停秒数，避免数据源限流 |
 | `--download-engine openbb` | 改用 OpenBB 直接写入本地 parquet |
