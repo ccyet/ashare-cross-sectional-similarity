@@ -41,6 +41,7 @@ from streamlit_app import (
     _picker_initial_directory,
     _pin_symbol_row,
     _pick_directory_with_system_dialog,
+    _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
     _run_download_job_step,
     _set_download_job_status,
@@ -1124,3 +1125,56 @@ def test_download_job_reports_overall_progress_across_batches(monkeypatch) -> No
         (3, 3, "000003.SZ", "available"),
     ]
     assert job["status"] == "completed"
+
+
+def test_prepare_full_daily_download_symbols_skips_available_daily_bars(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        calls.append(kwargs)
+        return pd.DataFrame(
+            [
+                {"symbol": "000001.SZ", "status": "available"},
+                {"symbol": "000002.SZ", "status": "missing_file"},
+                {"symbol": "000003.SZ", "status": "partial_window"},
+                {"symbol": "000004.SZ", "status": "read_error"},
+            ]
+        )
+
+    monkeypatch.setattr("streamlit_app.data_check", fake_data_check)
+
+    download_symbols, checked = _prepare_full_daily_download_symbols(
+        symbols=["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+        data_root=Path("/tmp/data"),
+        adjust="qfq",
+        start="1990-01-01",
+        end="2026-05-19",
+        skip_available=True,
+    )
+
+    assert download_symbols == ["000002.SZ", "000003.SZ", "000004.SZ"]
+    assert checked["symbol"].tolist() == ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+    assert calls == [
+        {
+            "symbols": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+            "data_root": Path("/tmp/data"),
+            "timeframe": "1d",
+            "adjust": "qfq",
+            "start": "1990-01-01",
+            "end": "2026-05-19",
+        }
+    ]
+
+
+def test_prepare_full_daily_download_symbols_can_force_all_symbols() -> None:
+    download_symbols, checked = _prepare_full_daily_download_symbols(
+        symbols=["000001", "600519.SH", "000001.SZ"],
+        data_root=Path("/tmp/data"),
+        adjust="qfq",
+        start="1990-01-01",
+        end="2026-05-19",
+        skip_available=False,
+    )
+
+    assert download_symbols == ["000001.SZ", "600519.SH"]
+    assert checked.empty

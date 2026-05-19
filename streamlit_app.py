@@ -29,7 +29,7 @@ from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchResult,
     search_cross_section,
 )
-from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
+from ashare_cross_section_similarity.universe import fetch_all_a_symbols, normalize_symbol, unique_symbols
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
@@ -90,6 +90,8 @@ def main() -> None:
                 help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
             )
         _render_price_upload(data_root=data_root, timeframe=timeframe, adjust=adjust)
+
+    _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
 
     history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
     with history_tab:
@@ -811,6 +813,99 @@ def _render_cross_section_tab(
     )
 
 
+def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: str) -> None:
+    job_state = st.session_state.get("full_daily_tdx_job")
+    keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
+    with st.expander("TDX 全量日 K 线更新", expanded=keep_open):
+        st.caption("通过本机通达信更新全 A 股票 1d 日线，写入当前本地行情根目录。股票列表用 AkShare 获取，价格数据用 TDX 抓取。")
+        tdx_path = _render_directory_picker(
+            "通达信 PYPlugins/user 目录",
+            os.environ.get("TDX_TQCENTER_PATH", ""),
+            "full_daily_tdx_tqcenter",
+        )
+        col1, col2, col3, col4 = st.columns(4)
+        start_date = col1.date_input(
+            "起始日期",
+            **_date_input_args("full_daily_tdx_start", DATE_INPUT_MIN),
+        )
+        end_date = col2.date_input(
+            "结束日期",
+            **_date_input_args("full_daily_tdx_end", pd.Timestamp.today().date()),
+        )
+        batch_size = col3.number_input(
+            "每批标的数",
+            min_value=1,
+            max_value=500,
+            value=DOWNLOAD_BATCH_SIZE,
+            step=10,
+            key="full_daily_tdx_batch_size",
+        )
+        skip_available = col4.checkbox("跳过已覆盖", value=True, key="full_daily_tdx_skip_available")
+        start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+        end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+        if error := _date_range_error(start, end):
+            st.error(error)
+            return
+
+        if st.button("通过 TDX 更新全 A 日 K", type="primary", key="full_daily_tdx_start_button"):
+            try:
+                with st.spinner("获取全 A 股票列表并检查本地覆盖..."):
+                    all_symbols = fetch_all_a_symbols()
+                    download_symbols, checked = _prepare_full_daily_download_symbols(
+                        symbols=all_symbols,
+                        data_root=Path(data_root),
+                        adjust=adjust,
+                        start=start,
+                        end=end,
+                        skip_available=bool(skip_available),
+                    )
+                st.session_state["full_daily_tdx_summary"] = {
+                    "total": len(unique_symbols(all_symbols)),
+                    "download": len(download_symbols),
+                    "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
+                    "skip_available": bool(skip_available),
+                    "start": start,
+                    "end": end,
+                }
+                if download_symbols:
+                    st.session_state["full_daily_tdx_job"] = _create_download_job(
+                        symbols=download_symbols,
+                        timeframe="1d",
+                        adjust=adjust,
+                        start=start,
+                        end=end,
+                        trend_repo=Path(trend_repo),
+                        data_root=Path(data_root),
+                        provider=tdx_path,
+                        download_engine="tdx",
+                        batch_size=int(batch_size),
+                    )
+                else:
+                    st.session_state.pop("full_daily_tdx_job", None)
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"TDX 全量日 K 更新任务创建失败：{exc}")
+
+        summary = st.session_state.get("full_daily_tdx_summary")
+        if isinstance(summary, dict):
+            st.info(
+                f"全 A {int(summary.get('total', 0)):,} 个；"
+                f"待下载 {int(summary.get('download', 0)):,} 个；"
+                f"区间 {summary.get('start')} 至 {summary.get('end')}。"
+            )
+            if int(summary.get("download", 0)) == 0:
+                st.success("当前区间本地日线已覆盖，无需下载。")
+
+        update_result = _render_download_job("full_daily_tdx_job")
+        if not update_result.empty:
+            st.download_button(
+                "下载全量更新日志",
+                data=update_result.to_csv(index=False).encode("utf-8-sig"),
+                file_name="full_a_daily_tdx_update_log.csv",
+                mime="text/csv",
+            )
+
+
 def _render_price_upload(*, data_root: str, timeframe: str, adjust: str) -> None:
     with st.expander("上传自定义价格数据"):
         st.caption("支持 CSV/Parquet；必要列：date、open、high、low、close、symbol 或 stock_code。可选：volume、amount。")
@@ -1322,6 +1417,29 @@ def _symbols_requiring_download(check: pd.DataFrame) -> list[str]:
         return []
     missing = check.loc[check["status"].astype(str).isin(DOWNLOAD_REQUIRED_STATUSES), "symbol"]
     return unique_symbols(missing.astype(str).tolist())
+
+
+def _prepare_full_daily_download_symbols(
+    *,
+    symbols: list[str] | tuple[str, ...],
+    data_root: str | Path,
+    adjust: str,
+    start: str,
+    end: str,
+    skip_available: bool,
+) -> tuple[list[str], pd.DataFrame]:
+    normalized = unique_symbols(symbols)
+    if not skip_available:
+        return normalized, pd.DataFrame()
+    checked = data_check(
+        symbols=normalized,
+        data_root=Path(data_root),
+        timeframe="1d",
+        adjust=adjust,
+        start=start,
+        end=end,
+    )
+    return _symbols_requiring_download(checked), checked
 
 
 def _repair_partial_download_start(

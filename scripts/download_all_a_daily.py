@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 import time
-from typing import Callable, Iterable
+from typing import Iterable
 
 import pandas as pd
 
@@ -17,7 +17,7 @@ from ashare_cross_section_similarity.downloader import (  # noqa: E402
     default_trend_repo,
     update_local_bars,
 )
-from ashare_cross_section_similarity.universe import symbols_from_table, unique_symbols  # noqa: E402
+from ashare_cross_section_similarity.universe import fetch_all_a_symbols, unique_symbols  # noqa: E402
 
 DEFAULT_START = "1990-01-01"
 
@@ -54,17 +54,6 @@ def main(argv: list[str] | None = None) -> int:
     missing = int(result["status"].isin(["missing_file", "missing_window", "read_error"]).sum()) if not result.empty else 0
     print(f"完成：{len(result):,} 个；failed={failed:,}；missing/read_error={missing:,}；日志={args.output}")
     return 1 if failed else 0
-
-
-def fetch_all_a_symbols(fetcher: Callable[[], pd.DataFrame] | None = None) -> list[str]:
-    if fetcher is None:
-        import akshare as ak
-
-        fetcher = ak.stock_info_a_code_name
-    symbols = symbols_from_table(fetcher())
-    if not symbols:
-        raise RuntimeError("未获取到全 A 股票列表。")
-    return symbols
 
 
 def download_all_a_daily(

@@ -61,6 +61,19 @@ def symbols_from_table(table: pd.DataFrame) -> list[str]:
     raise ValueError(f"未找到证券代码列，支持列名：{', '.join(SYMBOL_COLUMNS)}")
 
 
+def fetch_all_a_symbols(fetcher: object | None = None) -> list[str]:
+    if fetcher is None:
+        import akshare as ak
+
+        fetcher = ak.stock_info_a_code_name
+    if not callable(fetcher):
+        raise TypeError("fetcher 必须是可调用对象。")
+    symbols = symbols_from_table(fetcher())
+    if not symbols:
+        raise RuntimeError("未获取到全 A 股票列表。")
+    return symbols
+
+
 def load_universe_file(path: str | Path) -> list[str]:
     file_path = Path(path).expanduser()
     if not file_path.exists():

@@ -88,6 +88,20 @@ python scripts/download_all_a_daily.py \
   --output outputs/all_a_daily_download_log.csv
 ```
 
+通过 TDX 更新全 A 日线：
+
+```bash
+python scripts/download_all_a_daily.py \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --start 1990-01-01 \
+  --adjust qfq \
+  --download-engine tdx \
+  --provider /path/to/TdxInstall/PYPlugins/user \
+  --batch-size 100 \
+  --skip-available \
+  --output outputs/all_a_daily_tdx_update_log.csv
+```
+
 直接用本机 TDX 下载：
 
 ```bash

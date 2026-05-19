@@ -215,7 +215,7 @@ python -m ashare_cross_section_similarity check \
 
 ### 5.4 下载全 A 股票历史日线
 
-脚本会用 AkShare 获取当前全 A 股票列表，按批次委托本库下载器抓取 `1d/qfq` 日线，并在每批结束后复查本地 parquet 覆盖情况，日志写入 CSV。
+脚本会用 AkShare 获取当前全 A 股票列表，按批次委托本库下载器抓取 `1d/qfq` 日线，并在每批结束后复查本地 parquet 覆盖情况，日志写入 CSV。Streamlit 页面也提供 `TDX 全量日 K 线更新` 入口，默认跳过已覆盖区间，只补缺文件、覆盖不足、区间无数据或读取失败的标的。
 
 先做 dry-run：
 
@@ -239,6 +239,21 @@ python scripts/download_all_a_daily.py \
   --output outputs/all_a_daily_download_log.csv
 ```
 
+使用本机 TDX 更新全 A 日线：
+
+```bash
+python scripts/download_all_a_daily.py \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --start 1990-01-01 \
+  --end 2026-05-19 \
+  --adjust qfq \
+  --download-engine tdx \
+  --provider /path/to/TdxInstall/PYPlugins/user \
+  --batch-size 100 \
+  --skip-available \
+  --output outputs/all_a_daily_tdx_update_log.csv
+```
+
 常用选项：
 
 | 参数 | 含义 |
@@ -247,6 +262,7 @@ python scripts/download_all_a_daily.py \
 | `--limit` | 调试时只下载前 N 个股票 |
 | `--sleep` | 批次之间暂停秒数，避免数据源限流 |
 | `--download-engine openbb` | 改用 OpenBB 直接写入本地 parquet |
+| `--download-engine tdx` | 改用本机 TDX 直连写入本地 parquet，`--provider` 填通达信安装目录、`PYPlugins` 或 `PYPlugins/user` |
 
 ### 5.5 导入自定义价格数据
 
