@@ -778,7 +778,7 @@ def _render_cross_section_tab(
                 universe_symbols=tuple(universe),
                 start=start,
                 end=end,
-                top_n=int(top_n),
+                top_n=_cross_section_search_limit(universe, int(top_n)),
                 min_coverage=float(min_coverage),
                 path_weight=float(path_weight),
                 date_tolerance_bars=tolerance_bars,
@@ -795,8 +795,13 @@ def _render_cross_section_tab(
         st.warning("没有找到可用结果。请检查本地数据覆盖、搜索范围和区间设置。")
         return
 
-    stock_names = _cached_stock_name_map(tuple(unique_symbols([result.target_symbol, *result.results["symbol"].astype(str).tolist()])))
-    st.dataframe(_centered(_format_results(result.results, stock_names)), use_container_width=True, hide_index=True)
+    display_results = _display_results(result.results, int(top_n))
+    name_count = max(int(top_n), 6)
+    stock_names = _cached_stock_name_map(
+        tuple(unique_symbols([result.target_symbol, *result.results["symbol"].head(name_count).astype(str).tolist()]))
+    )
+    st.caption(f"当前展示前 {len(display_results):,} / {len(result.results):,} 条；下方统计和 CSV 基于全部有效结果。")
+    st.dataframe(_centered(_format_results(display_results, stock_names)), use_container_width=True, hide_index=True)
     st.markdown("**5. 有效结果计量**")
     metric_columns = st.columns(4)
     for column, (label, value) in zip(metric_columns, _cross_section_overview_metrics(result.results)):
@@ -1741,6 +1746,14 @@ def _cross_section_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]
 
 def _cross_section_result_metrics(result: CrossSectionSearchResult) -> list[tuple[str, str]]:
     return [("目标窗口 K 线数", f"{result.window_size:,}"), ("有效结果数", f"{len(result.results):,}")]
+
+
+def _cross_section_search_limit(universe_symbols: list[str] | tuple[str, ...], display_n: int) -> int:
+    return max(int(display_n), len(unique_symbols(universe_symbols)))
+
+
+def _display_results(frame: pd.DataFrame, display_n: int) -> pd.DataFrame:
+    return frame.head(max(1, int(display_n))).copy()
 
 
 def _history_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]]:

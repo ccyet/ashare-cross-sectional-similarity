@@ -13,7 +13,9 @@ from streamlit_app import (
     _cross_section_load_end,
     _cross_section_overview_metrics,
     _cross_section_result_metrics,
+    _cross_section_search_limit,
     _cross_section_price_chart,
+    _display_results,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
     _create_download_job,
@@ -230,6 +232,20 @@ def test_cross_section_result_metrics_are_one_row_pair() -> None:
     )
 
     assert _cross_section_result_metrics(result) == [("目标窗口 K 线数", "3"), ("有效结果数", "2")]
+
+
+def test_cross_section_search_limit_uses_full_universe_not_display_count() -> None:
+    assert _cross_section_search_limit(["000001.SZ", "000002.SZ", "000003.SZ"], 1) == 3
+    assert _cross_section_search_limit(["000001.SZ"], 5) == 5
+
+
+def test_display_results_limits_only_visible_rows() -> None:
+    frame = pd.DataFrame({"symbol": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+
+    visible = _display_results(frame, 2)
+
+    assert visible["symbol"].tolist() == ["000001.SZ", "000002.SZ"]
+    assert frame["symbol"].tolist() == ["000001.SZ", "000002.SZ", "000003.SZ"]
 
 
 def test_history_quick_window_feedback_uses_latest_local_bar() -> None:
