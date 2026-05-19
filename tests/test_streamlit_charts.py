@@ -19,6 +19,8 @@ from streamlit_app import (
     _create_download_job,
     _date_input_args,
     _directory_picker_entries,
+    _download_job_summary,
+    _download_progress_text,
     _download_symbols_with_progress,
     _file_picker_entries,
     _format_cross_section_stats,
@@ -39,6 +41,7 @@ from streamlit_app import (
     _lightweight_kline_chart_html,
     _lightweight_kline_series,
     _picker_initial_directory,
+    _picker_path_text,
     _pin_symbol_row,
     _pick_directory_with_system_dialog,
     _prepare_full_daily_download_symbols,
@@ -74,6 +77,11 @@ def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_pat
     assert _picker_initial_directory(folder, tmp_path) == str(folder)
     assert _picker_initial_directory(file_path, tmp_path) == str(folder)
     assert _picker_initial_directory(tmp_path / "missing" / "universe.csv", folder) == str(tmp_path)
+
+
+def test_picker_path_text_makes_empty_and_existing_selection_clear() -> None:
+    assert _picker_path_text("") == "未选择"
+    assert _picker_path_text("/tmp/data") == "/tmp/data"
 
 
 def test_date_input_args_allow_long_history_dates() -> None:
@@ -1125,6 +1133,42 @@ def test_download_job_reports_overall_progress_across_batches(monkeypatch) -> No
         (3, 3, "000003.SZ", "available"),
     ]
     assert job["status"] == "completed"
+
+
+def test_download_job_summary_uses_user_facing_counts() -> None:
+    job = _create_download_job(
+        symbols=["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-01-01",
+        end="2024-01-31",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="tdx",
+        batch_size=2,
+    )
+    job["cursor"] = 2
+    job["rows"] = [
+        {"symbol": "000001.SZ", "status": "available"},
+        {"symbol": "000002.SZ", "status": "failed"},
+    ]
+
+    assert _download_job_summary(job) == {
+        "total": 5,
+        "completed": 2,
+        "remaining": 3,
+        "failed": 1,
+        "uncovered": 0,
+        "status_label": "下载中",
+        "batch_label": "当前批：第 3-4 / 5 个",
+    }
+
+
+def test_download_progress_text_describes_current_symbol_and_result() -> None:
+    assert _download_progress_text(2, 5, "000003.SZ", "running") == "正在下载第 3/5 个：000003.SZ"
+    assert _download_progress_text(3, 5, "000003.SZ", "available") == "已完成第 3/5 个：000003.SZ"
+    assert _download_progress_text(3, 5, "000003.SZ", "failed") == "第 3/5 个失败：000003.SZ"
 
 
 def test_prepare_full_daily_download_symbols_skips_available_daily_bars(monkeypatch) -> None:

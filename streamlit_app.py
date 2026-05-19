@@ -37,6 +37,11 @@ DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "partial_window", "read_error"}
 DOWNLOAD_BATCH_SIZE = 100
 DOWNLOAD_JOB_STATUSES = {"running", "paused", "completed"}
+DOWNLOAD_JOB_STATUS_LABELS = {
+    "running": "下载中",
+    "paused": "已暂停",
+    "completed": "下载完成",
+}
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
@@ -124,8 +129,9 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
         st.session_state[state_key] = default_text
     st.session_state[default_key] = default_text
     st.caption(label)
-    _render_selected_path(str(st.session_state[state_key]))
-    if st.button(f"选择{label}", key=f"{key}_pick"):
+    _render_selected_path(_picker_path_text(str(st.session_state[state_key])))
+    button_col, clear_col = st.columns([2, 1])
+    if button_col.button(f"选择{label}", key=f"{key}_pick"):
         selected_path, error = _pick_directory_with_system_dialog(label, st.session_state[state_key])
         if error is not None:
             st.session_state[error_key] = error
@@ -135,6 +141,10 @@ def _render_directory_picker(label: str, default_path: str | Path, key: str) -> 
             st.rerun()
         else:
             st.session_state.pop(error_key, None)
+    if st.session_state[state_key] and clear_col.button("清除", key=f"{key}_clear"):
+        st.session_state[state_key] = ""
+        st.session_state.pop(error_key, None)
+        st.rerun()
     if st.session_state.get(error_key):
         st.error(st.session_state[error_key])
     return str(st.session_state[state_key])
@@ -206,7 +216,7 @@ def _render_file_picker(
     if state_key not in st.session_state:
         st.session_state[state_key] = ""
     st.caption(label)
-    _render_selected_path(str(st.session_state[state_key]) if st.session_state[state_key] else "未选择")
+    _render_selected_path(_picker_path_text(str(st.session_state[state_key])))
     open_key = f"{key}_browser_open"
     button_col, clear_col = st.columns([2, 1])
     if button_col.button(f"选择{label}", key=f"{key}_pick"):
@@ -303,6 +313,11 @@ def _render_selected_path(path: str) -> None:
         f"<div style='font-size:12px;line-height:1.35;word-break:break-all;color:#374151;margin:-0.25rem 0 0.35rem 0;'>{escape(path)}</div>",
         unsafe_allow_html=True,
     )
+
+
+def _picker_path_text(path: str | Path) -> str:
+    text = str(path).strip()
+    return text if text else "未选择"
 
 
 def _picker_initial_directory(value: str | Path, fallback: str | Path) -> str:
@@ -1304,11 +1319,57 @@ def _download_job_result_frame(job: dict[str, object]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _download_job_summary(job: dict[str, object]) -> dict[str, object]:
+    total = len(list(job.get("symbols", [])))
+    completed = min(int(job.get("cursor", 0)), total)
+    remaining = max(total - completed, 0)
+    result = _download_job_result_frame(job)
+    statuses = result["status"].astype(str) if "status" in result.columns else pd.Series(dtype=str)
+    failed = int((statuses == "failed").sum())
+    uncovered = int(statuses.isin(DOWNLOAD_REQUIRED_STATUSES).sum())
+    status = str(job.get("status", ""))
+    batch_size = max(1, int(job.get("batch_size", DOWNLOAD_BATCH_SIZE)))
+    if remaining <= 0:
+        batch_label = "无剩余批次"
+    else:
+        start_index = completed + 1
+        end_index = min(completed + batch_size, total)
+        prefix = "当前批" if status == "running" else "下一批"
+        batch_label = f"{prefix}：第 {start_index}-{end_index} / {total} 个"
+    return {
+        "total": total,
+        "completed": completed,
+        "remaining": remaining,
+        "failed": failed,
+        "uncovered": uncovered,
+        "status_label": DOWNLOAD_JOB_STATUS_LABELS.get(status, status or "未开始"),
+        "batch_label": batch_label,
+    }
+
+
+def _download_progress_text(completed: int, total: int, symbol: str, row_status: str) -> str:
+    if row_status == "running":
+        index = min(completed + 1, total) if total else completed
+        return f"正在下载第 {index}/{total} 个：{symbol}"
+    if row_status == "failed":
+        return f"第 {completed}/{total} 个失败：{symbol}"
+    return f"已完成第 {completed}/{total} 个：{symbol}"
+
+
 def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFrame:
     job = st.session_state.get(job_key)
     if not isinstance(job, dict):
         return pd.DataFrame()
     status = str(job.get("status", ""))
+    summary = _download_job_summary(job)
+    summary_cols = st.columns(5)
+    summary_cols[0].metric("任务状态", str(summary["status_label"]))
+    summary_cols[1].metric("总标的", f"{int(summary['total']):,}")
+    summary_cols[2].metric("已完成", f"{int(summary['completed']):,}")
+    summary_cols[3].metric("失败", f"{int(summary['failed']):,}")
+    summary_cols[4].metric("剩余", f"{int(summary['remaining']):,}")
+    st.caption(str(summary["batch_label"]))
+
     button_cols = st.columns([1, 1, 3])
     if status == "running":
         if button_cols[0].button("暂停下载", key=f"{job_key}_pause"):
@@ -1322,37 +1383,26 @@ def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFra
         st.session_state.pop(job_key, None)
         st.rerun()
 
-    total = len(list(job.get("symbols", [])))
-    cursor = int(job.get("cursor", 0))
+    total = int(summary["total"])
+    cursor = int(summary["completed"])
     ratio = cursor / total if total else 1.0
-    label = {
-        "running": "下载中",
-        "paused": "已暂停",
-        "completed": "下载完成",
-    }.get(status, status)
-    progress_bar = st.progress(ratio, text=f"{cursor}/{total} {label}")
+    progress_bar = st.progress(ratio, text=f"{cursor}/{total} {summary['status_label']}")
     progress_text = st.empty()
 
     if status == "running":
         def report_progress(completed: int, total_count: int, symbol: str, row_status: str) -> None:
-            action = "正在下载" if row_status == "running" else "已完成"
             step_ratio = completed / total_count if total_count else 1.0
-            progress_bar.progress(step_ratio, text=f"{completed}/{total_count} {action} {symbol}")
-            progress_text.caption(f"当前标的：{symbol}；状态：{row_status}")
+            progress_bar.progress(step_ratio, text=_download_progress_text(completed, total_count, symbol, row_status))
+            progress_text.caption(f"当前状态：{_download_progress_text(completed, total_count, symbol, row_status)}")
 
         with st.spinner("正在下载下一批行情..."):
             _run_download_job_step(job, progress_callback=report_progress)
         st.cache_data.clear()
-        total = len(list(job.get("symbols", [])))
-        cursor = int(job.get("cursor", 0))
-        status = str(job.get("status", ""))
-        label = {
-            "running": "下载中",
-            "paused": "已暂停",
-            "completed": "下载完成",
-        }.get(status, status)
-        progress_bar.progress(cursor / total if total else 1.0, text=f"{cursor}/{total} {label}")
-        if job.get("status") == "running":
+        summary = _download_job_summary(job)
+        total = int(summary["total"])
+        cursor = int(summary["completed"])
+        progress_bar.progress(cursor / total if total else 1.0, text=f"{cursor}/{total} {summary['status_label']}")
+        if job.get("status") in {"running", "completed"}:
             st.rerun()
 
     result = _download_job_result_frame(job)
@@ -1360,9 +1410,16 @@ def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFra
         display = _pin_symbol_row(result, target_symbol) if target_symbol else result
         st.dataframe(_centered(_format_data_check_status(display)), use_container_width=True, hide_index=True)
     if job.get("status") == "paused":
-        st.info("下载已暂停，点击继续下载会从下一批接着跑。")
+        st.info("下载已暂停。当前批次已结束，点击继续下载会从下一批接着跑。")
     elif job.get("status") == "completed":
-        st.success("下载任务已完成。")
+        final_summary = _download_job_summary(job)
+        if int(final_summary["failed"]) > 0 or int(final_summary["uncovered"]) > 0:
+            st.warning(
+                f"下载任务已结束：失败 {int(final_summary['failed']):,} 个，"
+                f"仍未覆盖 {int(final_summary['uncovered']):,} 个。请在上方表格查看原因。"
+            )
+        else:
+            st.success("下载任务已完成，所选标的已覆盖。")
     return result
 
 
