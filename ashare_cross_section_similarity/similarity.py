@@ -9,13 +9,23 @@ import pandas as pd
 from ashare_cross_section_similarity.data import inclusive_end_timestamp
 from ashare_cross_section_similarity.features import (
     FEATURE_COLUMNS,
-    normalized_close_path,
-    resample_path,
     z_normalize,
+)
+from ashare_cross_section_similarity.similarity_algorithms import (
+    BASELINE_ALGORITHM,
+    AlgorithmTarget,
+    build_algorithm_target,
+    distance_for_close_matrix,
+    distance_for_window,
+    ensure_algorithm_available,
 )
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
 
 FORWARD_RETURN_WINDOWS = (3, 5, 10)
+
+
+def _compat_z_normalize(values: np.ndarray) -> np.ndarray:
+    return z_normalize(values)
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,7 @@ class CrossSectionSearchConfig:
     path_weight: float = 0.7
     forward_windows: tuple[int, ...] = FORWARD_RETURN_WINDOWS
     date_tolerance_bars: int = 0
+    algorithm: str = BASELINE_ALGORITHM
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,8 @@ class _CandidateWindow:
     frame: pd.DataFrame
     date_offset: int
     path_distance: float | None = None
+    price_path_distance: float | None = None
+    return_path_distance: float | None = None
 
 
 def search_cross_section(
@@ -62,6 +75,7 @@ def search_cross_section(
         raise ValueError("forward_windows 必须为正整数。")
     if config.date_tolerance_bars < 0:
         raise ValueError("date_tolerance_bars 不能为负数。")
+    algorithm = ensure_algorithm_available(config.algorithm, mode="cross_section")
     prepared = _prepare_bars(bars)
     target_symbol = normalize_symbol(config.target_symbol)
     start = pd.Timestamp(config.start)
@@ -74,7 +88,7 @@ def search_cross_section(
 
     target_length = len(target_window)
     minimum_rows = max(2, math.ceil(target_length * config.min_coverage))
-    target_path = z_normalize(normalized_close_path(target_window))
+    target_metric = build_algorithm_target(target_window, algorithm)
     target_features = _fast_window_features(target_window)
     rows: list[dict[str, object]] = []
     skipped: list[dict[str, str]] = []
@@ -90,7 +104,7 @@ def search_cross_section(
             target_length,
             minimum_rows,
             config.date_tolerance_bars,
-            target_path,
+            target_metric,
         )
         candidate = candidate_match.frame if candidate_match is not None else None
         candidate_rows = 0 if candidate is None else len(candidate)
@@ -102,19 +116,27 @@ def search_cross_section(
                 }
             )
             continue
-        path_distance = candidate_match.path_distance
-        if path_distance is None:
-            candidate_path = z_normalize(resample_path(normalized_close_path(candidate), target_length))
-            path_distance = float(np.linalg.norm(target_path - candidate_path) / math.sqrt(target_length))
+        distance_parts = (
+            distance_for_window(candidate, target_metric)
+            if candidate_match.path_distance is None
+            else {
+                "路径距离": candidate_match.path_distance,
+                "价格路径距离": candidate_match.price_path_distance,
+                "收益路径距离": candidate_match.return_path_distance,
+            }
+        )
         features = _fast_window_features(candidate)
         row: dict[str, object] = {
+            "算法": algorithm,
             "symbol": symbol,
             "区间开始": candidate["date"].min(),
             "区间结束": candidate["date"].max(),
             "K线数量": int(len(candidate)),
             "日期偏移": int(candidate_match.date_offset),
             "覆盖率": float(len(candidate) / target_length),
-            "路径距离": path_distance,
+            "路径距离": distance_parts["路径距离"],
+            "价格路径距离": distance_parts["价格路径距离"],
+            "收益路径距离": distance_parts["收益路径距离"],
         }
         for column in FEATURE_COLUMNS:
             row[column] = features[column]
@@ -148,7 +170,7 @@ def _best_candidate_window(
     target_length: int,
     minimum_rows: int,
     date_tolerance_bars: int,
-    target_path: np.ndarray,
+    target_metric: AlgorithmTarget,
 ) -> _CandidateWindow | None:
     if date_tolerance_bars == 0:
         if strict_window is None or strict_window.empty:
@@ -164,6 +186,8 @@ def _best_candidate_window(
     best_start: int | None = None
     best_length: int | None = None
     best_distance: float | None = None
+    best_price_distance: float | None = None
+    best_return_distance: float | None = None
     close = symbol_bars["close"].to_numpy(dtype=float, copy=False)
     candidate_starts = np.arange(
         anchor_position - date_tolerance_bars,
@@ -178,14 +202,16 @@ def _best_candidate_window(
     full_starts = candidate_starts[candidate_starts + target_length <= len(symbol_bars)]
     if len(full_starts):
         close_windows = np.lib.stride_tricks.sliding_window_view(close, target_length)[full_starts]
-        path_matrix = _normalized_close_paths(close_windows)
-        distances = np.linalg.norm(_z_normalize_rows(path_matrix) - target_path, axis=1) / math.sqrt(target_length)
+        distance_parts = distance_for_close_matrix(close_windows, target_metric)
+        distances = distance_parts["路径距离"]
         offsets = full_starts - anchor_position
         order = np.lexsort((offsets, np.abs(offsets), distances))
         best_index = int(order[0])
         best_start = int(full_starts[best_index])
         best_length = target_length
         best_distance = float(distances[best_index])
+        best_price_distance = float(distance_parts["价格路径距离"][best_index])
+        best_return_distance = float(distance_parts["收益路径距离"][best_index])
         best_offset = int(offsets[best_index])
         best_key = (best_distance, abs(best_offset), best_offset)
 
@@ -194,15 +220,19 @@ def _best_candidate_window(
         window_length = len(symbol_bars) - int(start_position)
         if window_length < minimum_rows:
             continue
-        candidate_close = close[int(start_position) :]
-        path = z_normalize(resample_path(_normalized_close_path(candidate_close), target_length))
-        path_distance = float(np.linalg.norm(target_path - path) / math.sqrt(target_length))
+        distance_parts = distance_for_window(
+            symbol_bars.iloc[int(start_position) :].reset_index(drop=True),
+            target_metric,
+        )
+        path_distance = float(distance_parts["路径距离"])
         date_offset = int(start_position) - anchor_position
         key = (path_distance, abs(date_offset), date_offset)
         if best_key is None or key < best_key:
             best_start = int(start_position)
             best_length = int(window_length)
             best_distance = path_distance
+            best_price_distance = float(distance_parts["价格路径距离"])
+            best_return_distance = float(distance_parts["收益路径距离"])
             best_key = key
 
     if best_start is None or best_length is None:
@@ -212,6 +242,8 @@ def _best_candidate_window(
         symbol_bars.iloc[best_start : best_start + best_length].reset_index(drop=True),
         date_offset,
         best_distance,
+        best_price_distance,
+        best_return_distance,
     )
 
 

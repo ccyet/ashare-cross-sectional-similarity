@@ -7,6 +7,7 @@ import sys
 
 import pandas as pd
 
+from ashare_cross_section_similarity.benchmark import run_benchmark
 from ashare_cross_section_similarity.data import (
     available_symbols,
     import_price_frame,
@@ -20,6 +21,7 @@ from ashare_cross_section_similarity.similarity import (
     FORWARD_RETURN_WINDOWS,
     search_cross_section,
 )
+from ashare_cross_section_similarity.similarity_algorithms import ALGORITHM_CHOICES, BASELINE_ALGORITHM
 from ashare_cross_section_similarity.universe import (
     fetch_concept_constituents,
     fetch_index_constituents,
@@ -37,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_check(args)
     if args.command == "import-data":
         return _run_import_data(args)
+    if args.command == "benchmark":
+        return _run_benchmark(args)
     if args.command == "history":
         return _run_history(args)
     return _run_search(args)
@@ -66,6 +70,7 @@ def _run_search(args: argparse.Namespace) -> int:
             min_coverage=args.min_coverage,
             path_weight=args.path_weight,
             date_tolerance_bars=args.date_tolerance_bars,
+            algorithm=args.algorithm,
         ),
     )
     outcome_columns = [
@@ -119,6 +124,7 @@ def _run_history(args: argparse.Namespace) -> int:
             exclusion_bars=args.exclusion_bars,
             nearby_gap_days=args.nearby_gap_days,
             path_weight=args.path_weight,
+            algorithm=args.algorithm,
         ),
     )
     outcome_columns = [
@@ -214,9 +220,26 @@ def _run_import_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_benchmark(args: argparse.Namespace) -> int:
+    algorithms = tuple(item.strip() for item in args.algorithms.split(",") if item.strip())
+    if not algorithms:
+        raise SystemExit("algorithms 至少需要一个算法名。")
+    result = run_benchmark(
+        cases_path=args.cases,
+        algorithms=algorithms,
+        output_dir=args.output,
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+    )
+    print(result.summary.to_string(index=False))
+    print(f"benchmark CSV/HTML 已写入：{Path(args.output).expanduser()}")
+    return 1 if (not result.summary.empty and (result.summary["status"] == "failed").any()) else 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] not in {"search", "history", "download", "check", "import-data", "-h", "--help"}:
+    if argv and argv[0] not in {"search", "history", "download", "check", "import-data", "benchmark", "-h", "--help"}:
         argv.insert(0, "search")
     parser = argparse.ArgumentParser(description="A股相似阶段搜集：历史时序、横截面、数据抓取、检查")
     subparsers = parser.add_subparsers(dest="command")
@@ -229,6 +252,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     search_parser.add_argument("--top-n", type=int, default=20)
     search_parser.add_argument("--min-coverage", type=float, default=0.8)
     search_parser.add_argument("--path-weight", type=float, default=0.7)
+    search_parser.add_argument("--algorithm", default=BASELINE_ALGORITHM, choices=ALGORITHM_CHOICES, help="相似算法")
     search_parser.add_argument(
         "--date-tolerance-bars",
         type=int,
@@ -249,6 +273,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     history_parser.add_argument("--exclusion-bars", type=int, default=20, help="排除当前窗口附近的 K 线数量")
     history_parser.add_argument("--nearby-gap-days", type=int, default=20, help="相邻历史样本最小间隔天数")
     history_parser.add_argument("--path-weight", type=float, default=0.7, help="走势形状在综合相似度中的权重")
+    history_parser.add_argument("--algorithm", default=BASELINE_ALGORITHM, choices=ALGORITHM_CHOICES, help="相似算法")
     history_parser.add_argument("--output", default="", help="CSV 输出路径")
 
     download_parser = subparsers.add_parser("download", help="抓取行情并落地本地 parquet")
@@ -268,6 +293,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="当文件没有 symbol/stock_code 列时使用的单一标的代码",
     )
     import_parser.add_argument("--output", default="", help="CSV 导入日志输出路径")
+
+    benchmark_parser = subparsers.add_parser("benchmark", help="运行固定样本算法核验并输出 CSV/HTML 图集")
+    _add_common_data_args(benchmark_parser)
+    benchmark_parser.add_argument("--cases", required=True, help="benchmark cases yaml/json 文件")
+    benchmark_parser.add_argument(
+        "--algorithms",
+        default="baseline_price_feature,return_shape,hybrid_shape_v2",
+        help="逗号分隔算法名",
+    )
+    benchmark_parser.add_argument("--output", default="outputs/research", help="输出目录")
 
     parsed = parser.parse_args(argv)
     if parsed.command is None:

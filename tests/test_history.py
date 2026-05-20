@@ -229,7 +229,11 @@ def test_search_history_matches_legacy_window_loop() -> None:
 
     assert actual["窗口开始"].tolist() == expected["窗口开始"].tolist()
     assert actual["窗口结束"].tolist() == expected["窗口结束"].tolist()
-    numeric_columns = [column for column in actual.columns if column not in {"symbol", "窗口开始", "窗口结束"}]
+    numeric_columns = [
+        column
+        for column in actual.columns
+        if column in expected.columns and column not in {"symbol", "窗口开始", "窗口结束", "算法"}
+    ]
     np.testing.assert_allclose(
         actual[numeric_columns].to_numpy(dtype=float),
         expected[numeric_columns].to_numpy(dtype=float),

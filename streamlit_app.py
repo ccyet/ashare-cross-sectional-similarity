@@ -29,6 +29,12 @@ from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchResult,
     search_cross_section,
 )
+from ashare_cross_section_similarity.similarity_algorithms import (
+    ALGORITHM_CHOICES,
+    BASELINE_ALGORITHM,
+    algorithm_label,
+    get_algorithm_status,
+)
 from ashare_cross_section_similarity.universe import (
     DEFAULT_ANALYSIS_INDEX_SYMBOLS,
     fetch_all_a_symbols,
@@ -39,7 +45,7 @@ from ashare_cross_section_similarity.universe import (
 
 
 PERCENT_COLUMNS = ["综合相似度", "路径相似度", "特征相似度", "区间收益", "波动率", "最大回撤", "下跌放量占比", "覆盖率"]
-DECIMAL_COLUMNS = ["路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
+DECIMAL_COLUMNS = ["路径距离", "价格路径距离", "收益路径距离", "趋势斜率", "量价相关", "成交规模", "特征距离"]
 DOWNLOAD_REQUIRED_STATUSES = {"missing_file", "missing_window", "partial_window", "read_error"}
 DOWNLOAD_BATCH_SIZE = 100
 DOWNLOAD_JOB_STATUSES = {"running", "paused", "completed"}
@@ -103,6 +109,7 @@ def main() -> None:
         _render_price_upload(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
     _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
+    _render_algorithm_benchmark_entry(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
     history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
     with history_tab:
@@ -384,6 +391,25 @@ def _path_text(value: str | Path) -> str:
     return str(Path(str(value)).expanduser()) if str(value).strip() else ""
 
 
+def _algorithm_option_label(name: str) -> str:
+    status = get_algorithm_status(name)
+    suffix = "" if status.available else "（未安装依赖）"
+    return f"{algorithm_label(name)}{suffix}"
+
+
+def _render_algorithm_benchmark_entry(*, data_root: str, timeframe: str, adjust: str) -> None:
+    with st.expander("算法核验图集", expanded=False):
+        st.caption("用固定样本对不同相似算法输出 Top 结果、运行时间和 HTML 图集；适合肉眼复核形态一致性。")
+        command = (
+            "python -m ashare_cross_section_similarity benchmark "
+            "--cases docs/research/similarity_benchmark_cases.yaml "
+            "--algorithms baseline_price_feature,return_shape,hybrid_shape_v2,dtw_optional "
+            f"--data-root {data_root} --timeframe {timeframe} --adjust {adjust} "
+            "--output outputs/research"
+        )
+        st.code(command, language="bash")
+
+
 def _render_history_tab(
     *,
     trend_repo: str,
@@ -425,7 +451,15 @@ def _render_history_tab(
     candidate_n = col6.number_input("初筛候选", min_value=10, max_value=1000, value=100, step=10, key="history_candidate_n")
     exclusion_bars = col7.number_input("排除近邻K线", min_value=0, max_value=500, value=20, step=5, key="history_exclusion_bars")
     nearby_gap_days = col8.number_input("样本间隔天数", min_value=0, max_value=365, value=20, step=5, key="history_gap_days")
-    path_weight = st.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="history_path_weight")
+    alg_col, weight_col = st.columns([1, 2])
+    algorithm = alg_col.selectbox(
+        "相似算法",
+        ALGORITHM_CHOICES,
+        index=ALGORITHM_CHOICES.index(BASELINE_ALGORITHM),
+        format_func=_algorithm_option_label,
+        key="history_algorithm",
+    )
+    path_weight = weight_col.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="history_path_weight")
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     as_of = pd.Timestamp(end_date).strftime("%Y-%m-%d")
     if error := _date_range_error(start, as_of):
@@ -505,6 +539,7 @@ def _render_history_tab(
                 exclusion_bars=int(exclusion_bars),
                 nearby_gap_days=int(nearby_gap_days),
                 path_weight=float(path_weight),
+                algorithm=str(algorithm),
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -517,6 +552,7 @@ def _render_history_tab(
     cols[1].metric("有效样本", len(result.results))
     cols[2].metric("周期", timeframe)
     cols[3].metric("目标代码", result.symbol)
+    st.caption(f"相似算法：{algorithm_label(str(algorithm))}")
     if result.results.empty:
         st.warning("没有找到可用历史样本。请缩短窗口、放宽排除近邻K线，或补充更长历史数据。")
         return
@@ -619,7 +655,7 @@ def _render_cross_section_tab(
         st.session_state.pop("cross_data_check", None)
         st.session_state.pop("cross_data_check_key", None)
         return
-    col4, col5, col6, col10 = st.columns(4)
+    col4, col5, col6, col10, col11 = st.columns(5)
     top_n = col4.number_input("展示数量", min_value=5, max_value=100, value=20, step=5, key="cross_top_n")
     date_tolerance_bars = col5.number_input(
         "日期容错",
@@ -632,6 +668,13 @@ def _render_cross_section_tab(
     )
     min_coverage = col6.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05, key="cross_min_coverage")
     path_weight = col10.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="cross_path_weight")
+    algorithm = col11.selectbox(
+        "相似算法",
+        ALGORITHM_CHOICES,
+        index=ALGORITHM_CHOICES.index(BASELINE_ALGORITHM),
+        format_func=_algorithm_option_label,
+        key="cross_algorithm",
+    )
     universe_symbols = st.text_area("搜索范围代码", value="", help="逗号分隔；留空时尝试读取本地目录下全部 parquet。")
     col7, col8, col9 = st.columns(3)
     with col7:
@@ -782,6 +825,7 @@ def _render_cross_section_tab(
                 min_coverage=float(min_coverage),
                 path_weight=float(path_weight),
                 date_tolerance_bars=tolerance_bars,
+                algorithm=str(algorithm),
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -791,6 +835,7 @@ def _render_cross_section_tab(
     st.markdown("**4. 搜索结果**")
     for column, (label, value) in zip(st.columns(2), _cross_section_result_metrics(result)):
         column.metric(label, value)
+    st.caption(f"相似算法：{algorithm_label(str(algorithm))}")
     if result.results.empty:
         st.warning("没有找到可用结果。请检查本地数据覆盖、搜索范围和区间设置。")
         return

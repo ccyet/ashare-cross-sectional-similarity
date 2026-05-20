@@ -13,6 +13,12 @@ from ashare_cross_section_similarity.features import (
     window_features,
     z_normalize,
 )
+from ashare_cross_section_similarity.similarity_algorithms import (
+    BASELINE_ALGORITHM,
+    build_algorithm_target,
+    distance_for_close_matrix,
+    ensure_algorithm_available,
+)
 from ashare_cross_section_similarity.similarity import _prepare_bars, _score_results
 from ashare_cross_section_similarity.universe import normalize_symbol
 
@@ -29,6 +35,7 @@ class HistorySearchConfig:
     nearby_gap_days: int = 20
     path_weight: float = 0.7
     window_start: str | pd.Timestamp | None = None
+    algorithm: str = BASELINE_ALGORITHM
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         raise ValueError("forward_windows 必须为正整数。")
     if not 0 <= config.path_weight <= 1:
         raise ValueError("path_weight 必须在 0 到 1 之间。")
+    algorithm = ensure_algorithm_available(config.algorithm, mode="history")
     prepared = _prepare_bars(bars)
     symbol = normalize_symbol(config.symbol)
     prepared = prepared.loc[prepared["stock_code"] == symbol].sort_values("date").reset_index(drop=True)
@@ -69,6 +77,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
 
     current_window, current_start, as_of_index, window_size = _current_history_window(prepared, available, config)
     target_path = z_normalize(normalized_close_path(current_window))
+    target_metric = build_algorithm_target(current_window, algorithm)
     target_features = window_features(current_window)
     max_forward = max(config.forward_windows) if config.forward_windows else 0
 
@@ -85,8 +94,10 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         starts=starts,
         window_size=window_size,
         target_path=target_path,
+        target_metric=target_metric,
         target_features=target_features,
         forward_windows=config.forward_windows,
+        algorithm=algorithm,
     )
     if result_frame.empty:
         return HistorySearchResult(
@@ -167,8 +178,10 @@ def _history_candidate_frame(
     starts: np.ndarray,
     window_size: int,
     target_path: np.ndarray,
+    target_metric,
     target_features: dict[str, float],
     forward_windows: tuple[int, ...],
+    algorithm: str,
 ) -> pd.DataFrame:
     if len(starts) == 0:
         return pd.DataFrame()
@@ -178,7 +191,15 @@ def _history_candidate_frame(
     liquidity = np.where(np.isfinite(amount), amount, volume)
     close_windows = np.lib.stride_tricks.sliding_window_view(close, window_size)[starts]
     path_matrix = _normalized_close_paths(close_windows)
-    path_distance = np.linalg.norm(_z_normalize_rows(path_matrix) - target_path, axis=1) / math.sqrt(window_size)
+    if algorithm == BASELINE_ALGORITHM:
+        path_distance = np.linalg.norm(_z_normalize_rows(path_matrix) - target_path, axis=1) / math.sqrt(window_size)
+        price_path_distance = path_distance
+        return_path_distance = np.full(len(starts), np.nan, dtype=float)
+    else:
+        distance_parts = distance_for_close_matrix(close_windows, target_metric)
+        path_distance = distance_parts["路径距离"]
+        price_path_distance = distance_parts["价格路径距离"]
+        return_path_distance = distance_parts["收益路径距离"]
     features = _window_feature_arrays(
         close=close,
         liquidity=liquidity,
@@ -190,11 +211,14 @@ def _history_candidate_frame(
     frame = pd.DataFrame(
         {
             "_candidate_index": np.arange(len(starts)),
+            "算法": algorithm,
             "symbol": symbol,
             "窗口开始": prepared["date"].iloc[starts].to_numpy(),
             "窗口结束": prepared["date"].iloc[ends].to_numpy(),
             "K线数量": window_size,
             "路径距离": path_distance,
+            "价格路径距离": price_path_distance,
+            "收益路径距离": return_path_distance,
         }
     )
     for column in FEATURE_COLUMNS:
