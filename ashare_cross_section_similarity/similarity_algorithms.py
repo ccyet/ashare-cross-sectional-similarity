@@ -27,12 +27,14 @@ ALGORITHM_CHOICES: tuple[str, ...] = (
 )
 
 _ALGORITHM_LABELS = {
-    "baseline_price_feature": "Baseline：价格路径 + 手工特征",
-    "return_shape": "收益形态：对数收益路径",
-    "hybrid_shape_v2": "Hybrid v2：价格 + 收益 + 特征",
+    "baseline_price_feature": "Baseline：价格路径 + 手工特征（最近2根加权）",
+    "return_shape": "收益形态：对数收益路径（最近2根加权）",
+    "hybrid_shape_v2": "Hybrid v2：价格 + 收益 + 特征（最近2根加权）",
     "dtw_optional": "DTW 可选：弹性距离",
     "mass_optional_history": "MASS 可选：历史预筛",
 }
+RECENT_KLINE_COUNT = 2
+RECENT_KLINE_WEIGHT = 3.0
 
 
 @dataclass(frozen=True)
@@ -105,9 +107,18 @@ def distance_for_window(window: pd.DataFrame, target: AlgorithmTarget) -> dict[s
     close = pd.to_numeric(window["close"], errors="coerce").astype(float).to_numpy()
     if target.name == "dtw_optional":
         return _dtw_window_distance(close, target)
-    price_distance = _price_distance(close, target)
-    return_distance = _return_distance(close, target)
-    path_distance = _combine_path_distance(target.name, price_distance, return_distance)
+    if target.name == "return_shape":
+        price_distance = float("nan")
+        return_distance = _return_distance(close, target)
+        path_distance = return_distance
+    elif target.name == "hybrid_shape_v2":
+        price_distance = _price_distance(close, target)
+        return_distance = _return_distance(close, target)
+        path_distance = _combine_path_distance(target.name, price_distance, return_distance)
+    else:
+        price_distance = _price_distance(close, target)
+        return_distance = float("nan")
+        path_distance = price_distance
     return {
         "路径距离": path_distance,
         "价格路径距离": price_distance,
@@ -130,9 +141,19 @@ def distance_for_close_matrix(close_windows: np.ndarray, target: AlgorithmTarget
             "收益路径距离": np.full(len(values), np.nan, dtype=float),
         }
 
-    price_distance = _price_distance_matrix(close_windows, target)
-    return_distance = _return_distance_matrix(close_windows, target)
-    path_distance = _combine_path_distance(target.name, price_distance, return_distance)
+    row_count = len(close_windows)
+    if target.name == "return_shape":
+        price_distance = np.full(row_count, np.nan, dtype=float)
+        return_distance = _return_distance_matrix(close_windows, target)
+        path_distance = return_distance
+    elif target.name == "hybrid_shape_v2":
+        price_distance = _price_distance_matrix(close_windows, target)
+        return_distance = _return_distance_matrix(close_windows, target)
+        path_distance = _combine_path_distance(target.name, price_distance, return_distance)
+    else:
+        price_distance = _price_distance_matrix(close_windows, target)
+        return_distance = np.full(row_count, np.nan, dtype=float)
+        path_distance = price_distance
     return {
         "路径距离": path_distance,
         "价格路径距离": price_distance,
@@ -154,18 +175,17 @@ def _combine_path_distance(
 
 def _price_distance(close: np.ndarray, target: AlgorithmTarget) -> float:
     path = _price_path(close, target.target_length)
-    return float(np.linalg.norm(target.price_path - path) / math.sqrt(max(1, target.target_length)))
+    return _weighted_path_distance(path, target.price_path)
 
 
 def _return_distance(close: np.ndarray, target: AlgorithmTarget) -> float:
     path = _return_path(close, target.target_length)
-    length = max(1, len(target.return_path))
-    return float(np.linalg.norm(target.return_path - path) / math.sqrt(length))
+    return _weighted_path_distance(path, target.return_path)
 
 
 def _price_distance_matrix(close_windows: np.ndarray, target: AlgorithmTarget) -> np.ndarray:
     path_matrix = _z_normalize_rows(_normalized_close_paths(close_windows))
-    return np.linalg.norm(path_matrix - target.price_path, axis=1) / math.sqrt(max(1, target.target_length))
+    return _weighted_path_distance_matrix(path_matrix, target.price_path)
 
 
 def _return_distance_matrix(close_windows: np.ndarray, target: AlgorithmTarget) -> np.ndarray:
@@ -173,8 +193,30 @@ def _return_distance_matrix(close_windows: np.ndarray, target: AlgorithmTarget) 
     with np.errstate(invalid="ignore", divide="ignore"):
         returns = np.diff(np.log(np.where(path_matrix > 0, path_matrix, np.nan)), axis=1)
     returns = _z_normalize_rows(returns)
-    length = max(1, len(target.return_path))
-    return np.linalg.norm(returns - target.return_path, axis=1) / math.sqrt(length)
+    return _weighted_path_distance_matrix(returns, target.return_path)
+
+
+def _weighted_path_distance(left: np.ndarray, right: np.ndarray) -> float:
+    diff = np.asarray(left, dtype=float) - np.asarray(right, dtype=float)
+    if len(diff) == 0:
+        return 0.0
+    weights = _recent_kline_weights(len(diff))
+    return float(math.sqrt(float(np.sum(weights * diff * diff)) / float(np.sum(weights))))
+
+
+def _weighted_path_distance_matrix(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    diff = np.asarray(left, dtype=float) - np.asarray(right, dtype=float)
+    if diff.shape[1] == 0:
+        return np.zeros(diff.shape[0], dtype=float)
+    weights = _recent_kline_weights(diff.shape[1])
+    return np.sqrt(np.sum(diff * diff * weights, axis=1) / np.sum(weights))
+
+
+def _recent_kline_weights(length: int) -> np.ndarray:
+    weights = np.ones(length, dtype=float)
+    if length > 0:
+        weights[-min(RECENT_KLINE_COUNT, length):] = RECENT_KLINE_WEIGHT
+    return weights
 
 
 def _price_path(close: np.ndarray, target_length: int) -> np.ndarray:

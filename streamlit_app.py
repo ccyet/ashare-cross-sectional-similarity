@@ -21,6 +21,11 @@ from ashare_cross_section_similarity.data import (
     read_price_data_file,
     resolve_timeframe_root,
 )
+from ashare_cross_section_similarity.data_manager import (
+    KLINE_FILE_PATTERNS,
+    migrate_kline_data,
+    plan_kline_migration,
+)
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
@@ -55,6 +60,7 @@ DOWNLOAD_JOB_STATUS_LABELS = {
     "completed": "下载完成",
 }
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
+KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
 SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
@@ -107,6 +113,7 @@ def main() -> None:
                 help="trend 可留空使用原配置；OpenBB 默认 akshare，需安装 openbb_akshare。",
             )
         _render_price_upload(data_root=data_root, timeframe=timeframe, adjust=adjust)
+        _render_data_archive_manager(data_root=data_root)
 
     _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
     _render_algorithm_benchmark_entry(data_root=data_root, timeframe=timeframe, adjust=adjust)
@@ -1022,6 +1029,55 @@ def _render_price_upload(*, data_root: str, timeframe: str, adjust: str) -> None
             return
         st.cache_data.clear()
         st.dataframe(_centered(_format_import_status(result)), use_container_width=True, hide_index=True)
+
+
+def _render_data_archive_manager(*, data_root: str) -> None:
+    with st.expander("管理本地K线数据"):
+        st.caption("先预览迁移计划，再执行复制或移动；支持 parquet、csv、xlsx、xls 文件。")
+        source_type = st.selectbox("来源类型", ["文件夹", "文件"], key="archive_source_type")
+        if source_type == "文件夹":
+            source_path = _render_directory_picker("来源文件夹", data_root, "archive_source_dir")
+        else:
+            source_path = _render_file_picker("来源文件", data_root, "archive_source_file", KLINE_DATA_FILE_TYPES)
+        destination_path = _render_directory_picker("目标文件夹", data_root, "archive_destination_dir")
+        mode_label = st.selectbox("迁移方式", ["复制", "移动"], key="archive_migration_mode")
+        overwrite = st.checkbox("允许覆盖同名文件", value=False, key="archive_overwrite")
+        mode = "move" if mode_label == "移动" else "copy"
+
+        preview_col, execute_col = st.columns(2)
+        if preview_col.button("预览迁移计划", key="archive_preview"):
+            try:
+                plan = plan_kline_migration(source_path, destination_path, overwrite=overwrite)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"无法生成迁移计划：{exc}")
+                return
+            st.session_state["archive_migration_plan"] = plan
+
+        plan = st.session_state.get("archive_migration_plan")
+        if isinstance(plan, pd.DataFrame):
+            if plan.empty:
+                st.info("来源路径下没有可迁移的 K 线数据文件。")
+            else:
+                ready_count = int((plan["status"] == "ready").sum())
+                exists_count = int((plan["status"] == "exists").sum())
+                st.info(f"计划文件 {len(plan):,} 个；可执行 {ready_count:,} 个；同名已存在 {exists_count:,} 个。")
+                st.dataframe(_centered(_format_migration_status(plan)), use_container_width=True, hide_index=True)
+
+        if not execute_col.button("执行迁移", key="archive_execute"):
+            return
+        try:
+            result = migrate_kline_data(source_path, destination_path, mode=mode, overwrite=overwrite)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"K 线数据迁移失败：{exc}")
+            return
+        st.cache_data.clear()
+        st.session_state["archive_migration_plan"] = result
+        failed_count = int((result["status"] == "failed").sum()) if not result.empty else 0
+        if failed_count:
+            st.error(f"迁移完成，但有 {failed_count:,} 个文件失败。")
+        else:
+            st.success("K 线数据迁移完成。")
+        st.dataframe(_centered(_format_migration_status(result)), use_container_width=True, hide_index=True)
 
 
 class _Args:
@@ -2181,6 +2237,32 @@ def _format_import_status(frame: pd.DataFrame) -> pd.DataFrame:
         if column in result.columns:
             result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
     return result
+
+
+def _format_migration_status(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "size_bytes" in result.columns:
+        result["size_bytes"] = pd.to_numeric(result["size_bytes"], errors="coerce").map(_format_file_size)
+    return result.rename(
+        columns={
+            "source": "来源",
+            "destination": "目标",
+            "status": "状态",
+            "size_bytes": "大小",
+            "message": "说明",
+        }
+    )
+
+
+def _format_file_size(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    size = float(value)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TB"
 
 
 def _centered(frame: pd.DataFrame) -> pd.io.formats.style.Styler:

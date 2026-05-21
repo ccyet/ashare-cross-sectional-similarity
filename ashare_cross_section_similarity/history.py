@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import numpy as np
 import pandas as pd
@@ -9,9 +8,7 @@ import pandas as pd
 from ashare_cross_section_similarity.data import inclusive_end_timestamp
 from ashare_cross_section_similarity.features import (
     FEATURE_COLUMNS,
-    normalized_close_path,
     window_features,
-    z_normalize,
 )
 from ashare_cross_section_similarity.similarity_algorithms import (
     BASELINE_ALGORITHM,
@@ -76,7 +73,6 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         raise ValueError("as-of 之前数据不足，无法形成当前窗口。")
 
     current_window, current_start, as_of_index, window_size = _current_history_window(prepared, available, config)
-    target_path = z_normalize(normalized_close_path(current_window))
     target_metric = build_algorithm_target(current_window, algorithm)
     target_features = window_features(current_window)
     max_forward = max(config.forward_windows) if config.forward_windows else 0
@@ -93,7 +89,6 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         symbol=symbol,
         starts=starts,
         window_size=window_size,
-        target_path=target_path,
         target_metric=target_metric,
         target_features=target_features,
         forward_windows=config.forward_windows,
@@ -177,7 +172,6 @@ def _history_candidate_frame(
     symbol: str,
     starts: np.ndarray,
     window_size: int,
-    target_path: np.ndarray,
     target_metric,
     target_features: dict[str, float],
     forward_windows: tuple[int, ...],
@@ -191,15 +185,10 @@ def _history_candidate_frame(
     liquidity = np.where(np.isfinite(amount), amount, volume)
     close_windows = np.lib.stride_tricks.sliding_window_view(close, window_size)[starts]
     path_matrix = _normalized_close_paths(close_windows)
-    if algorithm == BASELINE_ALGORITHM:
-        path_distance = np.linalg.norm(_z_normalize_rows(path_matrix) - target_path, axis=1) / math.sqrt(window_size)
-        price_path_distance = path_distance
-        return_path_distance = np.full(len(starts), np.nan, dtype=float)
-    else:
-        distance_parts = distance_for_close_matrix(close_windows, target_metric)
-        path_distance = distance_parts["路径距离"]
-        price_path_distance = distance_parts["价格路径距离"]
-        return_path_distance = distance_parts["收益路径距离"]
+    distance_parts = distance_for_close_matrix(close_windows, target_metric)
+    path_distance = distance_parts["路径距离"]
+    price_path_distance = distance_parts["价格路径距离"]
+    return_path_distance = distance_parts["收益路径距离"]
     features = _window_feature_arrays(
         close=close,
         liquidity=liquidity,
@@ -233,14 +222,6 @@ def _normalized_close_paths(close_windows: np.ndarray) -> np.ndarray:
     first = close_windows[:, [0]]
     valid = np.isfinite(first) & (first != 0)
     return np.divide(close_windows, first, out=np.zeros_like(close_windows, dtype=float), where=valid) * 100.0
-
-
-def _z_normalize_rows(values: np.ndarray) -> np.ndarray:
-    means = np.nanmean(values, axis=1, keepdims=True)
-    stds = np.nanstd(values, axis=1, keepdims=True)
-    centered = values - means
-    valid = np.isfinite(stds) & (stds != 0)
-    return np.divide(centered, stds, out=centered.copy(), where=valid)
 
 
 def _window_feature_arrays(

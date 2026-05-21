@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,15 +8,15 @@ from ashare_cross_section_similarity.data import inclusive_end_timestamp
 from ashare_cross_section_similarity.features import (
     FEATURE_COLUMNS,
     max_drawdown,
-    normalized_close_path,
     window_features,
-    z_normalize,
 )
 from ashare_cross_section_similarity.history import (
     HistorySearchConfig,
     _filter_nearby_history_windows,
+    _history_candidate_frame,
     search_history,
 )
+from ashare_cross_section_similarity.similarity_algorithms import build_algorithm_target, distance_for_window
 from ashare_cross_section_similarity.similarity import _prepare_bars, _score_results
 from ashare_cross_section_similarity.universe import normalize_symbol
 
@@ -200,6 +198,32 @@ def test_search_history_rejects_invalid_ranking_parameters() -> None:
         )
 
 
+def test_history_baseline_candidate_frame_uses_recent_weighted_distance() -> None:
+    candidates = _prepare_bars(
+        _bars(
+            "000001.SZ",
+            [
+                1, 2.5, 3, 4, 5,
+                1, 2, 3, 4, 5.5,
+            ],
+        )
+    )
+    target = _bars("000001.SZ", [1, 2, 3, 4, 5])
+    target_metric = build_algorithm_target(target, "baseline_price_feature")
+    frame = _history_candidate_frame(
+        prepared=candidates,
+        symbol="000001.SZ",
+        starts=np.array([0, 5]),
+        window_size=5,
+        target_metric=target_metric,
+        target_features=window_features(target),
+        forward_windows=(),
+        algorithm="baseline_price_feature",
+    )
+
+    assert frame.loc[1, "路径距离"] > frame.loc[0, "路径距离"]
+
+
 def test_search_history_matches_legacy_window_loop() -> None:
     bars = _bars(
         "000001.SZ",
@@ -280,7 +304,7 @@ def _legacy_history_results(bars: pd.DataFrame, config: HistorySearchConfig) -> 
     as_of_index = int(available.index[-1])
     current_start = as_of_index - config.window_size + 1
     current_window = prepared.iloc[current_start : as_of_index + 1].reset_index(drop=True)
-    target_path = z_normalize(normalized_close_path(current_window))
+    target_metric = build_algorithm_target(current_window, config.algorithm)
     target_features = window_features(current_window)
     max_forward = max(config.forward_windows) if config.forward_windows else 0
     rows: list[dict[str, object]] = []
@@ -292,15 +316,18 @@ def _legacy_history_results(bars: pd.DataFrame, config: HistorySearchConfig) -> 
         if end + max_forward > as_of_index:
             continue
         candidate = prepared.iloc[start : end + 1].reset_index(drop=True)
-        candidate_path = z_normalize(normalized_close_path(candidate))
+        distance_parts = distance_for_window(candidate, target_metric)
         features = window_features(candidate)
         row: dict[str, object] = {
             "_candidate_index": len(rows),
+            "算法": config.algorithm,
             "symbol": symbol,
             "窗口开始": candidate["date"].min(),
             "窗口结束": candidate["date"].max(),
             "K线数量": int(len(candidate)),
-            "路径距离": float(np.linalg.norm(target_path - candidate_path) / math.sqrt(config.window_size)),
+            "路径距离": distance_parts["路径距离"],
+            "价格路径距离": distance_parts["价格路径距离"],
+            "收益路径距离": distance_parts["收益路径距离"],
         }
         for column in FEATURE_COLUMNS:
             row[column] = features[column]

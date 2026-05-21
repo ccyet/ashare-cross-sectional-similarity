@@ -7,6 +7,8 @@ from ashare_cross_section_similarity.history import HistorySearchConfig, search_
 from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 from ashare_cross_section_similarity.similarity_algorithms import (
     available_algorithm_names,
+    build_algorithm_target,
+    distance_for_window,
     get_algorithm_status,
 )
 
@@ -116,6 +118,41 @@ def test_hybrid_shape_v2_exposes_distance_components() -> None:
     assert row["价格路径距离"] == pytest.approx(0.0)
     assert row["收益路径距离"] == pytest.approx(0.0)
     assert row["路径距离"] == pytest.approx(0.0)
+
+
+def test_price_distance_emphasizes_recent_two_klines() -> None:
+    target = build_algorithm_target(_bars("000001.SZ", [1, 2, 3, 4, 5]), "baseline_price_feature")
+    early_mismatch = distance_for_window(_bars("000002.SZ", [1, 2.5, 3, 4, 5]), target)
+    recent_mismatch = distance_for_window(_bars("000003.SZ", [1, 2, 3, 4, 5.5]), target)
+
+    assert recent_mismatch["价格路径距离"] > early_mismatch["价格路径距离"]
+
+
+def test_return_distance_emphasizes_recent_two_klines() -> None:
+    target = build_algorithm_target(
+        _bars("000001.SZ", [100.0, 103.1156, 100.8102, 102.3621, 102.6995, 103.7769]),
+        "return_shape",
+    )
+    early_mismatch = distance_for_window(
+        _bars("000002.SZ", [100.0, 103.1156, 91.8332, 102.3621, 102.6995, 103.7769]),
+        target,
+    )
+    recent_mismatch = distance_for_window(
+        _bars("000003.SZ", [100.0, 103.1156, 100.8102, 102.3621, 102.6995, 101.6373]),
+        target,
+    )
+
+    assert recent_mismatch["收益路径距离"] > early_mismatch["收益路径距离"]
+
+
+def test_single_axis_algorithms_skip_unused_distance_components() -> None:
+    baseline_target = build_algorithm_target(_bars("000001.SZ", [1, 2, 3, 4, 5]), "baseline_price_feature")
+    baseline = distance_for_window(_bars("000002.SZ", [1, 2, 3, 4, 5]), baseline_target)
+    return_target = build_algorithm_target(_bars("000001.SZ", [1, 2, 3, 4, 5]), "return_shape")
+    return_shape = distance_for_window(_bars("000002.SZ", [1, 2, 3, 4, 5]), return_target)
+
+    assert pd.isna(baseline["收益路径距离"])
+    assert pd.isna(return_shape["价格路径距离"])
 
 
 def test_history_return_shape_ranks_matching_return_window_first() -> None:
