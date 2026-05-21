@@ -40,9 +40,9 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     algorithm_label,
     get_algorithm_status,
 )
+from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols
 from ashare_cross_section_similarity.universe import (
     DEFAULT_ANALYSIS_INDEX_SYMBOLS,
-    fetch_all_a_symbols,
     normalize_symbol,
     symbols_with_analysis_indexes,
     unique_symbols,
@@ -897,7 +897,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
     job_state = st.session_state.get("full_daily_tdx_job")
     keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
     with st.expander("TDX 全量日 K 线更新", expanded=keep_open):
-        st.caption("通过本机通达信更新全 A 股票和常用指数 1d 日线，写入当前本地行情根目录。股票列表用 AkShare 获取，价格数据用 TDX 抓取。")
+        st.caption("通过本机通达信更新全 A 股票和常用指数 1d 日线，写入当前本地行情根目录。股票列表和价格数据都通过 TDX 获取。")
         tdx_path = _render_directory_picker(
             "通达信 PYPlugins/user 目录",
             os.environ.get("TDX_TQCENTER_PATH", ""),
@@ -940,7 +940,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
         if st.button("通过 TDX 更新全量日 K", type="primary", key="full_daily_tdx_start_button"):
             try:
                 with st.spinner("获取股票列表并检查本地覆盖..."):
-                    stock_symbols = fetch_all_a_symbols()
+                    stock_symbols = fetch_tdx_stock_symbols(tqcenter_path=tdx_path)
                     all_symbols = _full_daily_download_universe(
                         stock_symbols,
                         include_indexes=bool(include_indexes),

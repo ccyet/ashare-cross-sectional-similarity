@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars
+from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars, fetch_tdx_stock_symbols
 
 
 class _FakeTq:
@@ -17,6 +17,20 @@ class _FakeTq:
 
     def get_market_data(self, **kwargs: object) -> dict[str, pd.DataFrame]:
         self.market_calls.append(kwargs)
+        return self.payload
+
+
+class _FakeTqStockList:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.initialize_calls: list[str] = []
+        self.stock_list_calls = 0
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+
+    def get_stock_list(self) -> object:
+        self.stock_list_calls += 1
         return self.payload
 
 
@@ -151,3 +165,27 @@ def test_fetch_tdx_bars_reports_missing_symbol_column() -> None:
             timeframe="1d",
             tq_client=fake,
         )
+
+
+def test_fetch_tdx_stock_symbols_reads_tdx_stock_list_and_filters_indexes() -> None:
+    fake = _FakeTqStockList(
+        pd.DataFrame(
+            {
+                "code": ["000001", "600519", "688603", "399006", "510300", "830799"],
+                "name": ["平安银行", "贵州茅台", "天承科技", "创业板指", "沪深300ETF", "艾融软件"],
+            }
+        )
+    )
+
+    symbols = fetch_tdx_stock_symbols(tq_client=fake)
+
+    assert fake.initialize_calls
+    assert fake.stock_list_calls == 1
+    assert symbols == ["000001.SZ", "600519.SH", "688603.SH", "830799.BJ"]
+
+
+def test_fetch_tdx_stock_symbols_reports_missing_stock_list_api() -> None:
+    fake = _FakeTq()
+
+    with pytest.raises(RuntimeError, match="TDX 未能获取股票清单"):
+        fetch_tdx_stock_symbols(tq_client=fake)

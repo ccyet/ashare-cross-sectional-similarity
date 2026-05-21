@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from ashare_cross_section_similarity.data import CANONICAL_COLUMNS
-from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
+from ashare_cross_section_similarity.universe import normalize_symbol, symbols_from_table, unique_symbols
 
 TDX_TQCENTER_ENV_VAR = "TDX_TQCENTER_PATH"
 TDX_REQUEST_BATCH_SIZE = 100
@@ -34,9 +34,23 @@ OUTPUT_RENAME = {
     "Volume": "volume",
     "Amount": "amount",
 }
+STOCK_LIST_METHODS = (
+    "get_stock_list",
+    "get_security_list",
+    "get_code_list",
+    "get_instrument_list",
+    "get_instrument_detail",
+)
+STOCK_LIST_MARKETS = ("SH", "SZ", "BJ", 1, 0, 2)
+A_SHARE_STOCK_PREFIXES = {
+    "SH": ("600", "601", "603", "605", "688", "689"),
+    "SZ": ("000", "001", "002", "003", "300", "301"),
+    "BJ": ("4", "8", "920"),
+}
 
 _TQ_CLIENT: Any | None = None
 _INITIALIZED = False
+_INITIALIZED_CLIENT_ID: int | None = None
 
 
 def fetch_tdx_bars(
@@ -87,6 +101,44 @@ def fetch_tdx_bars(
     if not frames:
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
     return pd.concat(frames, ignore_index=True).sort_values(["stock_code", "date"]).reset_index(drop=True)
+
+
+def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
+    tq = tq_client or _load_tq(tqcenter_path)
+    _ensure_initialized(tq)
+
+    errors: list[str] = []
+    for method_name in STOCK_LIST_METHODS:
+        method = getattr(tq, method_name, None)
+        if method is None:
+            errors.append(f"{method_name}: unavailable")
+            continue
+
+        method_symbols: list[str] = []
+        for label, args, kwargs in _stock_list_call_variants():
+            try:
+                payload = method(*args, **kwargs)
+            except TypeError as exc:
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+
+            symbols = _symbols_from_tdx_stock_payload(payload)
+            if symbols:
+                method_symbols.extend(symbols)
+                if label == "()":
+                    break
+
+        if method_symbols:
+            stock_symbols = _filter_a_share_stock_symbols(method_symbols)
+            if stock_symbols:
+                return stock_symbols
+            errors.append(f"{method_name}: 返回结果未包含 A 股股票代码")
+
+    details = " | ".join(errors)
+    raise RuntimeError(f"TDX 未能获取股票清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
 
 
 def _load_tq(tqcenter_path: str = "") -> Any:
@@ -161,6 +213,72 @@ def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:
     return paths
 
 
+def _stock_list_call_variants() -> list[tuple[str, tuple[object, ...], dict[str, object]]]:
+    variants: list[tuple[str, tuple[object, ...], dict[str, object]]] = [("()", (), {})]
+    for market in STOCK_LIST_MARKETS:
+        variants.append((f"({market!r})", (market,), {}))
+        variants.append((f"(market={market!r})", (), {"market": market}))
+    return variants
+
+
+def _symbols_from_tdx_stock_payload(payload: Any) -> list[str]:
+    if payload is None:
+        return []
+    if isinstance(payload, pd.DataFrame):
+        return _symbols_from_stock_table(payload)
+    if isinstance(payload, pd.Series):
+        return unique_symbols(payload.dropna().tolist())
+    if isinstance(payload, str):
+        return unique_symbols([payload])
+    if isinstance(payload, Mapping):
+        symbols = _symbols_from_mapping_values(payload)
+        if symbols:
+            return symbols
+        try:
+            return _symbols_from_stock_table(pd.DataFrame(payload))
+        except Exception:  # noqa: BLE001
+            return []
+    if isinstance(payload, (list, tuple, set)):
+        values = list(payload)
+        if not values:
+            return []
+        if all(isinstance(item, Mapping) for item in values):
+            return _symbols_from_stock_table(pd.DataFrame(values))
+        if all(isinstance(item, (str, int)) for item in values):
+            return unique_symbols(values)
+        symbols: list[str] = []
+        for item in values:
+            symbols.extend(_symbols_from_tdx_stock_payload(item))
+        return unique_symbols(symbols)
+    return []
+
+
+def _symbols_from_mapping_values(payload: Mapping[object, object]) -> list[str]:
+    symbols: list[str] = []
+    for value in payload.values():
+        if isinstance(value, (pd.DataFrame, pd.Series, Mapping, list, tuple, set, str)):
+            symbols.extend(_symbols_from_tdx_stock_payload(value))
+    return unique_symbols(symbols)
+
+
+def _symbols_from_stock_table(table: pd.DataFrame) -> list[str]:
+    try:
+        return symbols_from_table(table)
+    except ValueError:
+        return []
+
+
+def _filter_a_share_stock_symbols(symbols: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for symbol in unique_symbols(symbols):
+        if "." not in symbol:
+            continue
+        code, exchange = symbol.split(".", 1)
+        if code.startswith(A_SHARE_STOCK_PREFIXES.get(exchange, ())):
+            filtered.append(symbol)
+    return filtered
+
+
 def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:
     if batch_size < 1:
         raise ValueError("batch_size 至少需要 1。")
@@ -168,14 +286,16 @@ def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:
 
 
 def _ensure_initialized(tq: Any) -> None:
-    global _INITIALIZED
-    if _INITIALIZED:
+    global _INITIALIZED, _INITIALIZED_CLIENT_ID
+    client_id = id(tq)
+    if _INITIALIZED and _INITIALIZED_CLIENT_ID == client_id:
         return
     try:
         tq.initialize(__file__)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("TDX 初始化失败。请确认本机通达信终端已启动并登录。") from exc
     _INITIALIZED = True
+    _INITIALIZED_CLIENT_ID = client_id
 
 
 def _format_market_time(value: str) -> str:

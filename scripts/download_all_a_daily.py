@@ -17,6 +17,7 @@ from ashare_cross_section_similarity.downloader import (  # noqa: E402
     default_trend_repo,
     update_local_bars,
 )
+from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols  # noqa: E402
 from ashare_cross_section_similarity.universe import (  # noqa: E402
     fetch_all_a_symbols,
     symbols_with_analysis_indexes,
@@ -28,7 +29,7 @@ DEFAULT_START = "1990-01-01"
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    stock_symbols = fetch_all_a_symbols()
+    stock_symbols = _fetch_stock_symbols_for_engine(args.download_engine, args.provider)
     all_symbols = _download_universe(
         stock_symbols,
         include_indexes=bool(args.include_indexes),
@@ -135,6 +136,12 @@ def _download_universe(symbols: Iterable[object], *, include_indexes: bool, extr
         include_indexes=include_indexes,
         extra_symbols=_split_symbol_text(extra_symbols),
     )
+
+
+def _fetch_stock_symbols_for_engine(download_engine: str, provider: str) -> list[str]:
+    if download_engine == "tdx":
+        return fetch_tdx_stock_symbols(tqcenter_path=provider)
+    return fetch_all_a_symbols()
 
 
 def _split_symbol_text(value: str) -> list[str]:

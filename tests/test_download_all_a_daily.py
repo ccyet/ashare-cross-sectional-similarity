@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
-from scripts.download_all_a_daily import _batched, _download_universe, fetch_all_a_symbols, merge_download_check
+from scripts.download_all_a_daily import (
+    _batched,
+    _download_universe,
+    _fetch_stock_symbols_for_engine,
+    fetch_all_a_symbols,
+    merge_download_check,
+)
 
 
 def test_fetch_all_a_symbols_normalizes_akshare_code_column() -> None:
@@ -24,6 +31,25 @@ def test_download_universe_adds_analysis_indexes_and_extra_symbols() -> None:
     assert "399006.SZ" in symbols
     assert "000300.SH" in symbols
     assert "000852.SH" in symbols
+
+
+def test_fetch_stock_symbols_for_tdx_engine_uses_tdx(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_akshare() -> list[str]:
+        raise AssertionError("tdx 模式不应调用 AkShare 股票列表")
+
+    calls: list[str] = []
+
+    def fake_tdx(*, tqcenter_path: str = "") -> list[str]:
+        calls.append(tqcenter_path)
+        return ["000001.SZ", "600519.SH"]
+
+    monkeypatch.setattr("scripts.download_all_a_daily.fetch_all_a_symbols", fail_akshare)
+    monkeypatch.setattr("scripts.download_all_a_daily.fetch_tdx_stock_symbols", fake_tdx)
+
+    symbols = _fetch_stock_symbols_for_engine("tdx", "/tdx/PYPlugins/user")
+
+    assert calls == ["/tdx/PYPlugins/user"]
+    assert symbols == ["000001.SZ", "600519.SH"]
 
 
 def test_merge_download_check_marks_missing_after_successful_delegate() -> None:
