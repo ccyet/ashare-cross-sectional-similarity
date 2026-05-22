@@ -6,6 +6,7 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.history import HistorySearchResult
+from ashare_cross_section_similarity.review import ReviewConfig, analyze_price_review
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
     _cross_section_bucket_summary,
@@ -49,6 +50,9 @@ from streamlit_app import (
     _pick_directory_with_system_dialog,
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
+    _review_kline_chart,
+    _review_quick_window_feedback,
+    _review_relative_chart,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
@@ -252,6 +256,16 @@ def test_history_quick_window_feedback_uses_latest_local_bar() -> None:
     bars = _bars("000001.SZ", [10, 11, 12])
 
     start, end, message = _history_quick_window_feedback(bars, "000001.SZ", 3)
+
+    assert start == pd.Timestamp("2024-01-01").date()
+    assert end == pd.Timestamp("2024-01-03").date()
+    assert "000001.SZ 已选择近 3 根K线" in message
+
+
+def test_review_quick_window_feedback_uses_latest_local_bar() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12])
+
+    start, end, message = _review_quick_window_feedback(bars, "000001.SZ", 3)
 
     assert start == pd.Timestamp("2024-01-01").date()
     assert end == pd.Timestamp("2024-01-03").date()
@@ -635,6 +649,37 @@ def test_lightweight_kline_chart_empty_series_has_visible_message() -> None:
 
     assert "没有可绘制的K线数据" in html
     assert "Powered by" not in html
+
+
+def test_review_kline_chart_marks_main_segments() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12, 13, 12, 11, 10, 11, 12, 13])
+    result = analyze_price_review(
+        bars,
+        ReviewConfig(
+            symbol="000001.SZ",
+            start="2024-01-01",
+            end="2024-01-10",
+            min_swing_return=0.10,
+            min_segment_bars=2,
+        ),
+    )
+
+    fig = _review_kline_chart(result)
+
+    assert fig.layout.title.text == "目标K线与主要波段"
+    assert len(fig.layout.shapes) >= 3
+    assert fig.data[0].type == "candlestick"
+
+
+def test_review_relative_chart_normalizes_target_and_comparison() -> None:
+    target = _bars("000001.SZ", [10, 11, 12])
+    comparison = _bars("000300.SH", [20, 20, 22])
+
+    fig = _review_relative_chart(target, [("沪深300", comparison)])
+
+    assert fig.layout.title.text == "目标 / 指数 / 板块归一化走势"
+    assert list(fig.data[0].y) == [100.0, 110.00000000000001, 120.0]
+    assert list(fig.data[1].y) == [100.0, 100.0, 110.00000000000001]
 
 
 def test_kline_chart_component_height_scales_with_panel_count() -> None:

@@ -34,6 +34,14 @@ from ashare_cross_section_similarity.downloader import (
 )
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
+from ashare_cross_section_similarity.review import (
+    ReviewConfig,
+    ReviewResult,
+    analyze_price_review,
+    build_comparison_stats,
+    build_equal_weight_series,
+    render_review_text,
+)
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
@@ -48,6 +56,8 @@ from ashare_cross_section_similarity.similarity_algorithms import (
 from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols
 from ashare_cross_section_similarity.universe import (
     DEFAULT_ANALYSIS_INDEX_SYMBOLS,
+    fetch_concept_constituents,
+    fetch_industry_constituents,
     normalize_symbol,
     symbols_with_analysis_indexes,
     unique_symbols,
@@ -123,7 +133,7 @@ def main() -> None:
     _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
     _render_algorithm_benchmark_entry(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
-    history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
+    history_tab, cross_section_tab, review_tab = st.tabs(["历史时序相似", "横截面相似", "走势复盘"])
     with history_tab:
         _render_history_tab(
             trend_repo=trend_repo,
@@ -142,6 +152,8 @@ def main() -> None:
             provider=provider,
             download_engine=download_engine,
         )
+    with review_tab:
+        _render_review_tab(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
 
 def _render_directory_picker(label: str, default_path: str | Path, key: str) -> str:
@@ -898,6 +910,173 @@ def _render_cross_section_tab(
     )
 
 
+def _render_review_tab(*, data_root: str, timeframe: str, adjust: str) -> None:
+    st.subheader("走势复盘")
+    st.caption("基于本地K线识别主要上涨、回撤、下跌和反弹段，生成可复验的数据化自然语言复盘。")
+    col1, col2, col3 = st.columns(3)
+    target_symbol = col1.text_input("目标代码", value="601888.SH", key="review_symbol")
+    start_input = _date_input_args("review_start_date", date(2025, 12, 19))
+    end_input = _date_input_args("review_end_date", date(2026, 5, 18))
+    start_date = col2.date_input("区间开始", **start_input)
+    end_date = col3.date_input("区间结束", **end_input)
+
+    quick_cols = st.columns(4)
+    quick_cols[0].caption("快捷区间")
+    for button_col, window_size in zip(quick_cols[1:], [20, 60, 120]):
+        button_col.button(
+            f"近{window_size}根",
+            key=f"review_quick_{window_size}",
+            on_click=_set_review_quick_window,
+            args=(data_root, timeframe, adjust, target_symbol, window_size),
+        )
+    if st.session_state.get("review_quick_message"):
+        st.info(st.session_state["review_quick_message"])
+
+    start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+    end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    if error := _date_range_error(start, end):
+        st.error(error)
+        return
+
+    param_col1, param_col2 = st.columns(2)
+    min_swing_percent = param_col1.slider(
+        "最小波段幅度",
+        min_value=1,
+        max_value=30,
+        value=5,
+        step=1,
+        format="%d%%",
+        key="review_min_swing_return",
+        help="低于该涨跌幅的波动会被视为噪声，不进入主要波段。",
+    )
+    min_segment_bars = param_col2.number_input(
+        "最小段落K线数",
+        min_value=2,
+        max_value=60,
+        value=3,
+        step=1,
+        key="review_min_segment_bars",
+    )
+
+    index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
+    index_symbols: list[str] = []
+    if index_enabled:
+        index_col1, index_col2 = st.columns([2, 1])
+        selected_indexes = index_col1.multiselect(
+            "指数代码",
+            list(DEFAULT_ANALYSIS_INDEX_SYMBOLS),
+            default=["000300.SH", "000852.SH", "399006.SZ"],
+            key="review_index_symbols",
+        )
+        extra_indexes = index_col2.text_input("额外指数代码", value="", key="review_extra_indexes")
+        index_symbols = unique_symbols([*selected_indexes, *_split_symbol_text(extra_indexes)])
+
+    sector_enabled = st.checkbox("结合板块分析", value=False, key="review_with_sector")
+    proxy_symbols: list[str] = []
+    industry_name = ""
+    concept_name = ""
+    sector_min_coverage = 0.5
+    if sector_enabled:
+        sector_col1, sector_col2, sector_col3, sector_col4 = st.columns([1.4, 1, 1, 1])
+        proxy_symbols = unique_symbols(_split_symbol_text(sector_col1.text_input("板块/ETF/指数代理代码", value="", key="review_proxy_symbols")))
+        industry_name = sector_col2.text_input("行业名称", value="", key="review_industry_name")
+        concept_name = sector_col3.text_input("概念名称", value="", key="review_concept_name")
+        sector_min_coverage = sector_col4.slider(
+            "成分覆盖率",
+            min_value=0.3,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            key="review_sector_min_coverage",
+        )
+
+    if not st.button("生成走势复盘", type="primary", key="review_run"):
+        st.info("设置目标、区间和对比项后，点击生成走势复盘。复盘只使用本地行情数据。")
+        return
+
+    normalized_target = normalize_symbol(target_symbol)
+    direct_symbols = unique_symbols([normalized_target, *index_symbols, *proxy_symbols])
+    direct_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(direct_symbols))
+    try:
+        direct_bars = _cached_load_local_bars(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            symbols=tuple(direct_symbols),
+            start=start,
+            end=end,
+            data_fingerprint=direct_fingerprint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"本地行情读取失败：{exc}")
+        return
+
+    target_window = direct_bars.loc[direct_bars["stock_code"] == normalized_target]
+    result = analyze_price_review(
+        target_window,
+        ReviewConfig(
+            symbol=normalized_target,
+            start=start,
+            end=end,
+            min_swing_return=float(min_swing_percent) / 100.0,
+            min_segment_bars=int(min_segment_bars),
+        ),
+    )
+
+    if result.window.empty:
+        st.markdown("**1. 区间概览**")
+        empty_comparison = pd.DataFrame()
+        for column, (label, value) in zip(st.columns(6), _review_metric_items(result, empty_comparison, index_symbols)):
+            column.metric(label, value)
+        st.warning("目标标的在所选区间没有本地行情。请检查代码、周期、复权目录或先下载数据。")
+        if hint := _symbol_data_hint(target_symbol, data_root=data_root, timeframe=timeframe, adjust=adjust):
+            st.warning(hint)
+        return
+
+    stock_names = _cached_stock_name_map(tuple(direct_symbols))
+    comparison_frames, comparison_rows, warnings = _review_comparison_data(
+        result.window,
+        direct_bars,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        index_symbols=index_symbols,
+        proxy_symbols=proxy_symbols,
+        industry_name=industry_name,
+        concept_name=concept_name,
+        sector_min_coverage=float(sector_min_coverage),
+        stock_names=stock_names,
+    )
+    comparison_frame = pd.DataFrame(comparison_rows)
+    all_warnings = [*result.warnings, *warnings]
+
+    st.markdown("**1. 区间概览**")
+    metric_values = _review_metric_items(result, comparison_frame, index_symbols)
+    for column, (label, value) in zip(st.columns(len(metric_values)), metric_values):
+        column.metric(label, value)
+
+    st.markdown("**2. 复盘图表**")
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        st.plotly_chart(_review_kline_chart(result), use_container_width=True)
+    with chart_col2:
+        st.plotly_chart(_review_relative_chart(result.window, comparison_frames), use_container_width=True)
+
+    st.markdown("**3. 自然语言复盘**")
+    st.markdown(render_review_text(result, comparison_frame))
+    for warning in all_warnings:
+        st.warning(warning)
+
+    st.markdown("**4. 波段与对比明细**")
+    detail_col1, detail_col2 = st.columns(2)
+    with detail_col1:
+        st.caption("主要波段")
+        st.dataframe(_centered(_format_review_segments(result.main_segments)), use_container_width=True, hide_index=True)
+    with detail_col2:
+        st.caption("指数 / 板块对比")
+        st.dataframe(_centered(_format_review_comparisons(comparison_frame)), use_container_width=True, hide_index=True)
+
+
 def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: str) -> None:
     job_state = st.session_state.get("full_daily_tdx_job")
     keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
@@ -1226,6 +1405,18 @@ def _cached_stock_name_map(symbols: tuple[str, ...]) -> dict[str, str]:
     return _stock_name_map_from_table(table, normalized)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_review_constituents(kind: str, name: str) -> list[str]:
+    text = str(name or "").strip()
+    if not text:
+        return []
+    if kind == "industry":
+        return fetch_industry_constituents(text)
+    if kind == "concept":
+        return fetch_concept_constituents(text)
+    raise ValueError(f"未知板块类型：{kind}")
+
+
 def _load_target_bars_for_quick_window(
     *,
     data_root: str,
@@ -1241,6 +1432,25 @@ def _load_target_bars_for_quick_window(
         start="1900-01-01",
         end=pd.Timestamp.today().strftime("%Y-%m-%d"),
     )
+
+
+def _set_review_quick_window(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    symbol: str,
+    window_size: int,
+) -> None:
+    bars = _load_target_bars_for_quick_window(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        target_symbol=symbol,
+    )
+    start, end, message = _review_quick_window_feedback(bars, symbol, window_size)
+    st.session_state["review_start_date"] = start
+    st.session_state["review_end_date"] = end
+    st.session_state["review_quick_message"] = message
 
 
 def _set_history_quick_window(
@@ -1306,6 +1516,29 @@ def _history_quick_window_feedback(
     if len(selected) < window_size:
         return start, end, f"{normalized} 本地仅有 {len(selected)} 根K线，不足近 {window_size} 根；已使用全部可用区间。"
     return start, end, f"{normalized} 已选择近 {window_size} 根K线：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}。"
+
+
+def _review_quick_window_feedback(
+    bars: pd.DataFrame,
+    symbol: str,
+    window_size: int,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, date, str]:
+    start, end, selected_count, total_count, is_sparse = _cross_section_quick_window_selection(bars, window_size, today)
+    normalized = normalize_symbol(symbol)
+    window_text = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
+    if total_count == 0:
+        return start, end, f"{normalized} 未找到本地行情，已按自然日近 {window_size} 天设置复盘区间：{window_text}。"
+    if is_sparse:
+        return (
+            start,
+            end,
+            f"{normalized} 本地数据疑似不连续，近期仅有 {selected_count} 根K线，"
+            f"不足近 {window_size} 根；已使用近期可用复盘区间：{window_text}。",
+        )
+    if selected_count < window_size:
+        return start, end, f"{normalized} 本地仅有 {selected_count} 根K线，不足近 {window_size} 根；已使用全部可用区间：{window_text}。"
+    return start, end, f"{normalized} 已选择近 {window_size} 根K线：{window_text}。"
 
 
 def _set_cross_quick_window(
@@ -1736,6 +1969,80 @@ def _split_symbol_text(value: str) -> list[str]:
     return [item.strip() for item in text.split(",") if item.strip()]
 
 
+def _review_comparison_data(
+    target_window: pd.DataFrame,
+    direct_bars: pd.DataFrame,
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    index_symbols: list[str],
+    proxy_symbols: list[str],
+    industry_name: str,
+    concept_name: str,
+    sector_min_coverage: float,
+    stock_names: dict[str, str],
+) -> tuple[list[tuple[str, pd.DataFrame]], list[dict[str, object]], list[str]]:
+    comparison_frames: list[tuple[str, pd.DataFrame]] = []
+    comparison_rows: list[dict[str, object]] = []
+    warnings: list[str] = []
+
+    def append_direct(symbol: str, label: str) -> None:
+        normalized = normalize_symbol(symbol)
+        frame = direct_bars.loc[direct_bars["stock_code"] == normalized].sort_values("date")
+        if frame.empty:
+            warnings.append(f"{label} 缺少本地行情，未纳入对比。")
+            return
+        comparison_frames.append((label, frame))
+        comparison_rows.append(build_comparison_stats(target_window, frame, label))
+
+    for symbol in index_symbols:
+        append_direct(symbol, _stock_chart_label(symbol, stock_names))
+    for symbol in proxy_symbols:
+        append_direct(symbol, _stock_chart_label(symbol, stock_names))
+
+    sector_specs = [
+        ("industry", "行业板块", industry_name),
+        ("concept", "概念板块", concept_name),
+    ]
+    for kind, label_prefix, raw_name in sector_specs:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        try:
+            constituents = _cached_review_constituents(kind, name)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{label_prefix} {name} 成分获取失败：{exc}")
+            continue
+        if not constituents:
+            warnings.append(f"{label_prefix} {name} 没有获取到成分。")
+            continue
+        sector_label = f"{label_prefix}:{name}"
+        sector_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(constituents))
+        sector_bars = _cached_load_local_bars(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            symbols=tuple(constituents),
+            start=str(target_window["date"].min()) if not target_window.empty else "1900-01-01",
+            end=str(target_window["date"].max()) if not target_window.empty else pd.Timestamp.today().strftime("%Y-%m-%d"),
+            data_fingerprint=sector_fingerprint,
+        )
+        equal_weight = build_equal_weight_series(
+            sector_bars,
+            constituents,
+            label=sector_label,
+            min_coverage=sector_min_coverage,
+        )
+        if equal_weight.warning:
+            warnings.append(equal_weight.warning)
+        if equal_weight.frame.empty:
+            continue
+        comparison_frames.append((sector_label, equal_weight.frame))
+        comparison_rows.append(build_comparison_stats(target_window, equal_weight.frame, sector_label))
+    return comparison_frames, comparison_rows, warnings
+
+
 def _repair_partial_download_start(
     check_row: pd.Series,
     *,
@@ -1895,6 +2202,75 @@ def _format_results(frame: pd.DataFrame, stock_names: dict[str, str] | None = No
         insert_at = result.columns.get_loc("symbol") + 1
         result.insert(insert_at, "股票", result["symbol"].map(lambda symbol: names.get(normalize_symbol(symbol), "")))
         result = result.rename(columns={"symbol": "代码"})
+    return result
+
+
+def _review_metric_items(
+    result: ReviewResult,
+    comparison_frame: pd.DataFrame,
+    index_symbols: list[str],
+) -> list[tuple[str, str]]:
+    overview = result.overview
+    index_excess = _review_index_excess_text(comparison_frame, index_symbols)
+    return [
+        ("区间收益", _percent_text(overview.get("return"))),
+        ("最大回撤", _percent_text(overview.get("max_drawdown"))),
+        ("最大浮盈", _percent_text(overview.get("max_favorable"))),
+        ("波动率", _percent_text(overview.get("volatility"))),
+        ("上涨K线占比", _percent_text(overview.get("up_day_share"))),
+        ("相对指数超额", index_excess),
+    ]
+
+
+def _review_index_excess_text(comparison_frame: pd.DataFrame, index_symbols: list[str]) -> str:
+    if comparison_frame.empty or "标的" not in comparison_frame.columns:
+        return "-"
+    labels = {normalize_symbol(symbol) for symbol in index_symbols}
+    values: list[float] = []
+    for _, row in comparison_frame.iterrows():
+        label = str(row.get("标的", ""))
+        if not any(symbol in label for symbol in labels):
+            continue
+        value = pd.to_numeric(pd.Series([row.get("超额收益")]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            values.append(float(value))
+    return _percent_text(pd.Series(values).mean()) if values else "-"
+
+
+def _format_review_segments(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["方向", "开始日期", "结束日期", "K线数", "区间收益", "最大回撤", "振幅"])
+    result = frame.copy()
+    for column in ["开始日期", "结束日期"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = _format_percent_columns(
+        result,
+        ["区间收益", "最大回撤", "最大浮盈", "振幅", "成交额变化", "成交量变化", "相对贡献"],
+    )
+    result = _format_decimal_columns(result, ["起点收盘", "终点收盘"])
+    columns = [
+        "方向",
+        "开始日期",
+        "结束日期",
+        "K线数",
+        "区间收益",
+        "最大回撤",
+        "最大浮盈",
+        "振幅",
+        "成交额变化",
+        "成交量变化",
+        "相对贡献",
+    ]
+    return result[[column for column in columns if column in result.columns]]
+
+
+def _format_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["标的", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "强弱结论"])
+    result = frame.copy()
+    result = _format_percent_columns(result, ["目标收益", "对比收益", "超额收益"])
+    result = _format_decimal_columns(result, ["相关性"])
     return result
 
 
@@ -2335,6 +2711,94 @@ def _centered(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
     return frame.style.set_properties(**{"text-align": "center"}).set_table_styles(
         [{"selector": "th", "props": [("text-align", "center")]}]
     )
+
+
+def _review_kline_chart(result: ReviewResult) -> go.Figure:
+    fig = go.Figure()
+    window = result.window.sort_values("date")
+    if window.empty:
+        fig.update_layout(title="目标K线与主要波段")
+        return fig
+    fig.add_trace(
+        go.Candlestick(
+            x=window["date"],
+            open=window["open"],
+            high=window["high"],
+            low=window["low"],
+            close=window["close"],
+            name=result.symbol,
+            increasing_line_color="#16a34a",
+            decreasing_line_color="#dc2626",
+        )
+    )
+    for _, segment in result.main_segments.iterrows():
+        direction = str(segment.get("方向", ""))
+        color = "#16a34a" if direction in {"上涨", "反弹"} else "#dc2626"
+        fig.add_vrect(
+            x0=pd.Timestamp(segment["开始日期"]),
+            x1=pd.Timestamp(segment["结束日期"]),
+            fillcolor=color,
+            opacity=0.11,
+            line_width=0,
+            annotation_text=direction,
+            annotation_position="top left",
+        )
+    fig.update_layout(
+        title="目标K线与主要波段",
+        xaxis_title="日期",
+        yaxis_title="价格",
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _review_relative_chart(target_window: pd.DataFrame, comparisons: list[tuple[str, pd.DataFrame]]) -> go.Figure:
+    fig = go.Figure()
+    if target_window.empty:
+        fig.update_layout(title="目标 / 指数 / 板块归一化走势")
+        return fig
+    target_series = _normalized_chart_frame(target_window)
+    fig.add_scatter(
+        x=target_series["date"],
+        y=target_series["close"],
+        mode="lines",
+        name="目标",
+        line={"width": 4, "color": "#2563eb"},
+    )
+    palette = ["#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#64748b"]
+    for index, (label, frame) in enumerate(comparisons):
+        series = _normalized_chart_frame(frame)
+        if series.empty:
+            continue
+        fig.add_scatter(
+            x=series["date"],
+            y=series["close"],
+            mode="lines",
+            name=label,
+            line={"width": 2, "color": palette[index % len(palette)]},
+            opacity=0.78,
+        )
+    fig.update_layout(
+        title="目标 / 指数 / 板块归一化走势",
+        xaxis_title="日期",
+        yaxis_title="起点=100",
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _normalized_chart_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "close"])
+    result = frame.copy()
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    result["close"] = pd.to_numeric(result["close"], errors="coerce")
+    result = result.dropna(subset=["date", "close"]).sort_values("date")
+    if result.empty or result["close"].iloc[0] == 0:
+        return pd.DataFrame(columns=["date", "close"])
+    result["close"] = result["close"] / result["close"].iloc[0] * 100.0
+    return result[["date", "close"]]
 
 
 def _cross_section_price_chart(
