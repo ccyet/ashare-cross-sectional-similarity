@@ -2549,13 +2549,19 @@ def _full_daily_available_count(checked: pd.DataFrame, *, incremental_latest_onl
 def _render_tdx_download_symbol_selector(symbol_table: pd.DataFrame) -> list[str]:
     selected: list[str] = []
     normalized = _normalize_tdx_symbol_table(symbol_table)
+    category_items: list[tuple[str, str, pd.DataFrame, list[str]]] = []
     for category in TDX_DOWNLOAD_CATEGORY_ORDER:
         category_frame = normalized.loc[normalized["category"] == category]
         if category_frame.empty:
             continue
         label = TDX_DOWNLOAD_CATEGORY_LABELS.get(category, category)
         symbols = category_frame["symbol"].tolist()
-        with st.expander(f"{label}列表（{len(symbols):,}）", expanded=False):
+        category_items.append((category, label, category_frame, symbols))
+    if not category_items:
+        return []
+    tabs = st.tabs([f"{label}（{len(symbols):,}）" for _category, label, _frame, symbols in category_items])
+    for tab, (category, label, category_frame, symbols) in zip(tabs, category_items, strict=False):
+        with tab:
             include_all = st.checkbox(f"下载全部{label}", value=True, key=f"full_daily_tdx_include_{category}")
             st.dataframe(
                 _format_tdx_download_symbol_table(category_frame),

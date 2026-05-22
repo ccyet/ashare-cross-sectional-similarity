@@ -50,6 +50,7 @@ from streamlit_app import (
     _pick_directory_with_system_dialog,
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
+    _render_tdx_download_symbol_selector,
     _review_kline_chart,
     _review_multi_comparison_rows,
     _review_quick_window_feedback,
@@ -1486,6 +1487,54 @@ def test_tdx_download_selection_counts_separates_categories() -> None:
     )
 
     assert counts == {"stock": 1, "etf": 0, "index": 1, "other": 0}
+
+
+class _NoNestedExpanderStreamlit:
+    def __init__(self) -> None:
+        self.tab_labels: list[str] = []
+
+    def expander(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("TDX 分类选择器不能使用 st.expander，避免嵌套在外层 TDX 更新 expander 内")
+
+    def tabs(self, labels: list[str]) -> list["_NoNestedExpanderStreamlit"]:
+        self.tab_labels = labels
+        return [self for _ in labels]
+
+    def __enter__(self) -> "_NoNestedExpanderStreamlit":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def checkbox(self, *_args: object, **_kwargs: object) -> bool:
+        return True
+
+    def dataframe(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def caption(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def multiselect(self, *_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+
+def test_tdx_download_symbol_selector_uses_tabs_not_nested_expanders(monkeypatch) -> None:
+    fake_st = _NoNestedExpanderStreamlit()
+    monkeypatch.setattr("streamlit_app.st", fake_st)
+
+    selected = _render_tdx_download_symbol_selector(
+        pd.DataFrame(
+            [
+                {"symbol": "000001.SZ", "name": "平安银行", "category": "stock"},
+                {"symbol": "510300.SH", "name": "沪深300ETF", "category": "etf"},
+                {"symbol": "399006.SZ", "name": "创业板指", "category": "index"},
+            ]
+        )
+    )
+
+    assert selected == ["000001.SZ", "510300.SH", "399006.SZ"]
+    assert fake_st.tab_labels == ["个股（1）", "ETF（1）", "指数 / 行业概念（1）"]
 
 
 def test_symbol_data_hint_points_to_existing_alternate_suffix(tmp_path: Path) -> None:
