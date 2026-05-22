@@ -10,6 +10,7 @@ from ashare_cross_section_similarity.tdx_source import (
     fetch_tdx_kline_symbols,
     fetch_tdx_stock_symbols,
 )
+from ashare_cross_section_similarity import tdx_source
 
 
 class _FakeTq:
@@ -58,6 +59,11 @@ class _FakeTqMarketLists:
         if market == "BJ":
             return pd.DataFrame({"code": ["830799"], "market": ["BJ"]})
         return pd.DataFrame({"code": ["000001"], "market": ["SZ"]})
+
+
+class _FakeTqInitializeFail:
+    def initialize(self, caller_path: str) -> None:
+        raise RuntimeError("terminal not ready")
 
 
 def test_fetch_tdx_bars_normalizes_official_tqcenter_payload() -> None:
@@ -301,3 +307,15 @@ def test_fetch_tdx_stock_symbols_reports_missing_stock_list_api() -> None:
 
     with pytest.raises(RuntimeError, match="TDX 未能获取股票清单"):
         fetch_tdx_stock_symbols(tq_client=fake)
+
+
+def test_tdx_initialize_error_preserves_root_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tdx_source, "_INITIALIZED", False)
+    monkeypatch.setattr(tdx_source, "_INITIALIZED_CLIENT_ID", None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tdx_source._ensure_initialized(_FakeTqInitializeFail())
+
+    message = str(exc_info.value)
+    assert "TDX 初始化失败" in message
+    assert "根因: RuntimeError: terminal not ready" in message

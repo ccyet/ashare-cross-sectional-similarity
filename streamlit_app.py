@@ -426,6 +426,14 @@ def _path_text(value: str | Path) -> str:
     return str(Path(str(value)).expanduser()) if str(value).strip() else ""
 
 
+def _tdx_directory_default(*candidates: object) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return _path_text(text)
+    return ""
+
+
 def _algorithm_option_label(name: str) -> str:
     status = get_algorithm_status(name)
     suffix = "" if status.available else "（未安装依赖）"
@@ -1410,11 +1418,16 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             "通过本机通达信更新股票、ETF、行业板块指数、概念指数和常用指数 1d 日线，"
             "写入当前本地行情根目录。标的列表和价格数据都通过 TDX 获取。"
         )
+        tdx_default_path = _tdx_directory_default(
+            st.session_state.get("tdx_tqcenter_path", ""),
+            os.environ.get("TDX_TQCENTER_PATH", ""),
+        )
         tdx_path = _render_directory_picker(
             "通达信 PYPlugins/user 目录",
-            os.environ.get("TDX_TQCENTER_PATH", ""),
+            tdx_default_path,
             "full_daily_tdx_tqcenter",
         )
+        st.session_state["tdx_tqcenter_path"] = tdx_path
         col1, col2, col3 = st.columns(3)
         start_date = col1.date_input(
             "起始日期",
@@ -1509,7 +1522,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                     st.session_state.pop("full_daily_tdx_job", None)
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
-                st.error(f"TDX 全量日 K 更新任务创建失败：{exc}")
+                st.error(f"TDX 全量日 K 更新准备失败：{exc}")
 
         summary = st.session_state.get("full_daily_tdx_summary")
         if isinstance(summary, dict):

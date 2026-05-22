@@ -61,6 +61,7 @@ from streamlit_app import (
     _stock_name_map_from_table,
     _symbol_data_hint,
     _symbols_requiring_download,
+    _tdx_directory_default,
 )
 
 
@@ -158,6 +159,11 @@ def test_pick_directory_with_system_dialog_returns_selected_folder(tmp_path: Pat
         "initialdir": str(folder),
         "mustexist": True,
     }
+
+
+def test_tdx_directory_default_reuses_sidebar_selection() -> None:
+    assert _tdx_directory_default("", "/Applications/Tdx/PYPlugins/user") == "/Applications/Tdx/PYPlugins/user"
+    assert _tdx_directory_default("/selected/tdx", "/env/tdx") == "/selected/tdx"
 
 
 def test_pick_directory_with_system_dialog_reports_open_error() -> None:

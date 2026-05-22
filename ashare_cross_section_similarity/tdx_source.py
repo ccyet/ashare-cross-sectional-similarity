@@ -659,7 +659,10 @@ def _ensure_initialized(tq: Any) -> None:
     try:
         tq.initialize(__file__)
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("TDX 初始化失败。请确认本机通达信终端已启动并登录。") from exc
+        raise RuntimeError(
+            "TDX 初始化失败。请确认本机通达信终端已启动并登录；"
+            f"目录只负责导入 tqcenter，终端仍需处于可连接状态。根因: {exc.__class__.__name__}: {exc}"
+        ) from exc
     _INITIALIZED = True
     _INITIALIZED_CLIENT_ID = client_id
 
