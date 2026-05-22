@@ -51,6 +51,7 @@ from streamlit_app import (
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
     _render_tdx_download_symbol_selector,
+    _review_etf_index_with_fallback,
     _review_kline_chart,
     _review_multi_comparison_rows,
     _review_quick_window_feedback,
@@ -823,6 +824,27 @@ def test_akshare_etf_index_from_table_resolves_review_target_etf() -> None:
     )
 
     assert names == {"512480.SH": "半导体ETF"}
+
+
+def test_review_etf_index_fallback_keeps_512480_name_when_akshare_fails() -> None:
+    def failing_loader(_refresh_token: int) -> pd.DataFrame:
+        raise RuntimeError("HTTPSConnectionPool(host='88.push2.eastmoney.com', port=443): Max retries exceeded")
+
+    index, message = _review_etf_index_with_fallback(0, loader=failing_loader)
+    names = _etf_name_map_from_index(index, ("512480.SH",))
+
+    assert names == {"512480.SH": "半导体ETF"}
+    assert "内置常用 ETF 名称表" in message
+
+
+def test_review_etf_index_fallback_shortens_network_error_message() -> None:
+    long_error = "HTTPSConnectionPool(host='88.push2.eastmoney.com', port=443): " + "x" * 500
+
+    index, message = _review_etf_index_with_fallback(0, loader=lambda _token: (_ for _ in ()).throw(RuntimeError(long_error)))
+
+    assert not index.empty
+    assert len(message) < 220
+    assert "88.push2.eastmoney.com" in message
 
 
 def test_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:

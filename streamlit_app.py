@@ -117,6 +117,20 @@ ETF_ISSUER_SUFFIXES = (
     "西藏东财",
     "鹏扬",
 )
+FALLBACK_REVIEW_ETFS = (
+    ("510300.SH", "沪深300ETF", 10_000_000.0, "沪深300"),
+    ("510500.SH", "中证500ETF", 9_500_000.0, "中证500"),
+    ("512100.SH", "中证1000ETF", 9_000_000.0, "中证1000"),
+    ("159915.SZ", "创业板ETF", 8_500_000.0, "创业板"),
+    ("588000.SH", "科创50ETF", 8_000_000.0, "科创50"),
+    ("159995.SZ", "芯片ETF", 7_500_000.0, "半导体"),
+    ("512480.SH", "半导体ETF", 7_000_000.0, "半导体"),
+    ("512010.SH", "医药ETF", 6_500_000.0, "医药"),
+    ("515030.SH", "新能源车ETF", 6_000_000.0, "新能源车"),
+    ("512660.SH", "军工ETF", 5_500_000.0, "军工"),
+    ("159928.SZ", "消费ETF", 5_000_000.0, "消费"),
+    ("512690.SH", "酒ETF", 4_500_000.0, "消费"),
+)
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
@@ -1081,33 +1095,31 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             step=0.05,
             key="review_sector_min_coverage",
         )
-        try:
-            etf_index = _cached_akshare_etf_index(etf_reload_token)
-        except Exception as exc:  # noqa: BLE001
-            st.warning(f"AkShare ETF 名单读取失败：{exc}")
-        else:
-            popular_etfs = _top_etf_options(etf_index, limit=10)
-            if not popular_etfs.empty:
-                selected_popular_etfs = st.multiselect(
-                    "主要ETF",
-                    popular_etfs["symbol"].tolist(),
-                    default=[],
-                    key="review_popular_etfs",
-                    format_func=_etf_option_formatter(popular_etfs),
-                    help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
-                )
-            auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_etf_proxies_from_index(
-                etf_index,
-                industry_name=industry_name,
-                concept_name=concept_name,
+        etf_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+        if etf_message:
+            st.info(etf_message)
+        popular_etfs = _top_etf_options(etf_index, limit=10)
+        if not popular_etfs.empty:
+            selected_popular_etfs = st.multiselect(
+                "主要ETF",
+                popular_etfs["symbol"].tolist(),
+                default=[],
+                key="review_popular_etfs",
+                format_func=_etf_option_formatter(popular_etfs),
+                help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
             )
-            if auto_warning:
-                st.warning(auto_warning)
-            elif not auto_matches.empty:
-                st.caption("AkShare 自动匹配 ETF（同一关键词保留成交额最大）")
-                st.dataframe(_centered(_format_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
-            else:
-                st.caption("ETF 自动匹配：输入行业或概念名称后，会从 AkShare ETF 名单中选择成交额最大的同类 ETF。")
+        auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_etf_proxies_from_index(
+            etf_index,
+            industry_name=industry_name,
+            concept_name=concept_name,
+        )
+        if auto_warning:
+            st.warning(auto_warning)
+        elif not auto_matches.empty:
+            st.caption("ETF 自动匹配（同一关键词保留成交额最大）")
+            st.dataframe(_centered(_format_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
+        else:
+            st.caption("ETF 自动匹配：输入行业或概念名称后，会从 ETF 名单中选择成交额最大的同类 ETF。")
     combined_proxy_symbols = unique_symbols([*proxy_symbols, *selected_popular_etfs, *auto_proxy_symbols])
 
     if not st.button("生成走势复盘", type="primary", key="review_run"):
@@ -1122,11 +1134,12 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     review_name_symbols = unique_symbols([*target_symbols, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
     review_extra_names = dict(auto_proxy_names)
     if _has_etf_like_symbol(review_name_symbols) or sector_enabled:
-        try:
-            name_index = etf_index if not etf_index.empty else _cached_akshare_etf_index(etf_reload_token)
-            review_extra_names.update(_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
-        except Exception as exc:  # noqa: BLE001
-            st.caption(f"AkShare ETF 名称读取失败：{exc}")
+        name_index = etf_index
+        if name_index.empty:
+            name_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+            if etf_message:
+                st.caption(etf_message)
+        review_extra_names.update(_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
     if is_multi_review:
         _render_multi_review_output(
             data_root=data_root,
@@ -1874,6 +1887,58 @@ def _cached_akshare_etf_index(refresh_token: int = 0) -> pd.DataFrame:
 
     _ = refresh_token
     return _akshare_etf_index_from_table(ak.fund_etf_spot_em())
+
+
+def _review_etf_index_with_fallback(
+    refresh_token: int = 0,
+    *,
+    loader: Callable[[int], pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, str]:
+    load = loader or _cached_akshare_etf_index
+    fallback = _fallback_review_etf_index()
+    try:
+        loaded = load(refresh_token)
+    except Exception as exc:  # noqa: BLE001
+        return fallback, f"AkShare ETF 名单暂时不可用，已使用内置常用 ETF 名称表。原因：{_brief_error_text(exc)}"
+    merged = _merge_etf_indexes(loaded, fallback)
+    if merged.empty:
+        return fallback, "AkShare ETF 名单为空，已使用内置常用 ETF 名称表。"
+    return merged, ""
+
+
+def _fallback_review_etf_index() -> pd.DataFrame:
+    return pd.DataFrame(FALLBACK_REVIEW_ETFS, columns=["symbol", "name", "amount", "category"])
+
+
+def _merge_etf_indexes(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    frames = [frame for frame in [primary, fallback] if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    normalized_frames: list[pd.DataFrame] = []
+    for frame in frames:
+        normalized = frame.copy()
+        for column in columns:
+            if column not in normalized.columns:
+                normalized[column] = "" if column != "amount" else 0.0
+        normalized = normalized[columns]
+        normalized["symbol"] = normalized["symbol"].map(normalize_symbol)
+        normalized["name"] = normalized["name"].fillna("").astype(str).str.strip()
+        normalized["amount"] = pd.to_numeric(normalized["amount"], errors="coerce").fillna(0.0)
+        normalized["category"] = normalized["category"].fillna("").astype(str).str.strip()
+        normalized_frames.append(normalized)
+    result = pd.concat(normalized_frames, ignore_index=True)
+    result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
+    if result.empty:
+        return pd.DataFrame(columns=columns)
+    return result.drop_duplicates("symbol", keep="first").reset_index(drop=True)
+
+
+def _brief_error_text(exc: Exception, *, limit: int = 120) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
 
 
 def _akshare_etf_index_from_table(table: pd.DataFrame) -> pd.DataFrame:
