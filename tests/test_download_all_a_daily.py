@@ -7,6 +7,7 @@ from scripts.download_all_a_daily import (
     _batched,
     _download_universe,
     _fetch_stock_symbols_for_engine,
+    _group_symbols_by_download_start,
     fetch_all_a_symbols,
     merge_download_check,
 )
@@ -82,3 +83,17 @@ def test_merge_download_check_keeps_download_failure_message() -> None:
 
 def test_batched_requires_positive_batch_size() -> None:
     assert list(_batched(["a", "b", "c"], 2)) == [["a", "b"], ["c"]]
+
+
+def test_group_symbols_by_download_start_keeps_incremental_batches_together() -> None:
+    groups = _group_symbols_by_download_start(
+        ["000001.SZ", "000002.SZ", "600519.SH"],
+        {"000001.SZ": "2026-05-16", "600519.SH": "2026-05-20"},
+        default_start="1990-01-01",
+    )
+
+    assert groups == [
+        ("2026-05-16", ["000001.SZ"]),
+        ("1990-01-01", ["000002.SZ"]),
+        ("2026-05-20", ["600519.SH"]),
+    ]

@@ -1228,6 +1228,41 @@ def test_prepare_full_daily_download_symbols_skips_available_daily_bars(monkeypa
     ]
 
 
+def test_prepare_full_daily_download_symbols_incremental_uses_latest_plan(monkeypatch) -> None:
+    def fake_plan_incremental_downloads(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "status": "partial_window",
+                    "download_required": False,
+                    "download_start": "",
+                },
+                {
+                    "symbol": "000002.SZ",
+                    "status": "partial_window",
+                    "download_required": True,
+                    "download_start": "2026-05-16",
+                },
+            ]
+        )
+
+    monkeypatch.setattr("streamlit_app.plan_incremental_downloads", fake_plan_incremental_downloads)
+
+    download_symbols, checked = _prepare_full_daily_download_symbols(
+        symbols=["000001.SZ", "000002.SZ"],
+        data_root=Path("/tmp/data"),
+        adjust="qfq",
+        start="1990-01-01",
+        end="2026-05-22",
+        skip_available=True,
+        incremental_latest_only=True,
+    )
+
+    assert download_symbols == ["000002.SZ"]
+    assert checked["download_start"].tolist() == ["", "2026-05-16"]
+
+
 def test_prepare_full_daily_download_symbols_can_force_all_symbols() -> None:
     download_symbols, checked = _prepare_full_daily_download_symbols(
         symbols=["000001", "600519.SH", "000001.SZ"],

@@ -26,7 +26,12 @@ from ashare_cross_section_similarity.data_manager import (
     migrate_kline_data,
     plan_kline_migration,
 )
-from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
+from ashare_cross_section_similarity.downloader import (
+    data_check,
+    default_trend_repo,
+    plan_incremental_downloads,
+    update_local_bars,
+)
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
 from ashare_cross_section_similarity.similarity import (
@@ -903,7 +908,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             os.environ.get("TDX_TQCENTER_PATH", ""),
             "full_daily_tdx_tqcenter",
         )
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         start_date = col1.date_input(
             "起始日期",
             **_date_input_args("full_daily_tdx_start", DATE_INPUT_MIN),
@@ -920,10 +925,23 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             step=10,
             key="full_daily_tdx_batch_size",
         )
-        skip_available = col4.checkbox("跳过已覆盖", value=True, key="full_daily_tdx_skip_available")
-        opt_col1, opt_col2 = st.columns([1, 3])
-        include_indexes = opt_col1.checkbox("同步常用指数", value=True, key="full_daily_tdx_include_indexes")
-        extra_symbols = opt_col2.text_input(
+        opt_col1, opt_col2, opt_col3 = st.columns([1.2, 1.2, 2.6])
+        update_mode = opt_col1.selectbox(
+            "更新方式",
+            ["增量补最新", "完整覆盖"],
+            key="full_daily_tdx_update_mode",
+            help="增量补最新只检查每个标的本地最后一根K线，自动从后一日补到结束日期；完整覆盖会按起止区间检查历史缺口。",
+        )
+        incremental_latest_only = update_mode == "增量补最新"
+        skip_available = opt_col2.checkbox(
+            "跳过已覆盖",
+            value=True,
+            disabled=incremental_latest_only,
+            key="full_daily_tdx_skip_available",
+            help="仅完整覆盖模式生效；增量补最新会自动跳过最新K线已覆盖的标的。",
+        )
+        include_indexes = opt_col3.checkbox("同步常用指数", value=True, key="full_daily_tdx_include_indexes")
+        extra_symbols = st.text_input(
             "额外代码",
             value="",
             key="full_daily_tdx_extra_symbols",
@@ -953,14 +971,16 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                         start=start,
                         end=end,
                         skip_available=bool(skip_available),
+                        incremental_latest_only=incremental_latest_only,
                     )
                 st.session_state["full_daily_tdx_summary"] = {
                     "total": len(unique_symbols(all_symbols)),
                     "stock_total": len(unique_symbols(stock_symbols)),
                     "index_total": len(DEFAULT_ANALYSIS_INDEX_SYMBOLS) if include_indexes else 0,
                     "download": len(download_symbols),
-                    "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
-                    "skip_available": bool(skip_available),
+                    "available": _full_daily_available_count(checked, incremental_latest_only=incremental_latest_only),
+                    "skip_available": bool(skip_available) and not incremental_latest_only,
+                    "mode": update_mode,
                     "start": start,
                     "end": end,
                 }
@@ -976,6 +996,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                         provider=tdx_path,
                         download_engine="tdx",
                         batch_size=int(batch_size),
+                        incremental_latest_only=incremental_latest_only,
                     )
                 else:
                     st.session_state.pop("full_daily_tdx_job", None)
@@ -989,6 +1010,8 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                 f"下载范围 {int(summary.get('total', 0)):,} 个；"
                 f"其中股票 {int(summary.get('stock_total', 0)):,} 个、常用指数 {int(summary.get('index_total', 0)):,} 个；"
                 f"待下载 {int(summary.get('download', 0)):,} 个；"
+                f"已跳过 {int(summary.get('available', 0)):,} 个；"
+                f"模式 {summary.get('mode', '完整覆盖')}；"
                 f"区间 {summary.get('start')} 至 {summary.get('end')}。"
             )
             if int(summary.get("download", 0)) == 0:
@@ -1320,6 +1343,7 @@ def _download_symbols_with_progress(
     data_root: Path,
     provider: str,
     download_engine: str,
+    incremental_latest_only: bool = False,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
 ) -> pd.DataFrame:
     normalized = unique_symbols(symbols)
@@ -1327,20 +1351,35 @@ def _download_symbols_with_progress(
         return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
     rows: list[dict[str, object]] = []
     total = len(normalized)
-    before = data_check(
-        symbols=normalized,
-        data_root=data_root,
-        timeframe=timeframe,
-        adjust=adjust,
-        start=start,
-        end=end,
+    before = (
+        plan_incremental_downloads(
+            symbols=normalized,
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+        if incremental_latest_only
+        else data_check(
+            symbols=normalized,
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
     )
     before_rows = _frame_rows_by_symbol(before)
     download_groups: dict[str, list[str]] = {}
     for symbol in normalized:
         check_row = before_rows.get(symbol)
         download_start = start
-        if check_row is not None:
+        if incremental_latest_only:
+            if check_row is None or not bool(check_row.get("download_required", False)):
+                continue
+            download_start = str(check_row.get("download_start") or start)
+        elif check_row is not None:
             download_start = _repair_partial_download_start(
                 check_row,
                 data_root=data_root,
@@ -1371,7 +1410,7 @@ def _download_symbols_with_progress(
                 data_root=data_root,
                 timeframe=timeframe,
                 adjust=adjust,
-                start=start,
+                start=download_start if incremental_latest_only else start,
                 end=end,
             )
             for row in _merge_download_check_rows(batch_symbols, result, checked):
@@ -1395,6 +1434,7 @@ def _create_download_job(
     provider: str,
     download_engine: str,
     batch_size: int = DOWNLOAD_BATCH_SIZE,
+    incremental_latest_only: bool = False,
 ) -> dict[str, object]:
     normalized = unique_symbols(symbols)
     return {
@@ -1408,6 +1448,7 @@ def _create_download_job(
         "provider": provider,
         "download_engine": download_engine,
         "batch_size": batch_size,
+        "incremental_latest_only": incremental_latest_only,
         "cursor": 0,
         "rows": [],
         "status": "running" if normalized else "completed",
@@ -1452,6 +1493,7 @@ def _run_download_job_step(
         data_root=Path(job["data_root"]),
         provider=str(job["provider"]),
         download_engine=str(job["download_engine"]),
+        incremental_latest_only=bool(job.get("incremental_latest_only", False)),
         progress_callback=report_progress,
     )
     rows = list(job.get("rows", []))
@@ -1635,8 +1677,22 @@ def _prepare_full_daily_download_symbols(
     start: str,
     end: str,
     skip_available: bool,
+    incremental_latest_only: bool = False,
 ) -> tuple[list[str], pd.DataFrame]:
     normalized = unique_symbols(symbols)
+    if incremental_latest_only:
+        checked = plan_incremental_downloads(
+            symbols=normalized,
+            data_root=Path(data_root),
+            timeframe="1d",
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+        if checked.empty or "download_required" not in checked.columns:
+            return [], checked
+        required = checked.loc[checked["download_required"].fillna(False), "symbol"]
+        return unique_symbols(required.astype(str).tolist()), checked
     if not skip_available:
         return normalized, pd.DataFrame()
     checked = data_check(
@@ -1648,6 +1704,16 @@ def _prepare_full_daily_download_symbols(
         end=end,
     )
     return _symbols_requiring_download(checked), checked
+
+
+def _full_daily_available_count(checked: pd.DataFrame, *, incremental_latest_only: bool) -> int:
+    if checked.empty:
+        return 0
+    if incremental_latest_only and "download_required" in checked.columns:
+        return int((~checked["download_required"].fillna(False).astype(bool)).sum())
+    if "status" not in checked.columns:
+        return 0
+    return int((checked["status"] == "available").sum())
 
 
 def _full_daily_download_universe(

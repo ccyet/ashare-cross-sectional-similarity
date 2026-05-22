@@ -344,6 +344,88 @@ def data_check(
     return pd.DataFrame(rows)
 
 
+def plan_incremental_downloads(
+    *,
+    symbols: tuple[str, ...] | list[str],
+    data_root: str | Path,
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+) -> pd.DataFrame:
+    """Build a latest-bar backfill plan without treating older gaps as blockers."""
+    checked = data_check(
+        symbols=symbols,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        start=start,
+        end=end,
+    )
+    if checked.empty:
+        return checked.assign(download_required=pd.Series(dtype=bool), download_start="", download_reason="")
+
+    requested_start = pd.Timestamp(start).normalize()
+    requested_end = pd.Timestamp(end).normalize()
+    rows: list[dict[str, object]] = []
+    for row in checked.to_dict("records"):
+        plan_row = dict(row)
+        download_required, download_start, reason = _incremental_download_decision(
+            row,
+            requested_start=requested_start,
+            requested_end=requested_end,
+        )
+        plan_row["download_required"] = download_required
+        plan_row["download_start"] = download_start
+        plan_row["download_reason"] = reason
+        rows.append(plan_row)
+    return pd.DataFrame(rows)
+
+
+def _incremental_download_decision(
+    row: dict[str, object],
+    *,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+) -> tuple[bool, str, str]:
+    symbol = str(row.get("symbol", ""))
+    status = str(row.get("status", ""))
+    if status in {"missing_file", "read_error"}:
+        return True, requested_start.strftime("%Y-%m-%d"), _incremental_reason(status, symbol, None, requested_end)
+
+    local_end = pd.to_datetime(row.get("local_end"), errors="coerce")
+    if pd.isna(local_end):
+        return True, requested_start.strftime("%Y-%m-%d"), _incremental_reason(status, symbol, None, requested_end)
+
+    local_end_day = pd.Timestamp(local_end).normalize()
+    if local_end_day >= requested_end:
+        if status == "partial_window":
+            return False, "", "最新K线已覆盖；早期缺口需用完整覆盖模式回补。"
+        return False, "", "最新K线已覆盖。"
+
+    next_start = max(requested_start, local_end_day + pd.Timedelta(days=1))
+    return (
+        True,
+        next_start.strftime("%Y-%m-%d"),
+        _incremental_reason(status, symbol, local_end_day, requested_end),
+    )
+
+
+def _incremental_reason(
+    status: str,
+    symbol: str,
+    local_end: pd.Timestamp | None,
+    requested_end: pd.Timestamp,
+) -> str:
+    if status == "missing_file":
+        return "本地 parquet 不存在，按配置起点新建。"
+    if status == "read_error":
+        return "本地 parquet 读取失败，按配置起点重建。"
+    if local_end is None:
+        return "无法识别本地最后日期，按配置起点重建。"
+    return f"{symbol} 本地最新 {_date_text(local_end)}，补齐至 {_date_text(requested_end)}。"
+
+
 def _has_boundary_date(dates: pd.Series, requested_day: pd.Timestamp, *, before: bool) -> bool:
     if dates.empty:
         return False

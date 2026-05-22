@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ashare_cross_section_similarity.downloader import (  # noqa: E402
     data_check,
     default_trend_repo,
+    plan_incremental_downloads,
     update_local_bars,
 )
 from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols  # noqa: E402
@@ -58,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         output=Path(args.output),
         skip_available=args.skip_available,
+        incremental_latest_only=bool(args.incremental_latest_only),
         sleep_seconds=args.sleep,
     )
     failed = int((result["status"] == "failed").sum()) if not result.empty else 0
@@ -79,10 +81,30 @@ def download_all_a_daily(
     batch_size: int,
     output: Path,
     skip_available: bool = False,
+    incremental_latest_only: bool = False,
     sleep_seconds: float = 0.0,
 ) -> pd.DataFrame:
     normalized = unique_symbols(symbols)
-    if skip_available:
+    start_by_symbol: dict[str, str] = {}
+    if incremental_latest_only:
+        plan = plan_incremental_downloads(
+            symbols=normalized,
+            data_root=data_root,
+            timeframe="1d",
+            adjust=adjust,
+            start=start,
+            end=end,
+        )
+        if not plan.empty:
+            required = plan.loc[plan["download_required"].fillna(False)]
+            start_by_symbol = {
+                str(row["symbol"]): str(row["download_start"])
+                for _, row in required.iterrows()
+            }
+        original_count = len(normalized)
+        normalized = [symbol for symbol in normalized if symbol in start_by_symbol]
+        print(f"增量补最新：跳过 {original_count - len(normalized):,}；待下载：{len(normalized):,}")
+    elif skip_available:
         before = data_check(
             symbols=normalized,
             data_root=data_root,
@@ -96,18 +118,23 @@ def download_all_a_daily(
         print(f"跳过已覆盖：{len(available):,}；待下载：{len(normalized):,}")
     if not normalized:
         return pd.DataFrame(columns=["symbol", "status", "rows", "start", "end", "message"])
-    batches = list(_batched(normalized, batch_size))
+    download_groups = _group_symbols_by_download_start(normalized, start_by_symbol, default_start=start)
+    batches = [
+        (download_start, batch)
+        for download_start, group_symbols in download_groups
+        for batch in _batched(group_symbols, batch_size)
+    ]
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
     frames: list[pd.DataFrame] = []
-    for index, batch in enumerate(batches, start=1):
-        print(f"[{index}/{len(batches)}] 下载 {len(batch)} 个：{batch[0]} ... {batch[-1]}")
+    for index, (download_start, batch) in enumerate(batches, start=1):
+        print(f"[{index}/{len(batches)}] 下载 {len(batch)} 个：{batch[0]} ... {batch[-1]}，起点 {download_start}")
         download_result = update_local_bars(
             symbols=batch,
             timeframe="1d",
             adjust=adjust,
-            start=start,
+            start=download_start,
             end=end,
             trend_repo=trend_repo,
             data_root=data_root,
@@ -119,7 +146,7 @@ def download_all_a_daily(
             data_root=data_root,
             timeframe="1d",
             adjust=adjust,
-            start=start,
+            start=download_start if incremental_latest_only else start,
             end=end,
         )
         merged = merge_download_check(download_result, checked)
@@ -128,6 +155,19 @@ def download_all_a_daily(
         if sleep_seconds > 0 and index < len(batches):
             time.sleep(sleep_seconds)
     return pd.concat(frames, ignore_index=True)
+
+
+def _group_symbols_by_download_start(
+    symbols: list[str],
+    start_by_symbol: dict[str, str],
+    *,
+    default_start: str,
+) -> list[tuple[str, list[str]]]:
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        download_start = start_by_symbol.get(symbol, default_start)
+        groups.setdefault(download_start, []).append(symbol)
+    return list(groups.items())
 
 
 def _download_universe(symbols: Iterable[object], *, include_indexes: bool, extra_symbols: str) -> list[str]:
@@ -206,6 +246,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--no-indexes", dest="include_indexes", action="store_false", help="不额外加入常用指数代理")
     parser.add_argument("--extra-symbols", default="", help="额外下载代码，逗号或换行分隔，如 399006.SZ,000300.SH")
     parser.add_argument("--skip-available", action="store_true", help="下载前跳过已覆盖区间的股票")
+    parser.add_argument(
+        "--incremental-latest-only",
+        action="store_true",
+        help="只补齐本地最后一根 K 线之后到结束日期的数据；股票清单仍以下载引擎提供为准。",
+    )
     parser.add_argument("--sleep", type=float, default=0.0, help="批次间暂停秒数")
     parser.add_argument("--limit", type=int, default=0, help="调试用，仅下载前 N 个")
     parser.add_argument("--dry-run", action="store_true", help="只获取并打印下载范围，不下载")

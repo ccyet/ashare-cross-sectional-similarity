@@ -9,6 +9,7 @@ import pandas as pd
 from ashare_cross_section_similarity.downloader import (
     build_update_command,
     data_check,
+    plan_incremental_downloads,
     update_local_bars,
 )
 
@@ -216,6 +217,68 @@ def test_tdx_engine_fetches_symbol_batch_once(tmp_path: Path) -> None:
     ]
     assert (tmp_path / "market" / "daily" / "qfq" / "000001.SZ.parquet").exists()
     assert (tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet").exists()
+
+
+def test_plan_incremental_downloads_only_backfills_after_local_end(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2026-05-15"],
+            "stock_code": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    plan = plan_incremental_downloads(
+        symbols=["000001.SZ", "600519.SH"],
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="1990-01-01",
+        end="2026-05-22",
+    )
+
+    rows = plan.set_index("symbol")
+    assert bool(rows.loc["000001.SZ", "download_required"]) is True
+    assert rows.loc["000001.SZ", "download_start"] == "2026-05-16"
+    assert bool(rows.loc["600519.SH", "download_required"]) is True
+    assert rows.loc["600519.SH", "download_start"] == "1990-01-01"
+
+
+def test_plan_incremental_downloads_skips_when_latest_bar_is_current(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2026-05-22"],
+            "stock_code": ["000001.SZ"],
+            "open": [1],
+            "high": [1],
+            "low": [1],
+            "close": [1],
+            "volume": [10],
+            "amount": [100],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    plan = plan_incremental_downloads(
+        symbols=["000001.SZ"],
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="1990-01-01",
+        end="2026-05-22",
+    )
+
+    assert plan.loc[0, "status"] == "partial_window"
+    assert bool(plan.loc[0, "download_required"]) is False
+    assert "早期缺口" in plan.loc[0, "download_reason"]
 
 
 def test_openbb_engine_merges_with_existing_parquet_using_canonical_schema(
