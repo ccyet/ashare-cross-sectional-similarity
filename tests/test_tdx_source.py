@@ -3,7 +3,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars, fetch_tdx_stock_symbols
+from ashare_cross_section_similarity.tdx_source import (
+    build_tdx_etf_index,
+    fetch_tdx_bars,
+    search_tdx_etf_index,
+    fetch_tdx_kline_symbols,
+    fetch_tdx_stock_symbols,
+)
 
 
 class _FakeTq:
@@ -32,6 +38,26 @@ class _FakeTqStockList:
     def get_stock_list(self) -> object:
         self.stock_list_calls += 1
         return self.payload
+
+
+class _FakeTqMarketLists:
+    def __init__(self) -> None:
+        self.initialize_calls: list[str] = []
+        self.calls: list[tuple[object, ...]] = []
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+
+    def get_stock_list(self, *args: object, **kwargs: object) -> pd.DataFrame:
+        market = kwargs.get("market", args[0] if args else "")
+        self.calls.append(args)
+        if market == "SH":
+            return pd.DataFrame({"code": ["510300", "880001"], "market": ["SH", "SH"]})
+        if market == "SZ":
+            return pd.DataFrame({"code": ["399006", "159915"], "market": ["SZ", "SZ"]})
+        if market == "BJ":
+            return pd.DataFrame({"code": ["830799"], "market": ["BJ"]})
+        return pd.DataFrame({"code": ["000001"], "market": ["SZ"]})
 
 
 def test_fetch_tdx_bars_normalizes_official_tqcenter_payload() -> None:
@@ -182,6 +208,92 @@ def test_fetch_tdx_stock_symbols_reads_tdx_stock_list_and_filters_indexes() -> N
     assert fake.initialize_calls
     assert fake.stock_list_calls == 1
     assert symbols == ["000001.SZ", "600519.SH", "688603.SH", "830799.BJ"]
+
+
+def test_fetch_tdx_kline_symbols_keeps_stocks_etfs_indexes_and_blocks() -> None:
+    fake = _FakeTqStockList(
+        pd.DataFrame(
+            {
+                "code": ["000001", "600519", "399006", "510300", "159915", "880001", "885001"],
+                "market": ["SZ", "SH", "SZ", "SH", "SZ", "SH", "SH"],
+                "name": ["平安银行", "贵州茅台", "创业板指", "沪深300ETF", "创业板ETF", "通达信行业", "通达信概念"],
+            }
+        )
+    )
+
+    symbols = fetch_tdx_kline_symbols(tq_client=fake)
+
+    assert fake.initialize_calls
+    assert fake.stock_list_calls == 1
+    assert symbols == [
+        "000001.SZ",
+        "600519.SH",
+        "399006.SZ",
+        "510300.SH",
+        "159915.SZ",
+        "880001.SH",
+        "885001.SH",
+    ]
+
+
+def test_fetch_tdx_kline_symbols_uses_market_hint_for_mapping_payload() -> None:
+    fake = _FakeTqStockList({"code": ["000300", "000001"], "market": ["SH", "SZ"]})
+
+    symbols = fetch_tdx_kline_symbols(tq_client=fake)
+
+    assert symbols == ["000300.SH", "000001.SZ"]
+
+
+def test_fetch_tdx_kline_symbols_collects_market_specific_lists() -> None:
+    fake = _FakeTqMarketLists()
+
+    symbols = fetch_tdx_kline_symbols(tq_client=fake)
+
+    assert fake.initialize_calls
+    assert "000001.SZ" in symbols
+    assert "510300.SH" in symbols
+    assert "880001.SH" in symbols
+    assert "399006.SZ" in symbols
+    assert "159915.SZ" in symbols
+    assert "830799.BJ" in symbols
+
+
+def test_build_tdx_etf_index_keeps_largest_turnover_for_same_theme() -> None:
+    index = build_tdx_etf_index(
+        pd.DataFrame(
+            {
+                "code": ["512480", "159995", "510300", "600519"],
+                "market": ["SH", "SZ", "SH", "SH"],
+                "name": ["半导体ETF", "芯片ETF", "沪深300ETF", "贵州茅台"],
+                "amount": [1_000_000, 5_000_000, 2_000_000, 9_000_000],
+            }
+        )
+    )
+
+    matches = search_tdx_etf_index(index, ["半导体", "芯片"])
+
+    assert matches["query"].tolist() == ["半导体", "芯片"]
+    assert matches["symbol"].tolist() == ["512480.SH", "159995.SZ"]
+    assert matches["name"].tolist() == ["半导体ETF", "芯片ETF"]
+
+
+def test_search_tdx_etf_index_merges_same_query_to_largest_amount() -> None:
+    index = build_tdx_etf_index(
+        pd.DataFrame(
+            {
+                "code": ["512480", "159995", "588000"],
+                "market": ["SH", "SZ", "SH"],
+                "name": ["半导体ETF", "半导体芯片ETF", "科创50ETF"],
+                "amount": [1_000_000, 5_000_000, 2_000_000],
+            }
+        )
+    )
+
+    matches = search_tdx_etf_index(index, ["半导体"])
+
+    assert len(matches) == 1
+    assert matches.iloc[0]["symbol"] == "159995.SZ"
+    assert matches.iloc[0]["name"] == "半导体芯片ETF"
 
 
 def test_fetch_tdx_stock_symbols_reports_missing_stock_list_api() -> None:

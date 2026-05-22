@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from ashare_cross_section_similarity.data import CANONICAL_COLUMNS
-from ashare_cross_section_similarity.universe import normalize_symbol, symbols_from_table, unique_symbols
+from ashare_cross_section_similarity.universe import SYMBOL_COLUMNS, normalize_symbol, symbols_from_table, unique_symbols
 
 TDX_TQCENTER_ENV_VAR = "TDX_TQCENTER_PATH"
 TDX_REQUEST_BATCH_SIZE = 100
@@ -46,6 +46,15 @@ A_SHARE_STOCK_PREFIXES = {
     "SH": ("600", "601", "603", "605", "688", "689"),
     "SZ": ("000", "001", "002", "003", "300", "301"),
     "BJ": ("4", "8", "920"),
+}
+TDX_MARKET_COLUMNS = ("market", "exchange", "mkt", "市场", "交易所", "交易市场")
+TDX_NAME_COLUMNS = ("name", "stock_name", "security_name", "证券简称", "证券名称", "名称", "简称", "股票名称")
+TDX_AMOUNT_COLUMNS = ("amount", "Amount", "turnover", "成交额", "成交金额", "成交额(元)", "金额")
+TDX_BLOCK_INDEX_PREFIXES = ("880", "881", "882", "883", "884", "885", "886", "887", "888", "889")
+TDX_KLINE_PREFIXES = {
+    "SH": (*A_SHARE_STOCK_PREFIXES["SH"], "000", "5", *TDX_BLOCK_INDEX_PREFIXES),
+    "SZ": (*A_SHARE_STOCK_PREFIXES["SZ"], "15", "16", "18", "399"),
+    "BJ": A_SHARE_STOCK_PREFIXES["BJ"],
 }
 
 _TQ_CLIENT: Any | None = None
@@ -139,6 +148,142 @@ def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 
     details = " | ".join(errors)
     raise RuntimeError(f"TDX 未能获取股票清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+
+
+def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
+    tq = tq_client or _load_tq(tqcenter_path)
+    _ensure_initialized(tq)
+
+    errors: list[str] = []
+    for method_name in STOCK_LIST_METHODS:
+        method = getattr(tq, method_name, None)
+        if method is None:
+            errors.append(f"{method_name}: unavailable")
+            continue
+
+        method_symbols: list[str] = []
+        for label, args, kwargs in _stock_list_call_variants():
+            try:
+                payload = method(*args, **kwargs)
+            except TypeError as exc:
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+
+            symbols = _symbols_from_tdx_kline_payload(payload)
+            if symbols:
+                method_symbols.extend(symbols)
+
+        if method_symbols:
+            kline_symbols = _filter_tdx_kline_symbols(method_symbols)
+            if kline_symbols:
+                return kline_symbols
+            errors.append(f"{method_name}: 返回结果未包含可下载日 K 的股票、ETF 或板块指数代码")
+
+    details = " | ".join(errors)
+    raise RuntimeError(f"TDX 未能获取 K 线标的清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+
+
+def fetch_tdx_etf_index(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
+    tq = tq_client or _load_tq(tqcenter_path)
+    _ensure_initialized(tq)
+
+    tables: list[pd.DataFrame] = []
+    errors: list[str] = []
+    for method_name in STOCK_LIST_METHODS:
+        method = getattr(tq, method_name, None)
+        if method is None:
+            errors.append(f"{method_name}: unavailable")
+            continue
+        for label, args, kwargs in _stock_list_call_variants():
+            try:
+                payload = method(*args, **kwargs)
+            except TypeError as exc:
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{method_name}{label}: {exc}")
+                continue
+            table = build_tdx_etf_index(payload)
+            if not table.empty:
+                tables.append(table)
+
+    if tables:
+        return _deduplicate_etf_index(pd.concat(tables, ignore_index=True))
+    if errors and all("unavailable" in error for error in errors):
+        details = " | ".join(errors)
+        raise RuntimeError(f"TDX 未能获取 ETF 清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+    return _empty_etf_index()
+
+
+def build_tdx_etf_index(payload: Any) -> pd.DataFrame:
+    tables = _tdx_list_tables_from_payload(payload)
+    rows: list[dict[str, object]] = []
+    for table in tables:
+        if table.empty:
+            continue
+        code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+        name_column = next((column for column in TDX_NAME_COLUMNS if column in table.columns), None)
+        if code_column is None or name_column is None:
+            continue
+        market_column = next((column for column in TDX_MARKET_COLUMNS if column in table.columns), None)
+        amount_column = next((column for column in TDX_AMOUNT_COLUMNS if column in table.columns), None)
+        for _, row in table.iterrows():
+            name = str(row.get(name_column, "")).strip()
+            symbol = _normalize_tdx_list_symbol(row.get(code_column), market_hint=row.get(market_column) if market_column else None)
+            if not _is_tdx_etf(symbol, name):
+                continue
+            amount = _parse_tdx_amount(row.get(amount_column)) if amount_column else 0.0
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "amount": amount,
+                    "category": _etf_category_key(name),
+                }
+            )
+    if not rows:
+        return _empty_etf_index()
+    return _deduplicate_etf_index(pd.DataFrame(rows))
+
+
+def search_tdx_etf_index(
+    etf_index: pd.DataFrame,
+    queries: list[str] | tuple[str, ...],
+    *,
+    limit_per_query: int = 1,
+) -> pd.DataFrame:
+    columns = ["query", "symbol", "name", "amount", "category"]
+    if etf_index.empty:
+        return pd.DataFrame(columns=columns)
+    frame = etf_index.copy()
+    for column in ["symbol", "name", "category"]:
+        if column not in frame.columns:
+            frame[column] = ""
+    if "amount" not in frame.columns:
+        frame["amount"] = 0.0
+    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0.0)
+
+    rows: list[pd.DataFrame] = []
+    for raw_query in queries:
+        query = _etf_query_key(raw_query)
+        if not query:
+            continue
+        mask = (
+            frame["name"].astype(str).map(_etf_query_key).str.contains(query, regex=False, na=False)
+            | frame["category"].astype(str).map(_etf_query_key).str.contains(query, regex=False, na=False)
+        )
+        matched = frame.loc[mask].sort_values(["amount", "symbol"], ascending=[False, True]).head(max(1, int(limit_per_query))).copy()
+        if matched.empty:
+            continue
+        matched.insert(0, "query", str(raw_query).strip())
+        rows.append(matched[columns])
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    result = pd.concat(rows, ignore_index=True)
+    return result.sort_values(["query", "amount"], ascending=[True, False]).drop_duplicates("symbol").reset_index(drop=True)
 
 
 def _load_tq(tqcenter_path: str = "") -> Any:
@@ -253,6 +398,108 @@ def _symbols_from_tdx_stock_payload(payload: Any) -> list[str]:
     return []
 
 
+def _symbols_from_tdx_kline_payload(payload: Any) -> list[str]:
+    if payload is None:
+        return []
+    if isinstance(payload, pd.DataFrame):
+        return _symbols_from_tdx_kline_table(payload)
+    if isinstance(payload, pd.Series):
+        return _unique_tdx_symbols(payload.dropna().tolist())
+    if isinstance(payload, str):
+        return _unique_tdx_symbols([payload])
+    if isinstance(payload, Mapping):
+        try:
+            symbols = _symbols_from_tdx_kline_table(pd.DataFrame(payload))
+            if symbols:
+                return symbols
+        except Exception:  # noqa: BLE001
+            pass
+        return _symbols_from_tdx_kline_mapping_values(payload)
+    if isinstance(payload, (list, tuple, set)):
+        values = list(payload)
+        if not values:
+            return []
+        if all(isinstance(item, Mapping) for item in values):
+            return _symbols_from_tdx_kline_table(pd.DataFrame(values))
+        if all(isinstance(item, (str, int)) for item in values):
+            return _unique_tdx_symbols(values)
+        symbols: list[str] = []
+        for item in values:
+            symbols.extend(_symbols_from_tdx_kline_payload(item))
+        return _unique_tdx_symbols(symbols)
+    return []
+
+
+def _symbols_from_tdx_kline_mapping_values(payload: Mapping[object, object]) -> list[str]:
+    symbols: list[str] = []
+    for value in payload.values():
+        if isinstance(value, (pd.DataFrame, pd.Series, Mapping, list, tuple, set, str)):
+            symbols.extend(_symbols_from_tdx_kline_payload(value))
+    return _unique_tdx_symbols(symbols)
+
+
+def _symbols_from_tdx_kline_table(table: pd.DataFrame) -> list[str]:
+    if table.empty:
+        return []
+    code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+    if code_column is None:
+        return []
+    market_column = next((column for column in TDX_MARKET_COLUMNS if column in table.columns), None)
+    symbols: list[str] = []
+    for _, row in table.iterrows():
+        market_hint = row[market_column] if market_column else None
+        symbols.append(_normalize_tdx_list_symbol(row[code_column], market_hint=market_hint))
+    return _unique_tdx_symbols(symbols)
+
+
+def _normalize_tdx_list_symbol(value: object, *, market_hint: object | None = None) -> str:
+    text = str(value).strip().upper().replace("_", ".")
+    if not text:
+        return ""
+    if "." in text:
+        return normalize_symbol(text)
+    digits = "".join(character for character in text if character.isdigit())
+    if len(digits) < 6:
+        return text
+    code = digits[-6:]
+    if code.startswith(TDX_BLOCK_INDEX_PREFIXES):
+        return f"{code}.SH"
+    exchange = _exchange_from_tdx_market(market_hint)
+    if exchange:
+        return f"{code}.{exchange}"
+    if code.startswith("399"):
+        return f"{code}.SZ"
+    if code.startswith(("15", "16", "18")):
+        return f"{code}.SZ"
+    if code.startswith("5"):
+        return f"{code}.SH"
+    return normalize_symbol(code)
+
+
+def _exchange_from_tdx_market(value: object | None) -> str:
+    text = str(value).strip().upper()
+    if not text or text in {"NONE", "NAN"}:
+        return ""
+    if text in {"1", "SH", "SSE"} or "上海" in text or text.startswith("SH"):
+        return "SH"
+    if text in {"0", "SZ", "SZSE"} or "深圳" in text or text.startswith("SZ"):
+        return "SZ"
+    if text in {"2", "BJ", "BSE"} or "北京" in text or "北交" in text or text.startswith("BJ"):
+        return "BJ"
+    return ""
+
+
+def _unique_tdx_symbols(values: list[object]) -> list[str]:
+    seen: set[str] = set()
+    symbols: list[str] = []
+    for value in values:
+        symbol = _normalize_tdx_list_symbol(value)
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            symbols.append(symbol)
+    return symbols
+
+
 def _symbols_from_mapping_values(payload: Mapping[object, object]) -> list[str]:
     symbols: list[str] = []
     for value in payload.values():
@@ -277,6 +524,125 @@ def _filter_a_share_stock_symbols(symbols: list[str]) -> list[str]:
         if code.startswith(A_SHARE_STOCK_PREFIXES.get(exchange, ())):
             filtered.append(symbol)
     return filtered
+
+
+def _filter_tdx_kline_symbols(symbols: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for symbol in _unique_tdx_symbols(symbols):
+        if "." not in symbol:
+            continue
+        code, exchange = symbol.split(".", 1)
+        if code.startswith(TDX_KLINE_PREFIXES.get(exchange, ())):
+            filtered.append(symbol)
+    return filtered
+
+
+def _tdx_list_tables_from_payload(payload: Any) -> list[pd.DataFrame]:
+    if payload is None:
+        return []
+    if isinstance(payload, pd.DataFrame):
+        return [payload]
+    if isinstance(payload, pd.Series):
+        return [payload.to_frame(name="code")]
+    if isinstance(payload, Mapping):
+        try:
+            table = pd.DataFrame(payload)
+            if not table.empty:
+                return [table]
+        except Exception:  # noqa: BLE001
+            pass
+        tables: list[pd.DataFrame] = []
+        for value in payload.values():
+            tables.extend(_tdx_list_tables_from_payload(value))
+        return tables
+    if isinstance(payload, (list, tuple, set)):
+        values = list(payload)
+        if not values:
+            return []
+        if all(isinstance(item, Mapping) for item in values):
+            return [pd.DataFrame(values)]
+        tables: list[pd.DataFrame] = []
+        for item in values:
+            tables.extend(_tdx_list_tables_from_payload(item))
+        return tables
+    if isinstance(payload, (str, int)):
+        return [pd.DataFrame({"code": [payload]})]
+    return []
+
+
+def _is_tdx_etf(symbol: str, name: str) -> bool:
+    if not symbol or "." not in symbol:
+        return False
+    code, exchange = symbol.split(".", 1)
+    if exchange not in {"SH", "SZ"}:
+        return False
+    if not code.startswith(("5", "15", "16", "18")):
+        return False
+    normalized_name = str(name or "").upper()
+    return "ETF" in normalized_name or "交易型开放式" in normalized_name
+
+
+def _deduplicate_etf_index(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    if frame.empty:
+        return _empty_etf_index()
+    result = frame.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = "" if column != "amount" else 0.0
+    result["symbol"] = result["symbol"].map(normalize_symbol)
+    result["name"] = result["name"].astype(str).str.strip()
+    result["amount"] = pd.to_numeric(result["amount"], errors="coerce").fillna(0.0)
+    result["category"] = result["category"].astype(str).str.strip()
+    result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
+    if result.empty:
+        return _empty_etf_index()
+    result = result.sort_values(["amount", "symbol"], ascending=[False, True]).drop_duplicates("symbol")
+    return result[columns].sort_values(["category", "amount"], ascending=[True, False]).reset_index(drop=True)
+
+
+def _empty_etf_index() -> pd.DataFrame:
+    return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+
+
+def _etf_category_key(name: object) -> str:
+    text = _etf_query_key(name)
+    for token in [
+        "交易型开放式指数证券投资基金",
+        "交易型开放式",
+        "指数证券投资基金",
+        "证券投资基金",
+        "发起式联接",
+        "联接",
+        "增强",
+        "基金",
+        "ETF",
+        "LOF",
+    ]:
+        text = text.replace(token.upper(), "")
+    return text.strip("-_ ")
+
+
+def _etf_query_key(value: object) -> str:
+    text = str(value or "").strip().upper()
+    return re.sub(r"[\s　（）()【】\\[\\]：:·•,，、;；/\\\\-]+", "", text)
+
+
+def _parse_tdx_amount(value: object) -> float:
+    if value is None or pd.isna(value):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
+    multiplier = 1.0
+    if text.endswith("亿"):
+        multiplier = 100_000_000.0
+        text = text[:-1]
+    elif text.endswith("万"):
+        multiplier = 10_000.0
+        text = text[:-1]
+    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+    return 0.0 if pd.isna(numeric) else float(numeric) * multiplier
 
 
 def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:

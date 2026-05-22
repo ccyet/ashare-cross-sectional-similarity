@@ -42,15 +42,15 @@ def test_fetch_stock_symbols_for_tdx_engine_uses_tdx(monkeypatch: pytest.MonkeyP
 
     def fake_tdx(*, tqcenter_path: str = "") -> list[str]:
         calls.append(tqcenter_path)
-        return ["000001.SZ", "600519.SH"]
+        return ["000001.SZ", "600519.SH", "399006.SZ", "510300.SH", "880001.SH"]
 
     monkeypatch.setattr("scripts.download_all_a_daily.fetch_all_a_symbols", fail_akshare)
-    monkeypatch.setattr("scripts.download_all_a_daily.fetch_tdx_stock_symbols", fake_tdx)
+    monkeypatch.setattr("scripts.download_all_a_daily.fetch_tdx_kline_symbols", fake_tdx)
 
     symbols = _fetch_stock_symbols_for_engine("tdx", "/tdx/PYPlugins/user")
 
     assert calls == ["/tdx/PYPlugins/user"]
-    assert symbols == ["000001.SZ", "600519.SH"]
+    assert symbols == ["000001.SZ", "600519.SH", "399006.SZ", "510300.SH", "880001.SH"]
 
 
 def test_merge_download_check_marks_missing_after_successful_delegate() -> None:

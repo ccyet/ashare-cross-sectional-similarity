@@ -51,8 +51,11 @@ from streamlit_app import (
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
     _review_kline_chart,
+    _review_multi_comparison_rows,
     _review_quick_window_feedback,
     _review_relative_chart,
+    _review_result_grid_rows,
+    _review_target_symbols,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
@@ -669,6 +672,51 @@ def test_review_kline_chart_marks_main_segments() -> None:
     assert fig.layout.title.text == "目标K线与主要波段"
     assert len(fig.layout.shapes) >= 3
     assert fig.data[0].type == "candlestick"
+    assert fig.layout.xaxis.type == "category"
+    assert all(isinstance(item, str) for item in fig.data[0].x)
+
+
+def test_review_target_symbols_limits_multi_review_to_eight() -> None:
+    symbols, error = _review_target_symbols(
+        ",".join(f"{index:06d}.SZ" for index in range(1, 38))
+    )
+
+    assert len(symbols) == 36
+    assert symbols[0] == "000001.SZ"
+    assert symbols[-1] == "000036.SZ"
+    assert "最多支持 36 个" in error
+
+
+def test_review_result_grid_rows_uses_three_columns() -> None:
+    results = [
+        analyze_price_review(
+            _bars(f"00000{index}.SZ", [10, 11, 12]),
+            ReviewConfig(symbol=f"00000{index}.SZ", start="2024-01-01", end="2024-01-03"),
+        )
+        for index in range(1, 9)
+    ]
+
+    rows = _review_result_grid_rows(results)
+
+    assert [len(row) for row in rows] == [3, 3, 2]
+
+
+def test_review_multi_comparison_rows_reuses_shared_comparison_frames() -> None:
+    first = analyze_price_review(
+        _bars("000001.SZ", [10, 11, 12]),
+        ReviewConfig(symbol="000001.SZ", start="2024-01-01", end="2024-01-03"),
+    )
+    second = analyze_price_review(
+        _bars("600519.SH", [20, 19, 21]),
+        ReviewConfig(symbol="600519.SH", start="2024-01-01", end="2024-01-03"),
+    )
+    comparison_frames = [("沪深300", _bars("000300.SH", [10, 10.5, 11]))]
+
+    rows = _review_multi_comparison_rows([first, second], comparison_frames, {"000001.SZ": "平安银行"})
+
+    assert [row["代码"] for row in rows] == ["000001.SZ", "600519.SH"]
+    assert rows[0]["股票"] == "平安银行"
+    assert rows[0]["标的"] == "沪深300"
 
 
 def test_review_relative_chart_normalizes_target_and_comparison() -> None:

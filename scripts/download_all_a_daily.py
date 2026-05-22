@@ -18,7 +18,7 @@ from ashare_cross_section_similarity.downloader import (  # noqa: E402
     plan_incremental_downloads,
     update_local_bars,
 )
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols  # noqa: E402
+from ashare_cross_section_similarity.tdx_source import fetch_tdx_kline_symbols  # noqa: E402
 from ashare_cross_section_similarity.universe import (  # noqa: E402
     fetch_all_a_symbols,
     symbols_with_analysis_indexes,
@@ -180,7 +180,7 @@ def _download_universe(symbols: Iterable[object], *, include_indexes: bool, extr
 
 def _fetch_stock_symbols_for_engine(download_engine: str, provider: str) -> list[str]:
     if download_engine == "tdx":
-        return fetch_tdx_stock_symbols(tqcenter_path=provider)
+        return fetch_tdx_kline_symbols(tqcenter_path=provider)
     return fetch_all_a_symbols()
 
 
