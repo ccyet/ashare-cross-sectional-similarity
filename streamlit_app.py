@@ -1554,7 +1554,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
         selected_tdx_symbols: list[str] = []
         selected_counts: dict[str, int] = {}
         if symbol_table.empty:
-            st.info("先读取 TDX 标的列表后，可分别展开个股、ETF、指数 / 行业概念列表选择下载范围。")
+            st.info("先读取 TDX 标的列表后，可在个股、ETF、指数 / 行业概念标签中选择下载范围。")
         else:
             selected_tdx_symbols = _render_tdx_download_symbol_selector(symbol_table)
             selected_counts = _tdx_download_selection_counts(symbol_table, selected_tdx_symbols)

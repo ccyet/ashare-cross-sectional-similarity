@@ -60,6 +60,7 @@ TDX_KLINE_PREFIXES = {
 }
 
 _TQ_CLIENT: Any | None = None
+_TQ_CLIENT_IMPORT_KEY: str | None = None
 _INITIALIZED = False
 _INITIALIZED_CLIENT_ID: int | None = None
 
@@ -116,7 +117,6 @@ def fetch_tdx_bars(
 
 def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
     tq = tq_client or _load_tq(tqcenter_path)
-    _ensure_initialized(tq)
 
     errors: list[str] = []
     for method_name in STOCK_LIST_METHODS:
@@ -158,7 +158,6 @@ def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 
 def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
-    _ensure_initialized(tq)
 
     errors: list[str] = []
     for method_name in STOCK_LIST_METHODS:
@@ -194,7 +193,6 @@ def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | No
 
 def fetch_tdx_etf_index(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
-    _ensure_initialized(tq)
 
     tables: list[pd.DataFrame] = []
     errors: list[str] = []
@@ -293,12 +291,21 @@ def search_tdx_etf_index(
 
 
 def _load_tq(tqcenter_path: str = "") -> Any:
-    global _TQ_CLIENT
-    if _TQ_CLIENT is not None:
+    global _INITIALIZED, _INITIALIZED_CLIENT_ID, _TQ_CLIENT, _TQ_CLIENT_IMPORT_KEY
+    candidate_paths = _candidate_import_paths(tqcenter_path)
+    cache_key = _tq_import_cache_key(candidate_paths)
+    if _TQ_CLIENT is not None and _TQ_CLIENT_IMPORT_KEY == cache_key:
         return _TQ_CLIENT
+    if _TQ_CLIENT is not None:
+        _TQ_CLIENT = None
+        _TQ_CLIENT_IMPORT_KEY = None
+        _INITIALIZED = False
+        _INITIALIZED_CLIENT_ID = None
+    if candidate_paths:
+        sys.modules.pop("tqcenter", None)
 
     errors: list[str] = []
-    for path in _candidate_import_paths(tqcenter_path):
+    for path in candidate_paths:
         resolved = path.resolve()
         if not resolved.exists():
             errors.append(f"{resolved} 不存在")
@@ -311,6 +318,7 @@ def _load_tq(tqcenter_path: str = "") -> Any:
         try:
             module = importlib.import_module("tqcenter")
             _TQ_CLIENT = getattr(module, "tq")
+            _TQ_CLIENT_IMPORT_KEY = cache_key
             return _TQ_CLIENT
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{path_text}: {exc}")
@@ -323,6 +331,7 @@ def _load_tq(tqcenter_path: str = "") -> Any:
     try:
         module = importlib.import_module("tqcenter")
         _TQ_CLIENT = getattr(module, "tq")
+        _TQ_CLIENT_IMPORT_KEY = cache_key
         return _TQ_CLIENT
     except Exception as exc:  # noqa: BLE001
         errors.append(f"normal import: {exc}")
@@ -332,6 +341,12 @@ def _load_tq(tqcenter_path: str = "") -> Any:
             f" {TDX_TQCENTER_ENV_VAR} 或下载源输入框指向 TDX 的 PYPlugins/user 目录。"
             f" 详情: {details}"
         ) from exc
+
+
+def _tq_import_cache_key(paths: list[Path]) -> str:
+    if paths:
+        return os.pathsep.join(str(path.expanduser().resolve()) for path in paths)
+    return "normal-import"
 
 
 def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:

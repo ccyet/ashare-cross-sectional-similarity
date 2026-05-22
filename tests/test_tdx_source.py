@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sys
+
 import pandas as pd
 import pytest
 
 from ashare_cross_section_similarity.tdx_source import (
     build_tdx_etf_index,
     fetch_tdx_bars,
+    fetch_tdx_etf_index,
     fetch_tdx_kline_symbol_table,
     search_tdx_etf_index,
     fetch_tdx_kline_symbols,
@@ -65,6 +68,20 @@ class _FakeTqMarketLists:
 class _FakeTqInitializeFail:
     def initialize(self, caller_path: str) -> None:
         raise RuntimeError("terminal not ready")
+
+
+class _FakeTqStockListInitializeFail(_FakeTqStockList):
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+        raise RuntimeError("terminal not ready")
+
+
+def _reset_tq_import_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tdx_source, "_TQ_CLIENT", None)
+    monkeypatch.setattr(tdx_source, "_TQ_CLIENT_IMPORT_KEY", None)
+    monkeypatch.setattr(tdx_source, "_INITIALIZED", False)
+    monkeypatch.setattr(tdx_source, "_INITIALIZED_CLIENT_ID", None)
+    sys.modules.pop("tqcenter", None)
 
 
 def test_fetch_tdx_bars_normalizes_official_tqcenter_payload() -> None:
@@ -212,7 +229,7 @@ def test_fetch_tdx_stock_symbols_reads_tdx_stock_list_and_filters_indexes() -> N
 
     symbols = fetch_tdx_stock_symbols(tq_client=fake)
 
-    assert fake.initialize_calls
+    assert fake.initialize_calls == []
     assert fake.stock_list_calls == 1
     assert symbols == ["000001.SZ", "600519.SH", "688603.SH", "830799.BJ"]
 
@@ -230,7 +247,7 @@ def test_fetch_tdx_kline_symbols_keeps_stocks_etfs_indexes_and_blocks() -> None:
 
     symbols = fetch_tdx_kline_symbols(tq_client=fake)
 
-    assert fake.initialize_calls
+    assert fake.initialize_calls == []
     assert fake.stock_list_calls == 1
     assert symbols == [
         "000001.SZ",
@@ -267,6 +284,64 @@ def test_fetch_tdx_kline_symbol_table_classifies_stocks_etfs_and_indexes() -> No
     ]
 
 
+def test_fetch_tdx_kline_symbol_table_does_not_require_market_connection() -> None:
+    fake = _FakeTqStockListInitializeFail(
+        pd.DataFrame(
+            {
+                "code": ["000001", "510300", "399006"],
+                "market": ["SZ", "SH", "SZ"],
+                "name": ["平安银行", "沪深300ETF", "创业板指"],
+            }
+        )
+    )
+
+    table = fetch_tdx_kline_symbol_table(tq_client=fake)
+
+    assert fake.initialize_calls == []
+    assert table["symbol"].tolist() == ["000001.SZ", "510300.SH", "399006.SZ"]
+
+
+def test_fetch_tdx_etf_index_does_not_require_market_connection() -> None:
+    fake = _FakeTqStockListInitializeFail(
+        pd.DataFrame(
+            {
+                "code": ["512480", "159995", "600519"],
+                "market": ["SH", "SZ", "SH"],
+                "name": ["半导体ETF", "芯片ETF", "贵州茅台"],
+                "amount": [1_000_000, 5_000_000, 9_000_000],
+            }
+        )
+    )
+
+    index = fetch_tdx_etf_index(tq_client=fake)
+
+    assert fake.initialize_calls == []
+    assert index["symbol"].tolist() == ["512480.SH", "159995.SZ"]
+
+
+def test_load_tq_honors_changed_tqcenter_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _reset_tq_import_state(monkeypatch)
+    first_dir = tmp_path / "first" / "PYPlugins" / "user"
+    second_dir = tmp_path / "second" / "PYPlugins" / "user"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    first_dir.joinpath("tqcenter.py").write_text("class Tq:\n    marker = 'first'\ntq = Tq()\n", encoding="utf-8")
+    second_dir.joinpath("tqcenter.py").write_text("class Tq:\n    marker = 'second'\ntq = Tq()\n", encoding="utf-8")
+
+    try:
+        first = tdx_source._load_tq(str(first_dir))
+        second = tdx_source._load_tq(str(second_dir))
+    finally:
+        sys.modules.pop("tqcenter", None)
+        for item in [str(first_dir), str(second_dir)]:
+            if item in sys.path:
+                sys.path.remove(item)
+
+    assert first.marker == "first"
+    assert second.marker == "second"
+    assert first is not second
+
+
 def test_fetch_tdx_kline_symbols_uses_market_hint_for_mapping_payload() -> None:
     fake = _FakeTqStockList({"code": ["000300", "000001"], "market": ["SH", "SZ"]})
 
@@ -280,7 +355,7 @@ def test_fetch_tdx_kline_symbols_collects_market_specific_lists() -> None:
 
     symbols = fetch_tdx_kline_symbols(tq_client=fake)
 
-    assert fake.initialize_calls
+    assert fake.initialize_calls == []
     assert "000001.SZ" in symbols
     assert "510300.SH" in symbols
     assert "880001.SH" in symbols
