@@ -6,6 +6,7 @@ import pytest
 from ashare_cross_section_similarity.tdx_source import (
     build_tdx_etf_index,
     fetch_tdx_bars,
+    fetch_tdx_kline_symbol_table,
     search_tdx_etf_index,
     fetch_tdx_kline_symbols,
     fetch_tdx_stock_symbols,
@@ -239,6 +240,30 @@ def test_fetch_tdx_kline_symbols_keeps_stocks_etfs_indexes_and_blocks() -> None:
         "159915.SZ",
         "880001.SH",
         "885001.SH",
+    ]
+
+
+def test_fetch_tdx_kline_symbol_table_classifies_stocks_etfs_and_indexes() -> None:
+    fake = _FakeTqStockList(
+        pd.DataFrame(
+            {
+                "code": ["000001", "600519", "399006", "510300", "159915", "880001", "885001"],
+                "market": ["SZ", "SH", "SZ", "SH", "SZ", "SH", "SH"],
+                "name": ["平安银行", "贵州茅台", "创业板指", "沪深300ETF", "创业板ETF", "通达信行业", "通达信概念"],
+            }
+        )
+    )
+
+    table = fetch_tdx_kline_symbol_table(tq_client=fake)
+
+    assert table.to_dict("records") == [
+        {"symbol": "000001.SZ", "name": "平安银行", "category": "stock"},
+        {"symbol": "600519.SH", "name": "贵州茅台", "category": "stock"},
+        {"symbol": "399006.SZ", "name": "创业板指", "category": "index"},
+        {"symbol": "510300.SH", "name": "沪深300ETF", "category": "etf"},
+        {"symbol": "159915.SZ", "name": "创业板ETF", "category": "etf"},
+        {"symbol": "880001.SH", "name": "通达信行业", "category": "index"},
+        {"symbol": "885001.SH", "name": "通达信概念", "category": "index"},
     ]
 
 

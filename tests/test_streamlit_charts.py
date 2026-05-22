@@ -62,6 +62,10 @@ from streamlit_app import (
     _symbol_data_hint,
     _symbols_requiring_download,
     _tdx_directory_default,
+    _tdx_download_selection_counts,
+    _tdx_etf_name_map_from_index,
+    _tdx_etf_option_formatter,
+    _tdx_top_etf_options,
 )
 
 
@@ -682,6 +686,18 @@ def test_review_kline_chart_marks_main_segments() -> None:
     assert all(isinstance(item, str) for item in fig.data[0].x)
 
 
+def test_review_kline_chart_uses_stock_name_when_available() -> None:
+    bars = _bars("512480.SH", [10, 11, 12, 13])
+    result = analyze_price_review(
+        bars,
+        ReviewConfig(symbol="512480.SH", start="2024-01-01", end="2024-01-04"),
+    )
+
+    fig = _review_kline_chart(result, {"512480.SH": "半导体ETF"})
+
+    assert fig.data[0].name == "半导体ETF（512480.SH，目标）"
+
+
 def test_review_target_symbols_limits_multi_review_to_eight() -> None:
     symbols, error = _review_target_symbols(
         ",".join(f"{index:06d}.SZ" for index in range(1, 38))
@@ -787,6 +803,38 @@ def test_stock_name_map_from_akshare_code_name_table() -> None:
     )
 
     assert names == {"603186.SH": "华正新材"}
+
+
+def test_tdx_etf_name_map_from_index_resolves_review_target_etf() -> None:
+    names = _tdx_etf_name_map_from_index(
+        pd.DataFrame(
+            [
+                {"symbol": "512480.SH", "name": "半导体ETF", "amount": 10_000_000, "category": "半导体"},
+                {"symbol": "510300.SH", "name": "沪深300ETF", "amount": 20_000_000, "category": "沪深300"},
+            ]
+        ),
+        ("512480.SH", "601888.SH"),
+    )
+
+    assert names == {"512480.SH": "半导体ETF"}
+
+
+def test_tdx_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:
+    options = _tdx_top_etf_options(
+        pd.DataFrame(
+            [
+                {"symbol": "512480.SH", "name": "半导体ETF", "amount": 1_000_000, "category": "半导体"},
+                {"symbol": "159995.SZ", "name": "半导体芯片ETF", "amount": 5_000_000, "category": "半导体"},
+                {"symbol": "510300.SH", "name": "沪深300ETF", "amount": 4_000_000, "category": "沪深300"},
+                {"symbol": "588000.SH", "name": "科创50ETF", "amount": 3_000_000, "category": "科创50"},
+            ]
+        ),
+        limit=2,
+    )
+
+    assert options["symbol"].tolist() == ["159995.SZ", "510300.SH"]
+    formatter = _tdx_etf_option_formatter(options)
+    assert formatter("159995.SZ") == "半导体芯片ETF（159995.SZ）"
 
 
 def test_format_results_formats_feature_numbers_for_display() -> None:
@@ -1387,6 +1435,34 @@ def test_full_daily_download_universe_includes_common_indexes() -> None:
     assert "399006.SZ" in symbols
     assert "000300.SH" in symbols
     assert "000852.SH" in symbols
+
+
+def test_full_daily_download_universe_keeps_user_selected_etfs_and_indexes() -> None:
+    symbols = _full_daily_download_universe(
+        ["000001.SZ"],
+        include_indexes=False,
+        extra_symbols="",
+        etf_symbols=["510300.SH"],
+        index_symbols=["399006.SZ"],
+    )
+
+    assert symbols == ["000001.SZ", "510300.SH", "399006.SZ"]
+
+
+def test_tdx_download_selection_counts_separates_categories() -> None:
+    counts = _tdx_download_selection_counts(
+        pd.DataFrame(
+            [
+                {"symbol": "000001.SZ", "category": "stock"},
+                {"symbol": "510300.SH", "category": "etf"},
+                {"symbol": "399006.SZ", "category": "index"},
+                {"symbol": "880001.SH", "category": "index"},
+            ]
+        ),
+        ["000001.SZ", "399006.SZ"],
+    )
+
+    assert counts == {"stock": 1, "etf": 0, "index": 1, "other": 0}
 
 
 def test_symbol_data_hint_points_to_existing_alternate_suffix(tmp_path: Path) -> None:

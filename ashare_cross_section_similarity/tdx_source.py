@@ -51,6 +51,8 @@ TDX_MARKET_COLUMNS = ("market", "exchange", "mkt", "市场", "交易所", "交�
 TDX_NAME_COLUMNS = ("name", "stock_name", "security_name", "证券简称", "证券名称", "名称", "简称", "股票名称")
 TDX_AMOUNT_COLUMNS = ("amount", "Amount", "turnover", "成交额", "成交金额", "成交额(元)", "金额")
 TDX_BLOCK_INDEX_PREFIXES = ("880", "881", "882", "883", "884", "885", "886", "887", "888", "889")
+TDX_KLINE_SYMBOL_TABLE_COLUMNS = ["symbol", "name", "category"]
+TDX_KLINE_CATEGORY_ORDER = {"stock": 0, "etf": 1, "index": 2, "other": 3}
 TDX_KLINE_PREFIXES = {
     "SH": (*A_SHARE_STOCK_PREFIXES["SH"], "000", "5", *TDX_BLOCK_INDEX_PREFIXES),
     "SZ": (*A_SHARE_STOCK_PREFIXES["SZ"], "15", "16", "18", "399"),
@@ -151,6 +153,10 @@ def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 
 
 def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
+    return fetch_tdx_kline_symbol_table(tqcenter_path=tqcenter_path, tq_client=tq_client)["symbol"].tolist()
+
+
+def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
     _ensure_initialized(tq)
 
@@ -161,7 +167,7 @@ def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
             errors.append(f"{method_name}: unavailable")
             continue
 
-        method_symbols: list[str] = []
+        method_tables: list[pd.DataFrame] = []
         for label, args, kwargs in _stock_list_call_variants():
             try:
                 payload = method(*args, **kwargs)
@@ -172,14 +178,14 @@ def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
                 errors.append(f"{method_name}{label}: {exc}")
                 continue
 
-            symbols = _symbols_from_tdx_kline_payload(payload)
-            if symbols:
-                method_symbols.extend(symbols)
+            table = _tdx_kline_symbol_table_from_payload(payload)
+            if not table.empty:
+                method_tables.append(table)
 
-        if method_symbols:
-            kline_symbols = _filter_tdx_kline_symbols(method_symbols)
-            if kline_symbols:
-                return kline_symbols
+        if method_tables:
+            kline_table = _deduplicate_tdx_kline_symbol_table(pd.concat(method_tables, ignore_index=True))
+            if not kline_table.empty:
+                return kline_table
             errors.append(f"{method_name}: 返回结果未包含可下载日 K 的股票、ETF 或板块指数代码")
 
     details = " | ".join(errors)
@@ -529,12 +535,70 @@ def _filter_a_share_stock_symbols(symbols: list[str]) -> list[str]:
 def _filter_tdx_kline_symbols(symbols: list[str]) -> list[str]:
     filtered: list[str] = []
     for symbol in _unique_tdx_symbols(symbols):
-        if "." not in symbol:
-            continue
-        code, exchange = symbol.split(".", 1)
-        if code.startswith(TDX_KLINE_PREFIXES.get(exchange, ())):
+        if _is_tdx_kline_symbol(symbol):
             filtered.append(symbol)
     return filtered
+
+
+def _tdx_kline_symbol_table_from_payload(payload: Any) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for table in _tdx_list_tables_from_payload(payload):
+        if table.empty:
+            continue
+        code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+        if code_column is None:
+            continue
+        market_column = next((column for column in TDX_MARKET_COLUMNS if column in table.columns), None)
+        name_column = next((column for column in TDX_NAME_COLUMNS if column in table.columns), None)
+        for _, row in table.iterrows():
+            symbol = _normalize_tdx_list_symbol(row.get(code_column), market_hint=row.get(market_column) if market_column else None)
+            if not _is_tdx_kline_symbol(symbol):
+                continue
+            name = str(row.get(name_column, "") if name_column else "").strip()
+            rows.append({"symbol": symbol, "name": name, "category": _tdx_kline_category(symbol, name)})
+    if not rows:
+        return _empty_tdx_kline_symbol_table()
+    return pd.DataFrame(rows, columns=TDX_KLINE_SYMBOL_TABLE_COLUMNS)
+
+
+def _deduplicate_tdx_kline_symbol_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return _empty_tdx_kline_symbol_table()
+    result = frame.copy()
+    for column in TDX_KLINE_SYMBOL_TABLE_COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+    result = result[TDX_KLINE_SYMBOL_TABLE_COLUMNS]
+    result["symbol"] = result["symbol"].map(normalize_symbol)
+    result["name"] = result["name"].fillna("").astype(str)
+    result["category"] = result["category"].fillna("other").astype(str)
+    return result.drop_duplicates("symbol", keep="first").reset_index(drop=True)
+
+
+def _empty_tdx_kline_symbol_table() -> pd.DataFrame:
+    return pd.DataFrame(columns=TDX_KLINE_SYMBOL_TABLE_COLUMNS)
+
+
+def _is_tdx_kline_symbol(symbol: str) -> bool:
+    if "." not in symbol:
+        return False
+    code, exchange = symbol.split(".", 1)
+    return code.startswith(TDX_KLINE_PREFIXES.get(exchange, ()))
+
+
+def _tdx_kline_category(symbol: str, name: str = "") -> str:
+    if "." not in symbol:
+        return "other"
+    code, exchange = symbol.split(".", 1)
+    if _is_tdx_etf(symbol, name) or (exchange in {"SH", "SZ"} and code.startswith(("5", "15", "16", "18"))):
+        return "etf"
+    if code.startswith(TDX_BLOCK_INDEX_PREFIXES) or (exchange == "SH" and code.startswith("000")) or (
+        exchange == "SZ" and code.startswith("399")
+    ):
+        return "index"
+    if exchange in A_SHARE_STOCK_PREFIXES and code.startswith(A_SHARE_STOCK_PREFIXES[exchange]):
+        return "stock"
+    return "other"
 
 
 def _tdx_list_tables_from_payload(payload: Any) -> list[pd.DataFrame]:

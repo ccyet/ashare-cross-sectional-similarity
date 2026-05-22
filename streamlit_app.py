@@ -56,7 +56,11 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     algorithm_label,
     get_algorithm_status,
 )
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_etf_index, fetch_tdx_kline_symbols, search_tdx_etf_index
+from ashare_cross_section_similarity.tdx_source import (
+    fetch_tdx_etf_index,
+    fetch_tdx_kline_symbol_table,
+    search_tdx_etf_index,
+)
 from ashare_cross_section_similarity.universe import (
     DEFAULT_ANALYSIS_INDEX_SYMBOLS,
     fetch_concept_constituents,
@@ -77,6 +81,13 @@ DOWNLOAD_JOB_STATUS_LABELS = {
     "paused": "已暂停",
     "completed": "下载完成",
 }
+TDX_DOWNLOAD_CATEGORY_LABELS = {
+    "stock": "个股",
+    "etf": "ETF",
+    "index": "指数 / 行业概念",
+    "other": "其他",
+}
+TDX_DOWNLOAD_CATEGORY_ORDER = ("stock", "etf", "index", "other")
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
@@ -1014,8 +1025,10 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
 
     sector_enabled = st.checkbox("结合板块分析", value=False, key="review_with_sector")
     proxy_symbols: list[str] = []
+    selected_popular_etfs: list[str] = []
     auto_proxy_symbols: list[str] = []
     auto_proxy_names: dict[str, str] = {}
+    tdx_etf_index = pd.DataFrame()
     industry_name = ""
     concept_name = ""
     sector_min_coverage = 0.5
@@ -1033,19 +1046,34 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             key="review_sector_min_coverage",
         )
         if download_engine == "tdx":
-            auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_tdx_etf_proxies(
-                provider,
-                industry_name=industry_name,
-                concept_name=concept_name,
-            )
-            if auto_warning:
-                st.warning(auto_warning)
-            elif not auto_matches.empty:
-                st.caption("TDX 自动匹配 ETF（同一关键词保留成交额最大）")
-                st.dataframe(_centered(_format_tdx_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
+            try:
+                tdx_etf_index = _cached_tdx_etf_index(provider)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"TDX ETF 索引读取失败：{exc}")
             else:
-                st.caption("TDX ETF 自动匹配：输入行业或概念名称后，会从本地 TDX ETF 清单中选择成交额最大的同类 ETF。")
-    combined_proxy_symbols = unique_symbols([*proxy_symbols, *auto_proxy_symbols])
+                popular_etfs = _tdx_top_etf_options(tdx_etf_index, limit=10)
+                if not popular_etfs.empty:
+                    selected_popular_etfs = st.multiselect(
+                        "主要ETF",
+                        popular_etfs["symbol"].tolist(),
+                        default=[],
+                        key="review_popular_etfs",
+                        format_func=_tdx_etf_option_formatter(popular_etfs),
+                        help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
+                    )
+                auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_tdx_etf_proxies_from_index(
+                    tdx_etf_index,
+                    industry_name=industry_name,
+                    concept_name=concept_name,
+                )
+                if auto_warning:
+                    st.warning(auto_warning)
+                elif not auto_matches.empty:
+                    st.caption("TDX 自动匹配 ETF（同一关键词保留成交额最大）")
+                    st.dataframe(_centered(_format_tdx_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("TDX ETF 自动匹配：输入行业或概念名称后，会从本地 TDX ETF 清单中选择成交额最大的同类 ETF。")
+    combined_proxy_symbols = unique_symbols([*proxy_symbols, *selected_popular_etfs, *auto_proxy_symbols])
 
     if not st.button("生成走势复盘", type="primary", key="review_run"):
         st.info("设置目标、区间和对比项后，点击生成走势复盘。复盘只使用本地行情数据。")
@@ -1056,6 +1084,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         return
     if target_error:
         st.warning(target_error)
+    review_name_symbols = unique_symbols([*target_symbols, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
+    review_extra_names = dict(auto_proxy_names)
+    if download_engine == "tdx":
+        try:
+            name_index = tdx_etf_index if not tdx_etf_index.empty else _cached_tdx_etf_index(provider)
+            review_extra_names.update(_tdx_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"TDX ETF 名称读取失败：{exc}")
     if is_multi_review:
         _render_multi_review_output(
             data_root=data_root,
@@ -1071,7 +1107,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             industry_name=industry_name,
             concept_name=concept_name,
             sector_min_coverage=float(sector_min_coverage),
-            extra_stock_names=auto_proxy_names,
+            extra_stock_names=review_extra_names,
         )
         return
 
@@ -1115,7 +1151,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             st.warning(hint)
         return
 
-    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **auto_proxy_names}
+    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **review_extra_names}
     comparison_frames, comparison_rows, warnings = _review_comparison_data(
         result.window,
         direct_bars,
@@ -1146,7 +1182,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     st.markdown("**2. 复盘图表**")
     chart_col1, chart_col2 = st.columns(2)
     with chart_col1:
-        st.plotly_chart(_review_kline_chart(result), use_container_width=True)
+        st.plotly_chart(_review_kline_chart(result, stock_names), use_container_width=True)
     with chart_col2:
         st.plotly_chart(_review_relative_chart(result.window, comparison_frames), use_container_width=True)
 
@@ -1389,7 +1425,7 @@ def _render_multi_review_output(
         columns = st.columns(3)
         for column, result in zip(columns, row):
             with column:
-                fig = _review_kline_chart(result)
+                fig = _review_kline_chart(result, stock_names)
                 fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=320)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1469,6 +1505,25 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
         )
         if include_indexes:
             st.caption("常用指数：" + "、".join(DEFAULT_ANALYSIS_INDEX_SYMBOLS))
+        symbol_table_key = "full_daily_tdx_symbol_table"
+        if st.button("读取 / 刷新 TDX 标的列表", key="full_daily_tdx_refresh_symbols"):
+            try:
+                with st.spinner("正在读取 TDX 个股、ETF、指数与板块指数清单..."):
+                    st.session_state[symbol_table_key] = fetch_tdx_kline_symbol_table(tqcenter_path=tdx_path)
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.pop(symbol_table_key, None)
+                st.error(f"TDX 标的列表读取失败：{exc}")
+
+        raw_symbol_table = st.session_state.get(symbol_table_key)
+        symbol_table = raw_symbol_table if isinstance(raw_symbol_table, pd.DataFrame) else pd.DataFrame()
+        selected_tdx_symbols: list[str] = []
+        selected_counts: dict[str, int] = {}
+        if symbol_table.empty:
+            st.info("先读取 TDX 标的列表后，可分别展开个股、ETF、指数 / 行业概念列表选择下载范围。")
+        else:
+            selected_tdx_symbols = _render_tdx_download_symbol_selector(symbol_table)
+            selected_counts = _tdx_download_selection_counts(symbol_table, selected_tdx_symbols)
+
         start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
         end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
         if error := _date_range_error(start, end):
@@ -1478,11 +1533,23 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
         if st.button("通过 TDX 更新全量日 K", type="primary", key="full_daily_tdx_start_button"):
             try:
                 with st.spinner("获取 TDX 标的列表并检查本地覆盖..."):
-                    tdx_symbols = fetch_tdx_kline_symbols(tqcenter_path=tdx_path)
+                    if symbol_table.empty:
+                        symbol_table = fetch_tdx_kline_symbol_table(tqcenter_path=tdx_path)
+                        st.session_state[symbol_table_key] = symbol_table
+                        selected_tdx_symbols = symbol_table["symbol"].tolist()
+                        selected_counts = _tdx_download_selection_counts(symbol_table, selected_tdx_symbols)
+                    if not selected_tdx_symbols:
+                        raise ValueError("请先在个股、ETF 或指数 / 行业概念列表中至少选择一个下载对象。")
+                    stock_symbols = _tdx_category_symbols(symbol_table, "stock", selected_tdx_symbols)
+                    etf_symbols = _tdx_category_symbols(symbol_table, "etf", selected_tdx_symbols)
+                    index_symbols = _tdx_category_symbols(symbol_table, "index", selected_tdx_symbols)
+                    other_symbols = _tdx_category_symbols(symbol_table, "other", selected_tdx_symbols)
                     all_symbols = _full_daily_download_universe(
-                        tdx_symbols,
+                        stock_symbols,
                         include_indexes=bool(include_indexes),
                         extra_symbols=extra_symbols,
+                        etf_symbols=etf_symbols,
+                        index_symbols=[*index_symbols, *other_symbols],
                     )
                     download_symbols, checked = _prepare_full_daily_download_symbols(
                         symbols=all_symbols,
@@ -1495,7 +1562,11 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                     )
                 st.session_state["full_daily_tdx_summary"] = {
                     "total": len(unique_symbols(all_symbols)),
-                    "tdx_total": len(unique_symbols(tdx_symbols)),
+                    "tdx_total": len(unique_symbols(selected_tdx_symbols)),
+                    "stock_total": int(selected_counts.get("stock", 0)),
+                    "etf_total": int(selected_counts.get("etf", 0)),
+                    "tdx_index_total": int(selected_counts.get("index", 0)),
+                    "other_total": int(selected_counts.get("other", 0)),
                     "index_total": len(DEFAULT_ANALYSIS_INDEX_SYMBOLS) if include_indexes else 0,
                     "download": len(download_symbols),
                     "available": _full_daily_available_count(checked, incremental_latest_only=incremental_latest_only),
@@ -1529,7 +1600,10 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             tdx_total = int(summary.get("tdx_total", summary.get("stock_total", 0)))
             st.info(
                 f"下载范围 {int(summary.get('total', 0)):,} 个；"
-                f"其中 TDX 标的 {tdx_total:,} 个、常用指数 {int(summary.get('index_total', 0)):,} 个；"
+                f"其中 TDX 已选 {tdx_total:,} 个"
+                f"（个股 {int(summary.get('stock_total', 0)):,}、ETF {int(summary.get('etf_total', 0)):,}、"
+                f"指数 / 行业概念 {int(summary.get('tdx_index_total', 0)):,}、其他 {int(summary.get('other_total', 0)):,}），"
+                f"常用指数 {int(summary.get('index_total', 0)):,} 个；"
                 f"待下载 {int(summary.get('download', 0)):,} 个；"
                 f"已跳过 {int(summary.get('available', 0)):,} 个；"
                 f"模式 {summary.get('mode', '完整覆盖')}；"
@@ -1770,13 +1844,22 @@ def _review_auto_tdx_etf_proxies(
     industry_name: str,
     concept_name: str,
 ) -> tuple[list[str], dict[str, str], pd.DataFrame, str]:
-    queries = _tdx_etf_queries(industry_name, concept_name)
-    if not queries:
-        return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), ""
     try:
         index = _cached_tdx_etf_index(provider)
     except Exception as exc:  # noqa: BLE001
         return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), f"TDX ETF 索引读取失败：{exc}"
+    return _review_auto_tdx_etf_proxies_from_index(index, industry_name=industry_name, concept_name=concept_name)
+
+
+def _review_auto_tdx_etf_proxies_from_index(
+    index: pd.DataFrame,
+    *,
+    industry_name: str,
+    concept_name: str,
+) -> tuple[list[str], dict[str, str], pd.DataFrame, str]:
+    queries = _tdx_etf_queries(industry_name, concept_name)
+    if not queries:
+        return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), ""
     matches = search_tdx_etf_index(index, queries)
     if matches.empty:
         return [], {}, matches, f"TDX ETF 索引没有匹配到：{', '.join(queries)}。"
@@ -1791,6 +1874,58 @@ def _review_auto_tdx_etf_proxies(
 
 def _tdx_etf_queries(industry_name: str, concept_name: str) -> list[str]:
     return [text for text in dict.fromkeys([str(industry_name or "").strip(), str(concept_name or "").strip()]) if text]
+
+
+def _tdx_etf_name_map_from_index(index: pd.DataFrame, symbols: tuple[str, ...] | list[str]) -> dict[str, str]:
+    if index.empty:
+        return {}
+    wanted = set(unique_symbols(symbols))
+    if not wanted:
+        return {}
+    frame = index.copy()
+    for column in ("symbol", "name"):
+        if column not in frame.columns:
+            return {}
+    frame["symbol"] = frame["symbol"].map(normalize_symbol)
+    frame["name"] = frame["name"].fillna("").astype(str).str.strip()
+    frame = frame.loc[frame["symbol"].isin(wanted) & frame["name"].ne("")]
+    return dict(zip(frame["symbol"], frame["name"], strict=False))
+
+
+def _tdx_top_etf_options(index: pd.DataFrame, *, limit: int = 10) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    if index.empty:
+        return pd.DataFrame(columns=columns)
+    result = index.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = "" if column != "amount" else 0.0
+    result["symbol"] = result["symbol"].map(normalize_symbol)
+    result["name"] = result["name"].fillna("").astype(str).str.strip()
+    result["category"] = result["category"].fillna("").astype(str).str.strip()
+    result["amount"] = pd.to_numeric(result["amount"], errors="coerce").fillna(0.0)
+    result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
+    if result.empty:
+        return pd.DataFrame(columns=columns)
+    result["_theme"] = result["category"].where(result["category"].ne(""), result["symbol"])
+    result = (
+        result.sort_values(["amount", "symbol"], ascending=[False, True])
+        .drop_duplicates("_theme", keep="first")
+        .head(max(0, int(limit)))
+    )
+    return result[columns].reset_index(drop=True)
+
+
+def _tdx_etf_option_formatter(options: pd.DataFrame) -> Callable[[str], str]:
+    frame = _tdx_top_etf_options(options, limit=len(options))
+    names = dict(zip(frame["symbol"], frame["name"], strict=False))
+
+    def format_option(symbol: str) -> str:
+        normalized = normalize_symbol(symbol)
+        name = str(names.get(normalized, "") or "").strip()
+        return f"{name}（{normalized}）" if name else normalized
+
+    return format_option
 
 
 def _load_target_bars_for_quick_window(
@@ -2325,14 +2460,112 @@ def _full_daily_available_count(checked: pd.DataFrame, *, incremental_latest_onl
     return int((checked["status"] == "available").sum())
 
 
+def _render_tdx_download_symbol_selector(symbol_table: pd.DataFrame) -> list[str]:
+    selected: list[str] = []
+    normalized = _normalize_tdx_symbol_table(symbol_table)
+    for category in TDX_DOWNLOAD_CATEGORY_ORDER:
+        category_frame = normalized.loc[normalized["category"] == category]
+        if category_frame.empty:
+            continue
+        label = TDX_DOWNLOAD_CATEGORY_LABELS.get(category, category)
+        symbols = category_frame["symbol"].tolist()
+        with st.expander(f"{label}列表（{len(symbols):,}）", expanded=False):
+            include_all = st.checkbox(f"下载全部{label}", value=True, key=f"full_daily_tdx_include_{category}")
+            st.dataframe(
+                _format_tdx_download_symbol_table(category_frame),
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 38 * (len(category_frame) + 1)),
+            )
+            if include_all:
+                selected.extend(symbols)
+                st.caption(f"已选择全部 {len(symbols):,} 个{label}。")
+            else:
+                selected.extend(
+                    st.multiselect(
+                        f"选择{label}",
+                        symbols,
+                        default=[],
+                        key=f"full_daily_tdx_selected_{category}",
+                        format_func=_tdx_symbol_option_formatter(category_frame),
+                    )
+                )
+    selected = unique_symbols(selected)
+    counts = _tdx_download_selection_counts(normalized, selected)
+    st.caption(
+        "当前已选："
+        f"个股 {counts['stock']:,} 个，ETF {counts['etf']:,} 个，"
+        f"指数 / 行业概念 {counts['index']:,} 个，其他 {counts['other']:,} 个。"
+    )
+    return selected
+
+
+def _normalize_tdx_symbol_table(symbol_table: pd.DataFrame) -> pd.DataFrame:
+    if symbol_table.empty:
+        return pd.DataFrame(columns=["symbol", "name", "category"])
+    result = symbol_table.copy()
+    for column in ("symbol", "name", "category"):
+        if column not in result.columns:
+            result[column] = ""
+    result = result[["symbol", "name", "category"]]
+    result["symbol"] = result["symbol"].map(normalize_symbol)
+    result["name"] = result["name"].fillna("").astype(str)
+    result["category"] = result["category"].fillna("other").astype(str)
+    return result.drop_duplicates("symbol").reset_index(drop=True)
+
+
+def _format_tdx_download_symbol_table(symbol_table: pd.DataFrame) -> pd.DataFrame:
+    frame = _normalize_tdx_symbol_table(symbol_table)
+    if frame.empty:
+        return pd.DataFrame(columns=["代码", "名称", "类别"])
+    formatted = frame.rename(columns={"symbol": "代码", "name": "名称", "category": "类别"})
+    formatted["类别"] = formatted["类别"].map(lambda value: TDX_DOWNLOAD_CATEGORY_LABELS.get(str(value), str(value)))
+    return formatted[["代码", "名称", "类别"]]
+
+
+def _tdx_symbol_option_formatter(symbol_table: pd.DataFrame) -> Callable[[str], str]:
+    frame = _normalize_tdx_symbol_table(symbol_table)
+    name_by_symbol = dict(zip(frame["symbol"], frame["name"], strict=False))
+
+    def format_option(symbol: str) -> str:
+        name = str(name_by_symbol.get(symbol, "") or "").strip()
+        return f"{symbol} {name}" if name else symbol
+
+    return format_option
+
+
+def _tdx_download_selection_counts(symbol_table: pd.DataFrame, selected_symbols: list[str] | tuple[str, ...]) -> dict[str, int]:
+    frame = _normalize_tdx_symbol_table(symbol_table)
+    selected = set(unique_symbols(selected_symbols))
+    counts = dict.fromkeys(TDX_DOWNLOAD_CATEGORY_ORDER, 0)
+    if frame.empty or not selected:
+        return counts
+    subset = frame.loc[frame["symbol"].isin(selected)]
+    raw_counts = subset["category"].value_counts().to_dict()
+    for category in TDX_DOWNLOAD_CATEGORY_ORDER:
+        counts[category] = int(raw_counts.get(category, 0))
+    return counts
+
+
+def _tdx_category_symbols(symbol_table: pd.DataFrame, category: str, selected_symbols: list[str] | tuple[str, ...]) -> list[str]:
+    frame = _normalize_tdx_symbol_table(symbol_table)
+    selected = set(unique_symbols(selected_symbols))
+    if frame.empty or not selected:
+        return []
+    subset = frame.loc[(frame["category"] == category) & frame["symbol"].isin(selected)]
+    return subset["symbol"].tolist()
+
+
 def _full_daily_download_universe(
     stock_symbols: list[str] | tuple[str, ...],
     *,
     include_indexes: bool,
     extra_symbols: str,
+    etf_symbols: list[str] | tuple[str, ...] = (),
+    index_symbols: list[str] | tuple[str, ...] = (),
 ) -> list[str]:
     return symbols_with_analysis_indexes(
-        stock_symbols,
+        [*stock_symbols, *etf_symbols, *index_symbols],
         include_indexes=include_indexes,
         extra_symbols=_split_symbol_text(extra_symbols),
     )
@@ -3224,12 +3457,13 @@ def _centered(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
     )
 
 
-def _review_kline_chart(result: ReviewResult) -> go.Figure:
+def _review_kline_chart(result: ReviewResult, stock_names: dict[str, str] | None = None) -> go.Figure:
     fig = go.Figure()
     window = result.window.sort_values("date")
     if window.empty:
         fig.update_layout(title="目标K线与主要波段")
         return fig
+    label = _stock_chart_label(result.symbol, stock_names, is_target=True)
     x_values = pd.to_datetime(window["date"]).dt.strftime("%Y-%m-%d")
     fig.add_trace(
         go.Candlestick(
@@ -3238,7 +3472,7 @@ def _review_kline_chart(result: ReviewResult) -> go.Figure:
             high=window["high"],
             low=window["low"],
             close=window["close"],
-            name=result.symbol,
+            name=label,
             increasing_line_color="#16a34a",
             decreasing_line_color="#dc2626",
         )
