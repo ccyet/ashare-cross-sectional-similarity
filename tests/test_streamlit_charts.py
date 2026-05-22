@@ -58,14 +58,15 @@ from streamlit_app import (
     _review_target_symbols,
     _run_download_job_step,
     _set_download_job_status,
+    _akshare_etf_index_from_table,
+    _etf_name_map_from_index,
+    _etf_option_formatter,
     _stock_name_map_from_table,
     _symbol_data_hint,
     _symbols_requiring_download,
     _tdx_directory_default,
     _tdx_download_selection_counts,
-    _tdx_etf_name_map_from_index,
-    _tdx_etf_option_formatter,
-    _tdx_top_etf_options,
+    _top_etf_options,
 )
 
 
@@ -805,22 +806,26 @@ def test_stock_name_map_from_akshare_code_name_table() -> None:
     assert names == {"603186.SH": "华正新材"}
 
 
-def test_tdx_etf_name_map_from_index_resolves_review_target_etf() -> None:
-    names = _tdx_etf_name_map_from_index(
+def test_akshare_etf_index_from_table_resolves_review_target_etf() -> None:
+    index = _akshare_etf_index_from_table(
         pd.DataFrame(
-            [
-                {"symbol": "512480.SH", "name": "半导体ETF", "amount": 10_000_000, "category": "半导体"},
-                {"symbol": "510300.SH", "name": "沪深300ETF", "amount": 20_000_000, "category": "沪深300"},
-            ]
+            {
+                "代码": ["512480", "510300"],
+                "名称": ["半导体ETF", "沪深300ETF"],
+                "成交额": [10_000_000, 20_000_000],
+            }
         ),
+    )
+    names = _etf_name_map_from_index(
+        index,
         ("512480.SH", "601888.SH"),
     )
 
     assert names == {"512480.SH": "半导体ETF"}
 
 
-def test_tdx_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:
-    options = _tdx_top_etf_options(
+def test_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:
+    options = _top_etf_options(
         pd.DataFrame(
             [
                 {"symbol": "512480.SH", "name": "半导体ETF", "amount": 1_000_000, "category": "半导体"},
@@ -833,8 +838,26 @@ def test_tdx_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> 
     )
 
     assert options["symbol"].tolist() == ["159995.SZ", "510300.SH"]
-    formatter = _tdx_etf_option_formatter(options)
+    formatter = _etf_option_formatter(options)
     assert formatter("159995.SZ") == "半导体芯片ETF（159995.SZ）"
+
+
+def test_akshare_top_etf_options_merges_same_theme_with_issuer_suffix() -> None:
+    options = _top_etf_options(
+        _akshare_etf_index_from_table(
+            pd.DataFrame(
+                {
+                    "代码": ["512480", "159995", "510300"],
+                    "名称": ["半导体ETF国联安", "半导体ETF易方达", "沪深300ETF华泰柏瑞"],
+                    "成交额": [1_000_000, 5_000_000, 4_000_000],
+                }
+            )
+        ),
+        limit=10,
+    )
+
+    assert "159995.SZ" in options["symbol"].tolist()
+    assert "512480.SH" not in options["symbol"].tolist()
 
 
 def test_format_results_formats_feature_numbers_for_display() -> None:

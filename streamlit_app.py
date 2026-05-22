@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from datetime import date
 from fnmatch import fnmatch
 from html import escape
@@ -57,7 +58,6 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     get_algorithm_status,
 )
 from ashare_cross_section_similarity.tdx_source import (
-    fetch_tdx_etf_index,
     fetch_tdx_kline_symbol_table,
     search_tdx_etf_index,
 )
@@ -88,6 +88,35 @@ TDX_DOWNLOAD_CATEGORY_LABELS = {
     "other": "其他",
 }
 TDX_DOWNLOAD_CATEGORY_ORDER = ("stock", "etf", "index", "other")
+ETF_ISSUER_SUFFIXES = (
+    "华夏",
+    "易方达",
+    "华泰柏瑞",
+    "国联安",
+    "国泰",
+    "华宝",
+    "广发",
+    "南方",
+    "嘉实",
+    "富国",
+    "博时",
+    "汇添富",
+    "鹏华",
+    "招商",
+    "天弘",
+    "银华",
+    "建信",
+    "平安",
+    "工银瑞信",
+    "华安",
+    "摩根",
+    "永赢",
+    "海富通",
+    "景顺长城",
+    "国投瑞银",
+    "西藏东财",
+    "鹏扬",
+)
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
@@ -1011,6 +1040,13 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     )
 
     index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
+    etf_reload_token_key = "review_akshare_etf_reload_token"
+    st.session_state.setdefault(etf_reload_token_key, 0)
+    etf_meta_col1, etf_meta_col2 = st.columns([1, 3])
+    if etf_meta_col1.button("重新加载 ETF 名单", key="review_reload_akshare_etf_list"):
+        st.session_state[etf_reload_token_key] = int(st.session_state.get(etf_reload_token_key, 0)) + 1
+    etf_meta_col2.caption("ETF 名称和候选列表来自 AkShare；K线读取、下载口径不变。")
+    etf_reload_token = int(st.session_state.get(etf_reload_token_key, 0))
     index_symbols: list[str] = []
     if index_enabled:
         index_col1, index_col2 = st.columns([2, 1])
@@ -1028,7 +1064,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     selected_popular_etfs: list[str] = []
     auto_proxy_symbols: list[str] = []
     auto_proxy_names: dict[str, str] = {}
-    tdx_etf_index = pd.DataFrame()
+    etf_index = pd.DataFrame()
     industry_name = ""
     concept_name = ""
     sector_min_coverage = 0.5
@@ -1045,34 +1081,33 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             step=0.05,
             key="review_sector_min_coverage",
         )
-        if download_engine == "tdx":
-            try:
-                tdx_etf_index = _cached_tdx_etf_index(provider)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"TDX ETF 索引读取失败：{exc}")
-            else:
-                popular_etfs = _tdx_top_etf_options(tdx_etf_index, limit=10)
-                if not popular_etfs.empty:
-                    selected_popular_etfs = st.multiselect(
-                        "主要ETF",
-                        popular_etfs["symbol"].tolist(),
-                        default=[],
-                        key="review_popular_etfs",
-                        format_func=_tdx_etf_option_formatter(popular_etfs),
-                        help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
-                    )
-                auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_tdx_etf_proxies_from_index(
-                    tdx_etf_index,
-                    industry_name=industry_name,
-                    concept_name=concept_name,
+        try:
+            etf_index = _cached_akshare_etf_index(etf_reload_token)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"AkShare ETF 名单读取失败：{exc}")
+        else:
+            popular_etfs = _top_etf_options(etf_index, limit=10)
+            if not popular_etfs.empty:
+                selected_popular_etfs = st.multiselect(
+                    "主要ETF",
+                    popular_etfs["symbol"].tolist(),
+                    default=[],
+                    key="review_popular_etfs",
+                    format_func=_etf_option_formatter(popular_etfs),
+                    help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
                 )
-                if auto_warning:
-                    st.warning(auto_warning)
-                elif not auto_matches.empty:
-                    st.caption("TDX 自动匹配 ETF（同一关键词保留成交额最大）")
-                    st.dataframe(_centered(_format_tdx_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
-                else:
-                    st.caption("TDX ETF 自动匹配：输入行业或概念名称后，会从本地 TDX ETF 清单中选择成交额最大的同类 ETF。")
+            auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_etf_proxies_from_index(
+                etf_index,
+                industry_name=industry_name,
+                concept_name=concept_name,
+            )
+            if auto_warning:
+                st.warning(auto_warning)
+            elif not auto_matches.empty:
+                st.caption("AkShare 自动匹配 ETF（同一关键词保留成交额最大）")
+                st.dataframe(_centered(_format_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
+            else:
+                st.caption("ETF 自动匹配：输入行业或概念名称后，会从 AkShare ETF 名单中选择成交额最大的同类 ETF。")
     combined_proxy_symbols = unique_symbols([*proxy_symbols, *selected_popular_etfs, *auto_proxy_symbols])
 
     if not st.button("生成走势复盘", type="primary", key="review_run"):
@@ -1086,12 +1121,12 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         st.warning(target_error)
     review_name_symbols = unique_symbols([*target_symbols, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
     review_extra_names = dict(auto_proxy_names)
-    if download_engine == "tdx":
+    if _has_etf_like_symbol(review_name_symbols) or sector_enabled:
         try:
-            name_index = tdx_etf_index if not tdx_etf_index.empty else _cached_tdx_etf_index(provider)
-            review_extra_names.update(_tdx_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
+            name_index = etf_index if not etf_index.empty else _cached_akshare_etf_index(etf_reload_token)
+            review_extra_names.update(_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
         except Exception as exc:  # noqa: BLE001
-            st.caption(f"TDX ETF 名称读取失败：{exc}")
+            st.caption(f"AkShare ETF 名称读取失败：{exc}")
     if is_multi_review:
         _render_multi_review_output(
             data_root=data_root,
@@ -1834,35 +1869,54 @@ def _cached_review_constituents(kind: str, name: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_tdx_etf_index(provider: str) -> pd.DataFrame:
-    return fetch_tdx_etf_index(tqcenter_path=provider)
+def _cached_akshare_etf_index(refresh_token: int = 0) -> pd.DataFrame:
+    import akshare as ak
+
+    _ = refresh_token
+    return _akshare_etf_index_from_table(ak.fund_etf_spot_em())
 
 
-def _review_auto_tdx_etf_proxies(
-    provider: str,
-    *,
-    industry_name: str,
-    concept_name: str,
-) -> tuple[list[str], dict[str, str], pd.DataFrame, str]:
-    try:
-        index = _cached_tdx_etf_index(provider)
-    except Exception as exc:  # noqa: BLE001
-        return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), f"TDX ETF 索引读取失败：{exc}"
-    return _review_auto_tdx_etf_proxies_from_index(index, industry_name=industry_name, concept_name=concept_name)
+def _akshare_etf_index_from_table(table: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    if table.empty:
+        return pd.DataFrame(columns=columns)
+    code_column = next((column for column in ("代码", "基金代码", "symbol", "code", "证券代码") if column in table.columns), "")
+    name_column = next((column for column in ("名称", "基金简称", "name", "简称", "证券简称") if column in table.columns), "")
+    amount_column = next((column for column in ("成交额", "amount", "成交金额", "成交额(元)") if column in table.columns), "")
+    if not code_column or not name_column:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, object]] = []
+    for _, row in table.iterrows():
+        name = str(row.get(name_column, "") or "").strip()
+        symbol = normalize_symbol(row.get(code_column))
+        if not symbol or not name:
+            continue
+        amount = pd.to_numeric(pd.Series([row.get(amount_column, 0)]), errors="coerce").iloc[0] if amount_column else 0
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "amount": 0.0 if pd.isna(amount) else float(amount),
+                "category": _etf_category_key(name),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
 
 
-def _review_auto_tdx_etf_proxies_from_index(
+def _review_auto_etf_proxies_from_index(
     index: pd.DataFrame,
     *,
     industry_name: str,
     concept_name: str,
 ) -> tuple[list[str], dict[str, str], pd.DataFrame, str]:
-    queries = _tdx_etf_queries(industry_name, concept_name)
+    queries = _etf_queries(industry_name, concept_name)
     if not queries:
         return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), ""
     matches = search_tdx_etf_index(index, queries)
     if matches.empty:
-        return [], {}, matches, f"TDX ETF 索引没有匹配到：{', '.join(queries)}。"
+        return [], {}, matches, f"ETF 名单没有匹配到：{', '.join(queries)}。"
     symbols = unique_symbols(matches["symbol"].dropna().astype(str).tolist())
     names = {
         normalize_symbol(row["symbol"]): str(row["name"]).strip()
@@ -1872,11 +1926,35 @@ def _review_auto_tdx_etf_proxies_from_index(
     return symbols, names, matches, ""
 
 
-def _tdx_etf_queries(industry_name: str, concept_name: str) -> list[str]:
+def _etf_queries(industry_name: str, concept_name: str) -> list[str]:
     return [text for text in dict.fromkeys([str(industry_name or "").strip(), str(concept_name or "").strip()]) if text]
 
 
-def _tdx_etf_name_map_from_index(index: pd.DataFrame, symbols: tuple[str, ...] | list[str]) -> dict[str, str]:
+def _etf_category_key(name: object) -> str:
+    text = str(name or "").strip().upper()
+    text = re.sub(r"[\s　（）()【】\[\]：:·•,，、;；/\\-]+", "", text)
+    for token in [
+        "交易型开放式指数证券投资基金",
+        "交易型开放式",
+        "指数证券投资基金",
+        "证券投资基金",
+        "发起式联接",
+        "联接",
+        "增强",
+        "基金",
+        "ETF",
+        "LOF",
+    ]:
+        text = text.replace(token.upper(), "")
+    for suffix in ETF_ISSUER_SUFFIXES:
+        normalized_suffix = suffix.upper()
+        if text.endswith(normalized_suffix):
+            text = text[: -len(normalized_suffix)]
+            break
+    return text.strip("-_ ")
+
+
+def _etf_name_map_from_index(index: pd.DataFrame, symbols: tuple[str, ...] | list[str]) -> dict[str, str]:
     if index.empty:
         return {}
     wanted = set(unique_symbols(symbols))
@@ -1892,7 +1970,7 @@ def _tdx_etf_name_map_from_index(index: pd.DataFrame, symbols: tuple[str, ...] |
     return dict(zip(frame["symbol"], frame["name"], strict=False))
 
 
-def _tdx_top_etf_options(index: pd.DataFrame, *, limit: int = 10) -> pd.DataFrame:
+def _top_etf_options(index: pd.DataFrame, *, limit: int = 10) -> pd.DataFrame:
     columns = ["symbol", "name", "amount", "category"]
     if index.empty:
         return pd.DataFrame(columns=columns)
@@ -1916,8 +1994,8 @@ def _tdx_top_etf_options(index: pd.DataFrame, *, limit: int = 10) -> pd.DataFram
     return result[columns].reset_index(drop=True)
 
 
-def _tdx_etf_option_formatter(options: pd.DataFrame) -> Callable[[str], str]:
-    frame = _tdx_top_etf_options(options, limit=len(options))
+def _etf_option_formatter(options: pd.DataFrame) -> Callable[[str], str]:
+    frame = _top_etf_options(options, limit=len(options))
     names = dict(zip(frame["symbol"], frame["name"], strict=False))
 
     def format_option(symbol: str) -> str:
@@ -1926,6 +2004,14 @@ def _tdx_etf_option_formatter(options: pd.DataFrame) -> Callable[[str], str]:
         return f"{name}（{normalized}）" if name else normalized
 
     return format_option
+
+
+def _has_etf_like_symbol(symbols: list[str] | tuple[str, ...]) -> bool:
+    for symbol in unique_symbols(symbols):
+        code = symbol.split(".", 1)[0]
+        if code.startswith(("5", "15", "16", "18")):
+            return True
+    return False
 
 
 def _load_target_bars_for_quick_window(
@@ -2960,7 +3046,7 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
     return result[[column for column in columns if column in result.columns]]
 
 
-def _format_tdx_etf_matches(frame: pd.DataFrame) -> pd.DataFrame:
+def _format_etf_matches(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=["关键词", "ETF代码", "ETF名称", "成交额", "同类键"])
     result = frame.copy()
