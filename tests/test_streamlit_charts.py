@@ -6,6 +6,7 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.history import HistorySearchResult
+from ashare_cross_section_similarity.review_ai import ReviewAIResult
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
     _cross_section_bucket_summary,
@@ -49,6 +50,7 @@ from streamlit_app import (
     _pick_directory_with_system_dialog,
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
+    _review_ai_display_sections,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
@@ -81,6 +83,21 @@ def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_pat
     assert _picker_initial_directory(folder, tmp_path) == str(folder)
     assert _picker_initial_directory(file_path, tmp_path) == str(folder)
     assert _picker_initial_directory(tmp_path / "missing" / "universe.csv", folder) == str(tmp_path)
+
+
+def test_review_ai_display_sections_returns_review_analysis_critique() -> None:
+    result = ReviewAIResult(
+        review="复盘",
+        analysis="分析",
+        critique="锐评",
+        evidence_refs=("segments[0]",),
+        disclaimer="仅供研究",
+        raw="{}",
+    )
+
+    sections = _review_ai_display_sections(result)
+
+    assert sections == [("复盘", "复盘"), ("分析", "分析"), ("锐评", "锐评")]
 
 
 def test_picker_path_text_makes_empty_and_existing_selection_clear() -> None:

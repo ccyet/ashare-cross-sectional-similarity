@@ -25,6 +25,12 @@ from ashare_cross_section_similarity.data import (
     read_price_data_file,
     resolve_timeframe_root,
 )
+from ashare_cross_section_similarity.deepseek_client import (
+    DEFAULT_DEEPSEEK_MODEL,
+    DeepSeekAPIError,
+    DeepSeekClient,
+    DeepSeekConfig,
+)
 from ashare_cross_section_similarity.data_manager import (
     KLINE_FILE_PATTERNS,
     migrate_kline_data,
@@ -44,6 +50,13 @@ from ashare_cross_section_similarity.review import (
     render_multi_review_text,
     render_review_text,
     render_video_script_cards_html,
+)
+from ashare_cross_section_similarity.review_ai import (
+    ReviewAIFormatError,
+    ReviewAIResult,
+    build_review_ai_evidence,
+    build_review_ai_messages,
+    parse_review_ai_result,
 )
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
@@ -971,6 +984,80 @@ def _render_cross_section_tab(
     )
 
 
+def _review_ai_display_sections(result: ReviewAIResult) -> list[tuple[str, str]]:
+    return [("复盘", result.review), ("分析", result.analysis), ("锐评", result.critique)]
+
+
+def _render_review_ai_result(result: ReviewAIResult) -> None:
+    for column, (title, body) in zip(st.columns(3), _review_ai_display_sections(result)):
+        with column:
+            st.markdown(f"**{title}**")
+            st.markdown(body)
+    if result.evidence_refs:
+        st.caption("证据引用：" + "、".join(result.evidence_refs))
+    st.caption(result.disclaimer)
+
+
+def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, result_key: str) -> None:
+    ai_col1, ai_col2, ai_col3 = st.columns([1.2, 1.2, 1])
+    deepseek_model = ai_col1.selectbox(
+        "模型",
+        [DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"],
+        index=0,
+        key=f"{key_prefix}_model",
+    )
+    deepseek_key = ai_col2.text_input(
+        "DeepSeek API Key",
+        value="",
+        type="password",
+        key=f"{key_prefix}_api_key",
+        help="留空时读取环境变量 DEEPSEEK_API_KEY。",
+    )
+    deepseek_thinking = ai_col3.checkbox("启用 Thinking", value=True, key=f"{key_prefix}_thinking")
+    with st.expander("查看发送给 DeepSeek 的证据摘要"):
+        st.json(evidence)
+    if st.button("生成 DeepSeek 复盘/分析/锐评", type="secondary", key=f"{key_prefix}_run"):
+        try:
+            client = DeepSeekClient(
+                DeepSeekConfig(
+                    api_key=deepseek_key,
+                    model=str(deepseek_model),
+                    thinking=bool(deepseek_thinking),
+                )
+            )
+            ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)))
+        except (DeepSeekAPIError, ReviewAIFormatError) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state[result_key] = ai_result
+    if st.session_state.get(result_key):
+        _render_review_ai_result(st.session_state[result_key])
+
+
+def _review_ai_frame_records(frame: pd.DataFrame) -> list[dict[str, object]]:
+    if frame is None or frame.empty:
+        return []
+    return [_review_ai_json_safe_mapping(row) for row in frame.to_dict(orient="records")]
+
+
+def _review_ai_json_safe_mapping(values: dict[object, object]) -> dict[str, object]:
+    return {str(key): _review_ai_json_safe_value(value) for key, value in values.items()}
+
+
+def _review_ai_json_safe_value(value: object) -> object:
+    if isinstance(value, dict):
+        return _review_ai_json_safe_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return [_review_ai_json_safe_value(item) for item in value]
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    if hasattr(value, "item"):
+        value = value.item()
+    if pd.isna(value):
+        return None
+    return value
+
+
 def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider: str, download_engine: str) -> None:
     st.subheader("走势复盘")
     st.caption("基于本地K线识别主要上涨、回撤、下跌和反弹段，生成可复验的数据化自然语言复盘。")
@@ -1229,7 +1316,16 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     for warning in all_warnings:
         st.warning(warning)
 
-    st.markdown("**4. 波段与对比明细**")
+    st.markdown("**4. DeepSeek V4 复盘 / 分析 / 锐评**")
+    evidence = build_review_ai_evidence(
+        result,
+        comparison_frame,
+        stock_names=stock_names,
+        warnings=all_warnings,
+    )
+    _render_review_ai_panel(evidence, key_prefix="review_ai", result_key="review_ai_result")
+
+    st.markdown("**5. 波段与对比明细**")
     detail_col1, detail_col2 = st.columns(2)
     with detail_col1:
         st.caption("主要波段")
@@ -1478,7 +1574,18 @@ def _render_multi_review_output(
     for warning in dict.fromkeys(all_warnings):
         st.warning(warning)
 
-    st.markdown("**4. 对比与波段明细**")
+    st.markdown("**4. DeepSeek V4 复盘 / 分析 / 锐评**")
+    multi_evidence = {
+        "mode": "multi_stock",
+        "targets": [result.symbol for result in valid_results],
+        "rankings": _review_ai_frame_records(ranking_frame),
+        "comparisons": _review_ai_frame_records(comparison_frame),
+        "warnings": list(dict.fromkeys(all_warnings)),
+        "limits": ["只基于本地行情和对比统计，不读取新闻或基本面。"],
+    }
+    _render_review_ai_panel(multi_evidence, key_prefix="multi_review_ai", result_key="multi_review_ai_result")
+
+    st.markdown("**5. 对比与波段明细**")
     detail_col1, detail_col2 = st.columns(2)
     with detail_col1:
         st.caption("个股主要波段")
