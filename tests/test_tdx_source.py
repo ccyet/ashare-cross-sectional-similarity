@@ -92,6 +92,48 @@ class _FakeTqStockListRequiresInitialize(_FakeTqStockList):
         return self.payload
 
 
+class _FakeTqOfficialMarketCodes:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object]] = []
+        self.initialize_calls: list[str] = []
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+
+    def get_stock_list(self, *args: object, **kwargs: object) -> object:
+        market = kwargs.get("market", args[0] if args else "")
+        list_type = kwargs.get("list_type", "")
+        self.calls.append((market, list_type))
+        if isinstance(market, int):
+            raise AttributeError("'int' object has no attribute 'encode'")
+        if market == "5":
+            return ["000001.SZ", "600519.SH"]
+        if market == "91" and list_type == "1":
+            return pd.DataFrame(
+                {
+                    "code": ["512480"],
+                    "market": ["SH"],
+                    "name": ["半导体ETF"],
+                }
+            )
+        return []
+
+
+class _FakeTqOfficialMarketCodesRequiresInitialize(_FakeTqOfficialMarketCodes):
+    def __init__(self) -> None:
+        super().__init__()
+        self.initialized = False
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+        self.initialized = True
+
+    def get_stock_list(self, *args: object, **kwargs: object) -> object:
+        if not self.initialized:
+            raise RuntimeError("serverreturnnone")
+        return super().get_stock_list(*args, **kwargs)
+
+
 def _reset_tq_import_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT", None)
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT_IMPORT_KEY", None)
@@ -399,6 +441,33 @@ def test_fetch_tdx_kline_symbols_collects_market_specific_lists() -> None:
     assert "399006.SZ" in symbols
     assert "159915.SZ" in symbols
     assert "830799.BJ" in symbols
+
+
+def test_fetch_tdx_kline_symbol_table_uses_tdx_string_market_codes() -> None:
+    fake = _FakeTqOfficialMarketCodes()
+
+    table = fetch_tdx_kline_symbol_table(tq_client=fake)
+
+    assert table.to_dict("records") == [
+        {"symbol": "000001.SZ", "name": "", "category": "stock"},
+        {"symbol": "600519.SH", "name": "", "category": "stock"},
+        {"symbol": "512480.SH", "name": "半导体ETF", "category": "etf"},
+    ]
+    assert all(not isinstance(market, int) for market, _list_type in fake.calls)
+    assert ("5", "1") in fake.calls
+    assert ("91", "1") in fake.calls
+
+
+def test_fetch_tdx_kline_symbol_table_initializes_real_tdx_before_reading_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeTqOfficialMarketCodesRequiresInitialize()
+    monkeypatch.setattr(tdx_source, "_INITIALIZED", False)
+    monkeypatch.setattr(tdx_source, "_INITIALIZED_CLIENT_ID", None)
+    monkeypatch.setattr(tdx_source, "_load_tq", lambda _path="": fake)
+
+    table = fetch_tdx_kline_symbol_table(tqcenter_path=r"F:\new_tdx64\PYPlugins")
+
+    assert fake.initialize_calls
+    assert table["symbol"].tolist() == ["000001.SZ", "600519.SH", "512480.SH"]
 
 
 def test_candidate_import_paths_expands_windows_pyplugins_path() -> None:

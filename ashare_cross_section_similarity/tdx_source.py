@@ -42,7 +42,7 @@ STOCK_LIST_METHODS = (
     "get_instrument_list",
     "get_instrument_detail",
 )
-STOCK_LIST_MARKETS = ("SH", "SZ", "BJ", 1, 0, 2)
+STOCK_LIST_MARKETS = ("5", "91", "SH", "SZ", "BJ", "1", "0", "2")
 A_SHARE_STOCK_PREFIXES = {
     "SH": ("600", "601", "603", "605", "688", "689"),
     "SZ": ("000", "001", "002", "003", "300", "301"),
@@ -119,6 +119,8 @@ def fetch_tdx_bars(
 
 def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
     tq = tq_client or _load_tq(tqcenter_path)
+    if tq_client is None:
+        _ensure_initialized(tq)
 
     symbols, errors = _collect_tdx_stock_symbols(tq)
     if symbols:
@@ -173,6 +175,8 @@ def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 
 def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
+    if tq_client is None:
+        _ensure_initialized(tq)
 
     table, errors = _collect_tdx_kline_symbol_table(tq)
     if not table.empty:
@@ -221,6 +225,8 @@ def _collect_tdx_kline_symbol_table(tq: Any) -> tuple[pd.DataFrame, list[str]]:
 
 def fetch_tdx_etf_index(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
+    if tq_client is None:
+        _ensure_initialized(tq)
 
     table, errors = _collect_tdx_etf_index(tq)
     if not table.empty:
@@ -389,7 +395,9 @@ def _load_tq(tqcenter_path: str = "") -> Any:
 
 
 def _tdx_errors_need_initialize(errors: list[str]) -> bool:
-    return any("TQ数据接口初始化失败" in error or "初始化失败" in error for error in errors)
+    return any(
+        "TQ数据接口初始化失败" in error or "初始化失败" in error or "serverreturnnone" in error for error in errors
+    )
 
 
 def _remove_tqcenter_import_paths() -> None:
@@ -464,8 +472,9 @@ def _normalize_tqcenter_path_text(text: str) -> str:
 def _stock_list_call_variants() -> list[tuple[str, tuple[object, ...], dict[str, object]]]:
     variants: list[tuple[str, tuple[object, ...], dict[str, object]]] = [("()", (), {})]
     for market in STOCK_LIST_MARKETS:
-        variants.append((f"({market!r})", (market,), {}))
+        variants.append((f"(market={market!r}, list_type='1')", (), {"market": market, "list_type": "1"}))
         variants.append((f"(market={market!r})", (), {"market": market}))
+        variants.append((f"({market!r})", (market,), {}))
     return variants
 
 
