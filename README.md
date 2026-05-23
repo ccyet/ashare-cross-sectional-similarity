@@ -405,6 +405,29 @@ streamlit run streamlit_app.py
 10. 运行搜索。
 11. 查看结果表、统计计量、走势图和 K 线图；横截面工作台会展示目标与相似标的收盘价折线图、单票 K 线聚合图，并可下载 CSV。
 
+## DeepSeek V4 复盘、分析和锐评
+
+页面里的 `走势复盘` 使用本地 K 线先生成可复验的确定性复盘；配置 DeepSeek 后，可继续生成大模型版 `复盘 / 分析 / 锐评`。
+
+```bash
+export DEEPSEEK_API_KEY=your_api_key
+streamlit run streamlit_app.py
+```
+
+CLI 可只生成证据包，也可调用 DeepSeek：
+
+```bash
+python -m ashare_cross_section_similarity review \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --target-symbol 000852.SH \
+  --start 2026-01-01 \
+  --end 2026-05-15 \
+  --model deepseek-v4-flash \
+  --output outputs/review.json
+```
+
+未设置 `DEEPSEEK_API_KEY` 时，程序会明确报错，不会伪造大模型结果。
+
 ## 9. Docker 服务
 
 本分支提供 Docker 服务化运行方式，默认把本机 `/Users/a1234/Desktop/trend-backtest/data` 挂载到容器内 `/data`，并把行情根目录设为 `/data/market/daily`。
