@@ -154,8 +154,37 @@ DATE_INPUT_MIN = date(1990, 1, 1)
 DATE_INPUT_MAX = date(2100, 12, 31)
 
 
+def _app_theme_css() -> str:
+    return """
+<style>
+:root {
+  --ashare-text: #111827;
+  --ashare-muted: #6b7280;
+  --ashare-line: #e5e7eb;
+  --ashare-blue: #2563eb;
+  --ashare-bg: #f8fafc;
+}
+.stApp {
+  background: var(--ashare-bg);
+  color: var(--ashare-text);
+}
+div[data-testid="stMetric"] {
+  background: #ffffff;
+  border: 1px solid var(--ashare-line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.stButton > button[kind="primary"] {
+  background: var(--ashare-blue);
+  border-color: var(--ashare-blue);
+}
+</style>
+"""
+
+
 def main() -> None:
     st.set_page_config(page_title="A股相似阶段搜集", layout="wide")
+    st.markdown(_app_theme_css(), unsafe_allow_html=True)
     st.title("A股相似阶段搜集")
     st.caption("保留同一标的历史时序相似阶段搜索，并新增同一时间内的横截面相似标的搜索。")
     with st.sidebar:

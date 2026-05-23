@@ -9,6 +9,7 @@ from ashare_cross_section_similarity.history import HistorySearchResult
 from ashare_cross_section_similarity.review_ai import ReviewAIResult
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
+    _app_theme_css,
     _cross_section_bucket_summary,
     _cross_section_forward_summary,
     _cross_section_load_end,
@@ -74,6 +75,14 @@ def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
             "amount": [1] * len(closes),
         }
     )
+
+
+def test_app_theme_css_uses_workbench_palette() -> None:
+    css = _app_theme_css()
+
+    assert "#2563eb" in css
+    assert "#111827" in css
+    assert "linear-gradient" not in css
 
 
 def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_path: Path) -> None:
