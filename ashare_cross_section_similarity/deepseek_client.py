@@ -39,10 +39,14 @@ class DeepSeekConfig:
 Transport = Callable[[Request, float], object]
 
 
+def _default_transport(request: Request, timeout: float) -> object:
+    return urlopen(request, timeout=timeout)
+
+
 class DeepSeekClient:
     def __init__(self, config: DeepSeekConfig | None = None, *, transport: Transport | None = None) -> None:
         self.config = config or DeepSeekConfig()
-        self._transport = transport or urlopen
+        self._transport = transport or _default_transport
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         payload = {
