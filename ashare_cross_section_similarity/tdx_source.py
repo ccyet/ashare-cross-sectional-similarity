@@ -42,14 +42,19 @@ STOCK_LIST_METHODS = (
     "get_instrument_list",
     "get_instrument_detail",
 )
-STOCK_LIST_MARKETS = ("5", "91", "SH", "SZ", "BJ", "1", "0", "2")
+TDX_STOCK_LIST_MARKETS = ("5",)
+TDX_ETF_LIST_MARKETS = ("31",)
+TDX_BLOCK_INDEX_LIST_MARKETS = ("10",)
+TDX_LEGACY_LIST_MARKETS = ("SH", "SZ", "BJ", "1", "0", "2")
+TDX_KLINE_LIST_MARKETS = (*TDX_STOCK_LIST_MARKETS, *TDX_ETF_LIST_MARKETS, *TDX_BLOCK_INDEX_LIST_MARKETS)
 A_SHARE_STOCK_PREFIXES = {
     "SH": ("600", "601", "603", "605", "688", "689"),
     "SZ": ("000", "001", "002", "003", "300", "301"),
     "BJ": ("4", "8", "920"),
 }
 TDX_MARKET_COLUMNS = ("market", "exchange", "mkt", "市场", "交易所", "交易市场")
-TDX_NAME_COLUMNS = ("name", "stock_name", "security_name", "证券简称", "证券名称", "名称", "简称", "股票名称")
+TDX_SYMBOL_COLUMNS = (*SYMBOL_COLUMNS, "Code")
+TDX_NAME_COLUMNS = ("name", "Name", "stock_name", "security_name", "证券简称", "证券名称", "名称", "简称", "股票名称")
 TDX_AMOUNT_COLUMNS = ("amount", "Amount", "turnover", "成交额", "成交金额", "成交额(元)", "金额")
 TDX_BLOCK_INDEX_PREFIXES = ("880", "881", "882", "883", "884", "885", "886", "887", "888", "889")
 TDX_KLINE_SYMBOL_TABLE_COLUMNS = ["symbol", "name", "category"]
@@ -144,7 +149,7 @@ def _collect_tdx_stock_symbols(tq: Any) -> tuple[list[str], list[str]]:
             continue
 
         method_symbols: list[str] = []
-        for label, args, kwargs in _stock_list_call_variants():
+        for label, args, kwargs in _stock_list_call_variants(markets=TDX_STOCK_LIST_MARKETS, list_type=0):
             try:
                 payload = method(*args, **kwargs)
             except TypeError as exc:
@@ -200,7 +205,7 @@ def _collect_tdx_kline_symbol_table(tq: Any) -> tuple[pd.DataFrame, list[str]]:
             continue
 
         method_tables: list[pd.DataFrame] = []
-        for label, args, kwargs in _stock_list_call_variants():
+        for label, args, kwargs in _stock_list_call_variants(markets=TDX_KLINE_LIST_MARKETS, list_type=1):
             try:
                 payload = method(*args, **kwargs)
             except TypeError as exc:
@@ -251,7 +256,7 @@ def _collect_tdx_etf_index(tq: Any) -> tuple[pd.DataFrame, list[str]]:
         if method is None:
             errors.append(f"{method_name}: unavailable")
             continue
-        for label, args, kwargs in _stock_list_call_variants():
+        for label, args, kwargs in _stock_list_call_variants(markets=TDX_ETF_LIST_MARKETS, list_type=1):
             try:
                 payload = method(*args, **kwargs)
             except TypeError as exc:
@@ -275,7 +280,7 @@ def build_tdx_etf_index(payload: Any) -> pd.DataFrame:
     for table in tables:
         if table.empty:
             continue
-        code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+        code_column = next((column for column in TDX_SYMBOL_COLUMNS if column in table.columns), None)
         name_column = next((column for column in TDX_NAME_COLUMNS if column in table.columns), None)
         if code_column is None or name_column is None:
             continue
@@ -469,12 +474,20 @@ def _normalize_tqcenter_path_text(text: str) -> str:
     return stripped
 
 
-def _stock_list_call_variants() -> list[tuple[str, tuple[object, ...], dict[str, object]]]:
-    variants: list[tuple[str, tuple[object, ...], dict[str, object]]] = [("()", (), {})]
-    for market in STOCK_LIST_MARKETS:
-        variants.append((f"(market={market!r}, list_type='1')", (), {"market": market, "list_type": "1"}))
-        variants.append((f"(market={market!r})", (), {"market": market}))
-        variants.append((f"({market!r})", (market,), {}))
+def _stock_list_call_variants(
+    *,
+    markets: tuple[str, ...],
+    list_type: int,
+    include_legacy_fallback: bool = False,
+) -> list[tuple[str, tuple[object, ...], dict[str, object]]]:
+    variants: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    for market in markets:
+        variants.append((f"({market!r}, list_type={list_type})", (market,), {"list_type": list_type}))
+    if include_legacy_fallback:
+        variants.append(("()", (), {}))
+        for market in TDX_LEGACY_LIST_MARKETS:
+            variants.append((f"(market={market!r})", (), {"market": market}))
+            variants.append((f"({market!r})", (market,), {}))
     return variants
 
 
@@ -553,7 +566,7 @@ def _symbols_from_tdx_kline_mapping_values(payload: Mapping[object, object]) -> 
 def _symbols_from_tdx_kline_table(table: pd.DataFrame) -> list[str]:
     if table.empty:
         return []
-    code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+    code_column = next((column for column in TDX_SYMBOL_COLUMNS if column in table.columns), None)
     if code_column is None:
         return []
     market_column = next((column for column in TDX_MARKET_COLUMNS if column in table.columns), None)
@@ -651,7 +664,7 @@ def _tdx_kline_symbol_table_from_payload(payload: Any) -> pd.DataFrame:
     for table in _tdx_list_tables_from_payload(payload):
         if table.empty:
             continue
-        code_column = next((column for column in SYMBOL_COLUMNS if column in table.columns), None)
+        code_column = next((column for column in TDX_SYMBOL_COLUMNS if column in table.columns), None)
         if code_column is None:
             continue
         market_column = next((column for column in TDX_MARKET_COLUMNS if column in table.columns), None)

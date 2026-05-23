@@ -40,7 +40,7 @@ class _FakeTqStockList:
     def initialize(self, caller_path: str) -> None:
         self.initialize_calls.append(caller_path)
 
-    def get_stock_list(self) -> object:
+    def get_stock_list(self, *_args: object, **_kwargs: object) -> object:
         self.stock_list_calls += 1
         return self.payload
 
@@ -56,13 +56,13 @@ class _FakeTqMarketLists:
     def get_stock_list(self, *args: object, **kwargs: object) -> pd.DataFrame:
         market = kwargs.get("market", args[0] if args else "")
         self.calls.append(args)
-        if market == "SH":
-            return pd.DataFrame({"code": ["510300", "880001"], "market": ["SH", "SH"]})
-        if market == "SZ":
-            return pd.DataFrame({"code": ["399006", "159915"], "market": ["SZ", "SZ"]})
-        if market == "BJ":
-            return pd.DataFrame({"code": ["830799"], "market": ["BJ"]})
-        return pd.DataFrame({"code": ["000001"], "market": ["SZ"]})
+        if market == "5":
+            return pd.DataFrame({"code": ["000001", "830799"], "market": ["SZ", "BJ"]})
+        if market == "31":
+            return pd.DataFrame({"code": ["510300", "159915"], "market": ["SH", "SZ"], "name": ["沪深300ETF", "创业板ETF"]})
+        if market == "10":
+            return pd.DataFrame({"code": ["880001", "399006"], "market": ["SH", "SZ"]})
+        return pd.DataFrame()
 
 
 class _FakeTqInitializeFail:
@@ -85,7 +85,7 @@ class _FakeTqStockListRequiresInitialize(_FakeTqStockList):
         self.initialize_calls.append(caller_path)
         self.initialized = True
 
-    def get_stock_list(self) -> object:
+    def get_stock_list(self, *_args: object, **_kwargs: object) -> object:
         self.stock_list_calls += 1
         if not self.initialized:
             raise RuntimeError("TQ数据接口初始化失败")
@@ -106,16 +106,29 @@ class _FakeTqOfficialMarketCodes:
         self.calls.append((market, list_type))
         if isinstance(market, int):
             raise AttributeError("'int' object has no attribute 'encode'")
-        if market == "5":
-            return ["000001.SZ", "600519.SH"]
-        if market == "91" and list_type == "1":
+        if market == "5" and list_type == 1:
             return pd.DataFrame(
                 {
-                    "code": ["512480"],
-                    "market": ["SH"],
-                    "name": ["半导体ETF"],
+                    "Code": ["000001.SZ", "600519.SH"],
+                    "Name": ["平安银行", "贵州茅台"],
                 }
             )
+        if market == "31" and list_type == 1:
+            return pd.DataFrame(
+                {
+                    "Code": ["512480.SH"],
+                    "Name": ["半导体ETF"],
+                }
+            )
+        if market == "10" and list_type == 1:
+            return pd.DataFrame(
+                {
+                    "Code": ["880001.SH"],
+                    "Name": ["通达信行业"],
+                }
+            )
+        if market == "91":
+            raise AssertionError("91 是 ETF 追踪指数信息，不应作为可下载 ETF K 线列表来源")
         return []
 
 
@@ -307,7 +320,7 @@ def test_fetch_tdx_kline_symbols_keeps_stocks_etfs_indexes_and_blocks() -> None:
     symbols = fetch_tdx_kline_symbols(tq_client=fake)
 
     assert fake.initialize_calls == []
-    assert fake.stock_list_calls == 1
+    assert fake.stock_list_calls == 3
     assert symbols == [
         "000001.SZ",
         "600519.SH",
@@ -374,7 +387,7 @@ def test_fetch_tdx_kline_symbol_table_initializes_once_when_tdx_requires_it() ->
     table = fetch_tdx_kline_symbol_table(tq_client=fake)
 
     assert len(fake.initialize_calls) == 1
-    assert fake.stock_list_calls == 2
+    assert fake.stock_list_calls == 6
     assert table["symbol"].tolist() == ["000001.SZ", "510300.SH", "399006.SZ"]
 
 
@@ -449,13 +462,16 @@ def test_fetch_tdx_kline_symbol_table_uses_tdx_string_market_codes() -> None:
     table = fetch_tdx_kline_symbol_table(tq_client=fake)
 
     assert table.to_dict("records") == [
-        {"symbol": "000001.SZ", "name": "", "category": "stock"},
-        {"symbol": "600519.SH", "name": "", "category": "stock"},
+        {"symbol": "000001.SZ", "name": "平安银行", "category": "stock"},
+        {"symbol": "600519.SH", "name": "贵州茅台", "category": "stock"},
         {"symbol": "512480.SH", "name": "半导体ETF", "category": "etf"},
+        {"symbol": "880001.SH", "name": "通达信行业", "category": "index"},
     ]
     assert all(not isinstance(market, int) for market, _list_type in fake.calls)
-    assert ("5", "1") in fake.calls
-    assert ("91", "1") in fake.calls
+    assert ("5", 1) in fake.calls
+    assert ("31", 1) in fake.calls
+    assert ("10", 1) in fake.calls
+    assert ("91", 1) not in fake.calls
 
 
 def test_fetch_tdx_kline_symbol_table_initializes_real_tdx_before_reading_list(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,7 +483,18 @@ def test_fetch_tdx_kline_symbol_table_initializes_real_tdx_before_reading_list(m
     table = fetch_tdx_kline_symbol_table(tqcenter_path=r"F:\new_tdx64\PYPlugins")
 
     assert fake.initialize_calls
-    assert table["symbol"].tolist() == ["000001.SZ", "600519.SH", "512480.SH"]
+    assert table["symbol"].tolist() == ["000001.SZ", "600519.SH", "512480.SH", "880001.SH"]
+
+
+def test_fetch_tdx_etf_index_uses_etf_fund_list_not_tracking_indexes() -> None:
+    fake = _FakeTqOfficialMarketCodes()
+
+    index = fetch_tdx_etf_index(tq_client=fake)
+
+    assert index.to_dict("records") == [
+        {"symbol": "512480.SH", "name": "半导体ETF", "amount": 0.0, "category": "半导体"}
+    ]
+    assert fake.calls == [("31", 1)]
 
 
 def test_candidate_import_paths_expands_windows_pyplugins_path() -> None:
