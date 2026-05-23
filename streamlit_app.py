@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, MutableMapping
+import hashlib
 import json
 import math
 import os
@@ -998,6 +1000,29 @@ def _render_review_ai_result(result: ReviewAIResult) -> None:
     st.caption(result.disclaimer)
 
 
+def _review_ai_signature(evidence: dict[str, object], *, model: str, thinking: bool) -> str:
+    payload = {
+        "evidence": evidence,
+        "model": str(model),
+        "thinking": bool(thinking),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _review_ai_signature_key(result_key: str) -> str:
+    return f"{result_key}_signature"
+
+
+def _review_ai_result_is_current(session_state: Mapping[str, object], *, result_key: str, signature: str) -> bool:
+    return bool(session_state.get(result_key)) and session_state.get(_review_ai_signature_key(result_key)) == signature
+
+
+def _clear_review_ai_result(session_state: MutableMapping[str, object], result_key: str) -> None:
+    session_state.pop(result_key, None)
+    session_state.pop(_review_ai_signature_key(result_key), None)
+
+
 def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, result_key: str) -> None:
     ai_col1, ai_col2, ai_col3 = st.columns([1.2, 1.2, 1])
     deepseek_model = ai_col1.selectbox(
@@ -1014,9 +1039,11 @@ def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, res
         help="留空时读取环境变量 DEEPSEEK_API_KEY。",
     )
     deepseek_thinking = ai_col3.checkbox("启用 Thinking", value=True, key=f"{key_prefix}_thinking")
+    result_signature = _review_ai_signature(evidence, model=str(deepseek_model), thinking=bool(deepseek_thinking))
     with st.expander("查看发送给 DeepSeek 的证据摘要"):
         st.json(evidence)
     if st.button("生成 DeepSeek 复盘/分析/锐评", type="secondary", key=f"{key_prefix}_run"):
+        _clear_review_ai_result(st.session_state, result_key)
         try:
             client = DeepSeekClient(
                 DeepSeekConfig(
@@ -1030,7 +1057,8 @@ def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, res
             st.error(str(exc))
         else:
             st.session_state[result_key] = ai_result
-    if st.session_state.get(result_key):
+            st.session_state[_review_ai_signature_key(result_key)] = result_signature
+    if _review_ai_result_is_current(st.session_state, result_key=result_key, signature=result_signature):
         _render_review_ai_result(st.session_state[result_key])
 
 

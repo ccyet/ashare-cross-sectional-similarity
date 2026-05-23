@@ -51,6 +51,8 @@ from streamlit_app import (
     _prepare_full_daily_download_symbols,
     _repair_partial_download_start,
     _review_ai_display_sections,
+    _review_ai_result_is_current,
+    _review_ai_signature,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
@@ -98,6 +100,32 @@ def test_review_ai_display_sections_returns_review_analysis_critique() -> None:
     sections = _review_ai_display_sections(result)
 
     assert sections == [("复盘", "复盘"), ("分析", "分析"), ("锐评", "锐评")]
+
+
+def test_review_ai_signature_changes_with_evidence_model_or_thinking() -> None:
+    evidence = {"target": {"symbol": "601888.SH"}, "segments": [{"return": 0.1}]}
+    base = _review_ai_signature(evidence, model="deepseek-v4-flash", thinking=True)
+
+    assert _review_ai_signature({"target": {"symbol": "300750.SZ"}, "segments": [{"return": 0.1}]}, model="deepseek-v4-flash", thinking=True) != base
+    assert _review_ai_signature(evidence, model="deepseek-v4-pro", thinking=True) != base
+    assert _review_ai_signature(evidence, model="deepseek-v4-flash", thinking=False) != base
+
+
+def test_review_ai_result_is_current_requires_matching_signature() -> None:
+    signature = _review_ai_signature({"target": "601888.SH"}, model="deepseek-v4-flash", thinking=True)
+    result = ReviewAIResult(
+        review="复盘",
+        analysis="分析",
+        critique="锐评",
+        evidence_refs=("target",),
+        disclaimer="仅供研究",
+        raw="{}",
+    )
+    state = {"review_ai_result": result, "review_ai_result_signature": signature}
+
+    assert _review_ai_result_is_current(state, result_key="review_ai_result", signature=signature)
+    assert not _review_ai_result_is_current(state, result_key="review_ai_result", signature="stale")
+    assert not _review_ai_result_is_current({"review_ai_result_signature": signature}, result_key="review_ai_result", signature=signature)
 
 
 def test_picker_path_text_makes_empty_and_existing_selection_clear() -> None:
