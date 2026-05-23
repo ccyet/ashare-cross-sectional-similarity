@@ -422,11 +422,21 @@ python -m ashare_cross_section_similarity review \
   --target-symbol 000852.SH \
   --start 2026-01-01 \
   --end 2026-05-15 \
+  --evidence-only \
+  --output outputs/review_evidence.json
+```
+
+```bash
+python -m ashare_cross_section_similarity review \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --target-symbol 000852.SH \
+  --start 2026-01-01 \
+  --end 2026-05-15 \
   --model deepseek-v4-flash \
   --output outputs/review.json
 ```
 
-未设置 `DEEPSEEK_API_KEY` 时，程序会明确报错，不会伪造大模型结果。
+调用 DeepSeek 且未通过环境变量、CLI 参数或页面输入提供 API Key 时，会明确报错；使用 `--evidence-only` 不会调用 DeepSeek。
 
 ## 9. Docker 服务
 
