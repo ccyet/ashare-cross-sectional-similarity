@@ -190,6 +190,29 @@ def test_parse_history_command() -> None:
     assert args.window_size == 20
 
 
+def test_parse_review_command() -> None:
+    args = _parse_args(
+        [
+            "review",
+            "--target-symbol",
+            "300750.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-03-31",
+            "--model",
+            "deepseek-v4-flash",
+            "--output",
+            "outputs/review.json",
+        ]
+    )
+
+    assert args.command == "review"
+    assert args.target_symbol == "300750.SZ"
+    assert args.model == "deepseek-v4-flash"
+    assert args.output == "outputs/review.json"
+
+
 def test_download_symbols_do_not_fallback_to_full_local_universe(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)

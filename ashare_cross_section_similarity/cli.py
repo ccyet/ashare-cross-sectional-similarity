@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 from pathlib import Path
 import sys
 
@@ -14,8 +16,15 @@ from ashare_cross_section_similarity.data import (
     load_local_bars,
     read_price_data_file,
 )
+from ashare_cross_section_similarity.deepseek_client import DeepSeekClient, DeepSeekConfig
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
+from ashare_cross_section_similarity.review import ReviewConfig, analyze_price_review
+from ashare_cross_section_similarity.review_ai import (
+    build_review_ai_evidence,
+    build_review_ai_messages,
+    parse_review_ai_result,
+)
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     FORWARD_RETURN_WINDOWS,
@@ -43,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_benchmark(args)
     if args.command == "history":
         return _run_history(args)
+    if args.command == "review":
+        return _run_review(args)
     return _run_search(args)
 
 
@@ -155,6 +166,49 @@ def _run_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_review(args: argparse.Namespace) -> int:
+    bars = load_local_bars(
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+        symbols=[args.target_symbol],
+        start=args.start,
+        end=args.end,
+    )
+    result = analyze_price_review(
+        bars,
+        ReviewConfig(symbol=args.target_symbol, start=args.start, end=args.end),
+    )
+    evidence = build_review_ai_evidence(result, pd.DataFrame(), warnings=list(result.warnings))
+    payload: dict[str, object] = {"evidence": evidence}
+    if not args.evidence_only:
+        client = DeepSeekClient(
+            DeepSeekConfig(
+                api_key=args.api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+                base_url=args.base_url,
+                model=args.model,
+                thinking=not bool(args.no_thinking),
+            )
+        )
+        ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)))
+        payload["ai_review"] = {
+            "review": ai_result.review,
+            "analysis": ai_result.analysis,
+            "critique": ai_result.critique,
+            "evidence_refs": list(ai_result.evidence_refs),
+            "disclaimer": ai_result.disclaimer,
+        }
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text + "\n", encoding="utf-8")
+        print(f"复盘结果已写入：{output_path}")
+    else:
+        print(text)
+    return 0
+
+
 def _run_download(args: argparse.Namespace) -> int:
     symbols = _resolve_download_symbols(args)
     if not symbols:
@@ -239,7 +293,7 @@ def _run_benchmark(args: argparse.Namespace) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] not in {"search", "history", "download", "check", "import-data", "benchmark", "-h", "--help"}:
+    if argv and argv[0] not in {"search", "history", "review", "download", "check", "import-data", "benchmark", "-h", "--help"}:
         argv.insert(0, "search")
     parser = argparse.ArgumentParser(description="A股相似阶段搜集：历史时序、横截面、数据抓取、检查")
     subparsers = parser.add_subparsers(dest="command")
@@ -275,6 +329,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     history_parser.add_argument("--path-weight", type=float, default=0.7, help="走势形状在综合相似度中的权重")
     history_parser.add_argument("--algorithm", default=BASELINE_ALGORITHM, choices=ALGORITHM_CHOICES, help="相似算法")
     history_parser.add_argument("--output", default="", help="CSV 输出路径")
+
+    review_parser = subparsers.add_parser("review", help="生成走势复盘、分析和锐评")
+    _add_common_data_args(review_parser)
+    review_parser.add_argument("--target-symbol", required=True, help="目标代码，如 300750.SZ")
+    review_parser.add_argument("--start", required=True, help="复盘区间开始")
+    review_parser.add_argument("--end", required=True, help="复盘区间结束")
+    review_parser.add_argument("--model", default="deepseek-v4-flash", help="DeepSeek V4 模型名")
+    review_parser.add_argument("--api-key", default="", help="DeepSeek API Key；留空读取 DEEPSEEK_API_KEY")
+    review_parser.add_argument("--base-url", default="https://api.deepseek.com", help="DeepSeek OpenAI-compatible Base URL")
+    review_parser.add_argument("--no-thinking", action="store_true", help="关闭 DeepSeek thinking")
+    review_parser.add_argument("--evidence-only", action="store_true", help="只输出证据包，不调用 DeepSeek")
+    review_parser.add_argument("--output", default="", help="JSON 输出路径")
 
     download_parser = subparsers.add_parser("download", help="抓取行情并落地本地 parquet")
     _add_download_data_args(download_parser)
