@@ -42,7 +42,6 @@ from ashare_cross_section_similarity.review import (
     build_video_script_profile,
     rank_review_results,
     render_multi_review_text,
-    render_multi_video_script_text,
     render_review_text,
     render_video_script_cards_html,
 )
@@ -1475,14 +1474,6 @@ def _render_multi_review_output(
     st.markdown("**3. 自然语言复盘**")
     st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
     st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
-    script_text = render_multi_video_script_text(script_profiles)
-    if script_text:
-        st.download_button(
-            "下载视频脚本文本",
-            data=script_text.encode("utf-8-sig"),
-            file_name="review_video_script.txt",
-            mime="text/plain",
-        )
     st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
     for warning in dict.fromkeys(all_warnings):
         st.warning(warning)
@@ -1774,7 +1765,7 @@ def _review_auto_etf_proxies_from_index(
     queries = _etf_queries(industry_name, concept_name)
     if not queries:
         return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), ""
-    matches = _search_review_etf_index(index, queries)
+    matches = search_tdx_etf_index(index, queries)
     if matches.empty:
         return [], {}, matches, f"ETF 名单没有匹配到：{', '.join(queries)}。"
     symbols = unique_symbols(matches["symbol"].dropna().astype(str).tolist())
@@ -1786,7 +1777,7 @@ def _review_auto_etf_proxies_from_index(
     return symbols, names, matches, ""
 
 
-def _search_review_etf_index(
+def search_tdx_etf_index(
     etf_index: pd.DataFrame,
     queries: list[str] | tuple[str, ...],
     *,
@@ -1805,12 +1796,12 @@ def _search_review_etf_index(
 
     rows: list[pd.DataFrame] = []
     for raw_query in queries:
-        query = _etf_category_key(raw_query)
+        query = _etf_query_key(raw_query)
         if not query:
             continue
         mask = (
-            frame["name"].astype(str).map(_etf_category_key).str.contains(query, regex=False, na=False)
-            | frame["category"].astype(str).map(_etf_category_key).str.contains(query, regex=False, na=False)
+            frame["name"].astype(str).map(_etf_query_key).str.contains(query, regex=False, na=False)
+            | frame["category"].astype(str).map(_etf_query_key).str.contains(query, regex=False, na=False)
         )
         matched = (
             frame.loc[mask]
@@ -1830,6 +1821,12 @@ def _search_review_etf_index(
 
 def _etf_queries(industry_name: str, concept_name: str) -> list[str]:
     return [text for text in dict.fromkeys([str(industry_name or "").strip(), str(concept_name or "").strip()]) if text]
+
+
+def _etf_query_key(value: object) -> str:
+    text = str(value or "").strip().upper()
+    return re.sub(r"[\s　（）()【】\[\]：:·•,，、;；/\\-]+", "", text)
+
 
 def _etf_category_key(name: object) -> str:
     text = str(name or "").strip().upper()
