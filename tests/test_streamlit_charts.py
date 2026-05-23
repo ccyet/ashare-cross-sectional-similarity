@@ -176,6 +176,10 @@ def test_tdx_directory_default_reuses_sidebar_selection() -> None:
     assert _tdx_directory_default("/selected/tdx", "/env/tdx") == "/selected/tdx"
 
 
+def test_tdx_directory_default_uses_windows_pyplugins_when_empty() -> None:
+    assert _tdx_directory_default("", "") == r"F:\new_tdx64\PYPlugins"
+
+
 def test_pick_directory_with_system_dialog_reports_open_error() -> None:
     def broken_tk() -> object:
         raise RuntimeError("no display")

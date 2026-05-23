@@ -61,6 +61,7 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     get_algorithm_status,
 )
 from ashare_cross_section_similarity.tdx_source import (
+    DEFAULT_TDX_TQCENTER_PATH,
     fetch_tdx_kline_symbol_table,
     search_tdx_etf_index,
 )
@@ -184,10 +185,10 @@ def main() -> None:
         if download_engine == "tdx":
             provider = _render_directory_picker(
                 "通达信 PYPlugins/user 目录",
-                os.environ.get("TDX_TQCENTER_PATH", ""),
+                _tdx_directory_default(os.environ.get("TDX_TQCENTER_PATH", "")),
                 "tdx_tqcenter",
             )
-            st.caption("可选择通达信安装目录、PYPlugins 或 PYPlugins/user；留空则尝试系统导入路径。")
+            st.caption(f"可选择通达信安装目录、PYPlugins 或 PYPlugins/user；默认使用 {DEFAULT_TDX_TQCENTER_PATH}。")
         else:
             provider_default = "akshare" if download_engine == "openbb" else ""
             provider = st.text_input(
@@ -494,7 +495,7 @@ def _tdx_directory_default(*candidates: object) -> str:
         text = str(candidate or "").strip()
         if text:
             return _path_text(text)
-    return ""
+    return _path_text(DEFAULT_TDX_TQCENTER_PATH)
 
 
 def _algorithm_option_label(name: str) -> str:

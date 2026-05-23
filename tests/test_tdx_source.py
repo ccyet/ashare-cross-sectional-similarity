@@ -401,6 +401,15 @@ def test_fetch_tdx_kline_symbols_collects_market_specific_lists() -> None:
     assert "830799.BJ" in symbols
 
 
+def test_candidate_import_paths_expands_windows_pyplugins_path() -> None:
+    paths = tdx_source._candidate_import_paths(r"F:\new_tdx64\PYPlugins")
+
+    assert [str(path) for path in paths] == [
+        "F:/new_tdx64/PYPlugins/user",
+        "F:/new_tdx64/PYPlugins",
+    ]
+
+
 def test_build_tdx_etf_index_keeps_largest_turnover_for_same_theme() -> None:
     index = build_tdx_etf_index(
         pd.DataFrame(
@@ -418,6 +427,23 @@ def test_build_tdx_etf_index_keeps_largest_turnover_for_same_theme() -> None:
     assert matches["query"].tolist() == ["半导体", "芯片"]
     assert matches["symbol"].tolist() == ["512480.SH", "159995.SZ"]
     assert matches["name"].tolist() == ["半导体ETF", "芯片ETF"]
+
+
+def test_build_tdx_etf_index_preserves_duplicate_rows_and_names() -> None:
+    index = build_tdx_etf_index(
+        pd.DataFrame(
+            {
+                "code": ["512480", "512480", "159995", "600519"],
+                "market": ["SH", "SH", "SZ", "SH"],
+                "name": ["半导体ETF", "半导体ETF国联安", "芯片ETF", "贵州茅台"],
+                "amount": [1_000_000, 2_000_000, 5_000_000, 9_000_000],
+            }
+        )
+    )
+
+    assert index["symbol"].tolist() == ["512480.SH", "512480.SH", "159995.SZ"]
+    assert index["name"].tolist() == ["半导体ETF", "半导体ETF国联安", "芯片ETF"]
+    assert index["amount"].tolist() == [1_000_000.0, 2_000_000.0, 5_000_000.0]
 
 
 def test_search_tdx_etf_index_merges_same_query_to_largest_amount() -> None:

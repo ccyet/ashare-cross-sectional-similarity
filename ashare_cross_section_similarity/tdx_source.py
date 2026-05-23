@@ -14,6 +14,7 @@ from ashare_cross_section_similarity.data import CANONICAL_COLUMNS
 from ashare_cross_section_similarity.universe import SYMBOL_COLUMNS, normalize_symbol, symbols_from_table, unique_symbols
 
 TDX_TQCENTER_ENV_VAR = "TDX_TQCENTER_PATH"
+DEFAULT_TDX_TQCENTER_PATH = r"F:\new_tdx64\PYPlugins"
 TDX_REQUEST_BATCH_SIZE = 100
 TIMEFRAME_PERIODS = {"1d": "1d", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
 ADJUST_MAP = {"": "none", "qfq": "front", "hfq": "back"}
@@ -258,7 +259,7 @@ def _collect_tdx_etf_index(tq: Any) -> tuple[pd.DataFrame, list[str]]:
                 tables.append(table)
 
     if tables:
-        return _deduplicate_etf_index(pd.concat(tables, ignore_index=True)), errors
+        return _normalize_etf_index(pd.concat(tables, ignore_index=True)), errors
     return _empty_etf_index(), errors
 
 
@@ -290,7 +291,7 @@ def build_tdx_etf_index(payload: Any) -> pd.DataFrame:
             )
     if not rows:
         return _empty_etf_index()
-    return _deduplicate_etf_index(pd.DataFrame(rows))
+    return _normalize_etf_index(pd.DataFrame(rows))
 
 
 def search_tdx_etf_index(
@@ -405,7 +406,7 @@ def _tq_import_cache_key(paths: list[Path]) -> str:
 
 
 def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:
-    raw_value = (tqcenter_path or os.getenv(TDX_TQCENTER_ENV_VAR, "")).strip()
+    raw_value = (tqcenter_path or os.getenv(TDX_TQCENTER_ENV_VAR, "") or DEFAULT_TDX_TQCENTER_PATH).strip()
     if not raw_value or raw_value.lower() == "tdx":
         return []
 
@@ -421,8 +422,8 @@ def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:
 
     paths: list[Path] = []
     seen: set[str] = set()
-    for item in raw_value.split(os.pathsep):
-        text = item.strip().strip('"')
+    for item in _split_tqcenter_path_items(raw_value):
+        text = _normalize_tqcenter_path_text(item)
         if not text:
             continue
         for path in expand(Path(text).expanduser()):
@@ -432,6 +433,32 @@ def _candidate_import_paths(tqcenter_path: str = "") -> list[Path]:
             seen.add(key)
             paths.append(path)
     return paths
+
+
+def _split_tqcenter_path_items(raw_value: str) -> list[str]:
+    if os.pathsep != ":":
+        return raw_value.split(os.pathsep)
+    items: list[str] = []
+    current: list[str] = []
+    for index, character in enumerate(raw_value):
+        if character == os.pathsep and not _is_windows_drive_separator(raw_value, index):
+            items.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    items.append("".join(current))
+    return items
+
+
+def _is_windows_drive_separator(text: str, index: int) -> bool:
+    return index == 1 and len(text) > 2 and text[0].isalpha() and text[2] in {"\\", "/"}
+
+
+def _normalize_tqcenter_path_text(text: str) -> str:
+    stripped = text.strip().strip('"')
+    if re.match(r"^[A-Za-z]:[\\/]", stripped):
+        return stripped.replace("\\", "/")
+    return stripped
 
 
 def _stock_list_call_variants() -> list[tuple[str, tuple[object, ...], dict[str, object]]]:
@@ -716,7 +743,7 @@ def _is_tdx_etf(symbol: str, name: str) -> bool:
     return "ETF" in normalized_name or "交易型开放式" in normalized_name
 
 
-def _deduplicate_etf_index(frame: pd.DataFrame) -> pd.DataFrame:
+def _normalize_etf_index(frame: pd.DataFrame) -> pd.DataFrame:
     columns = ["symbol", "name", "amount", "category"]
     if frame.empty:
         return _empty_etf_index()
@@ -731,8 +758,7 @@ def _deduplicate_etf_index(frame: pd.DataFrame) -> pd.DataFrame:
     result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
     if result.empty:
         return _empty_etf_index()
-    result = result.sort_values(["amount", "symbol"], ascending=[False, True]).drop_duplicates("symbol")
-    return result[columns].sort_values(["category", "amount"], ascending=[True, False]).reset_index(drop=True)
+    return result[columns].reset_index(drop=True)
 
 
 def _empty_etf_index() -> pd.DataFrame:
