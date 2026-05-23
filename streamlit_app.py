@@ -1052,6 +1052,11 @@ def _clear_review_ai_result(session_state: MutableMapping[str, object], result_k
     session_state.pop(_review_ai_signature_key(result_key), None)
 
 
+def _review_generation_signature(payload: Mapping[str, object]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, result_key: str) -> None:
     ai_col1, ai_col2, ai_col3 = st.columns([1.2, 1.2, 1])
     deepseek_model = ai_col1.selectbox(
@@ -1254,7 +1259,34 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             st.caption("ETF 自动匹配：输入行业或概念名称后，会从 ETF 名单中选择成交额最大的同类 ETF。")
     combined_proxy_symbols = unique_symbols([*proxy_symbols, *selected_popular_etfs, *auto_proxy_symbols])
 
-    if not st.button("生成走势复盘", type="primary", key="review_run"):
+    review_signature = _review_generation_signature(
+        {
+            "mode": review_mode,
+            "data_root": data_root,
+            "timeframe": timeframe,
+            "adjust": adjust,
+            "target_symbol": target_symbol,
+            "target_symbols": target_symbols,
+            "start": start,
+            "end": end,
+            "min_swing_percent": int(min_swing_percent),
+            "min_segment_bars": int(min_segment_bars),
+            "index_enabled": bool(index_enabled),
+            "index_symbols": index_symbols,
+            "sector_enabled": bool(sector_enabled),
+            "proxy_symbols": combined_proxy_symbols,
+            "industry_name": industry_name,
+            "concept_name": concept_name,
+            "sector_min_coverage": float(sector_min_coverage),
+        }
+    )
+    review_active_key = "review_active_signature"
+    if st.button("生成走势复盘", type="primary", key="review_run"):
+        st.session_state[review_active_key] = review_signature
+        _clear_review_ai_result(st.session_state, "review_ai_result")
+        _clear_review_ai_result(st.session_state, "multi_review_ai_result")
+
+    if st.session_state.get(review_active_key) != review_signature:
         st.info("设置目标、区间和对比项后，点击生成走势复盘。复盘只使用本地行情数据。")
         return
 
