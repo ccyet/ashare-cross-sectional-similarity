@@ -84,7 +84,8 @@ def test_deepseek_client_default_transport_passes_timeout_by_keyword(monkeypatch
     assert calls == [{"url": "https://api.deepseek.com/chat/completions", "timeout": 12.5}]
 
 
-def test_deepseek_client_raises_for_missing_key() -> None:
+def test_deepseek_client_raises_for_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     client = DeepSeekClient(DeepSeekConfig(api_key=""))
 
     with pytest.raises(DeepSeekMissingAPIKeyError, match="DEEPSEEK_API_KEY"):
