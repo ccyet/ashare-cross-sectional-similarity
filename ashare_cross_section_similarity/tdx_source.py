@@ -119,6 +119,20 @@ def fetch_tdx_bars(
 def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
     tq = tq_client or _load_tq(tqcenter_path)
 
+    symbols, errors = _collect_tdx_stock_symbols(tq)
+    if symbols:
+        return symbols
+    if _tdx_errors_need_initialize(errors):
+        _ensure_initialized(tq)
+        symbols, retry_errors = _collect_tdx_stock_symbols(tq)
+        if symbols:
+            return symbols
+        errors = [*errors, "初始化后重试仍失败", *retry_errors]
+    details = " | ".join(errors)
+    raise RuntimeError(f"TDX 未能获取股票清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+
+
+def _collect_tdx_stock_symbols(tq: Any) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     for method_name in STOCK_LIST_METHODS:
         method = getattr(tq, method_name, None)
@@ -146,11 +160,10 @@ def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
         if method_symbols:
             stock_symbols = _filter_a_share_stock_symbols(method_symbols)
             if stock_symbols:
-                return stock_symbols
+                return stock_symbols, errors
             errors.append(f"{method_name}: 返回结果未包含 A 股股票代码")
 
-    details = " | ".join(errors)
-    raise RuntimeError(f"TDX 未能获取股票清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+    return [], errors
 
 
 def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
@@ -160,6 +173,20 @@ def fetch_tdx_kline_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
 
+    table, errors = _collect_tdx_kline_symbol_table(tq)
+    if not table.empty:
+        return table
+    if _tdx_errors_need_initialize(errors):
+        _ensure_initialized(tq)
+        table, retry_errors = _collect_tdx_kline_symbol_table(tq)
+        if not table.empty:
+            return table
+        errors = [*errors, "初始化后重试仍失败", *retry_errors]
+    details = " | ".join(errors)
+    raise RuntimeError(f"TDX 未能获取 K 线标的清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+
+
+def _collect_tdx_kline_symbol_table(tq: Any) -> tuple[pd.DataFrame, list[str]]:
     errors: list[str] = []
     for method_name in STOCK_LIST_METHODS:
         method = getattr(tq, method_name, None)
@@ -185,16 +212,31 @@ def fetch_tdx_kline_symbol_table(*, tqcenter_path: str = "", tq_client: Any | No
         if method_tables:
             kline_table = _deduplicate_tdx_kline_symbol_table(pd.concat(method_tables, ignore_index=True))
             if not kline_table.empty:
-                return kline_table
+                return kline_table, errors
             errors.append(f"{method_name}: 返回结果未包含可下载日 K 的股票、ETF 或板块指数代码")
 
-    details = " | ".join(errors)
-    raise RuntimeError(f"TDX 未能获取 K 线标的清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+    return _empty_tdx_kline_symbol_table(), errors
 
 
 def fetch_tdx_etf_index(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
     tq = tq_client or _load_tq(tqcenter_path)
 
+    table, errors = _collect_tdx_etf_index(tq)
+    if not table.empty:
+        return table
+    if _tdx_errors_need_initialize(errors):
+        _ensure_initialized(tq)
+        table, retry_errors = _collect_tdx_etf_index(tq)
+        if not table.empty:
+            return table
+        errors = [*errors, "初始化后重试仍失败", *retry_errors]
+    if errors and all("unavailable" in error for error in errors):
+        details = " | ".join(errors)
+        raise RuntimeError(f"TDX 未能获取 ETF 清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+    return _empty_etf_index()
+
+
+def _collect_tdx_etf_index(tq: Any) -> tuple[pd.DataFrame, list[str]]:
     tables: list[pd.DataFrame] = []
     errors: list[str] = []
     for method_name in STOCK_LIST_METHODS:
@@ -216,11 +258,8 @@ def fetch_tdx_etf_index(*, tqcenter_path: str = "", tq_client: Any | None = None
                 tables.append(table)
 
     if tables:
-        return _deduplicate_etf_index(pd.concat(tables, ignore_index=True))
-    if errors and all("unavailable" in error for error in errors):
-        details = " | ".join(errors)
-        raise RuntimeError(f"TDX 未能获取 ETF 清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
-    return _empty_etf_index()
+        return _deduplicate_etf_index(pd.concat(tables, ignore_index=True)), errors
+    return _empty_etf_index(), errors
 
 
 def build_tdx_etf_index(payload: Any) -> pd.DataFrame:
@@ -346,6 +385,10 @@ def _load_tq(tqcenter_path: str = "") -> Any:
             f" {TDX_TQCENTER_ENV_VAR} 或下载源输入框指向 TDX 的 PYPlugins/user 目录。"
             f" 详情: {details}"
         ) from exc
+
+
+def _tdx_errors_need_initialize(errors: list[str]) -> bool:
+    return any("TQ数据接口初始化失败" in error or "初始化失败" in error for error in errors)
 
 
 def _remove_tqcenter_import_paths() -> None:

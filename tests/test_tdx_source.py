@@ -76,6 +76,22 @@ class _FakeTqStockListInitializeFail(_FakeTqStockList):
         raise RuntimeError("terminal not ready")
 
 
+class _FakeTqStockListRequiresInitialize(_FakeTqStockList):
+    def __init__(self, payload: object) -> None:
+        super().__init__(payload)
+        self.initialized = False
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+        self.initialized = True
+
+    def get_stock_list(self) -> object:
+        self.stock_list_calls += 1
+        if not self.initialized:
+            raise RuntimeError("TQ数据接口初始化失败")
+        return self.payload
+
+
 def _reset_tq_import_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT", None)
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT_IMPORT_KEY", None)
@@ -299,6 +315,24 @@ def test_fetch_tdx_kline_symbol_table_does_not_require_market_connection() -> No
     table = fetch_tdx_kline_symbol_table(tq_client=fake)
 
     assert fake.initialize_calls == []
+    assert table["symbol"].tolist() == ["000001.SZ", "510300.SH", "399006.SZ"]
+
+
+def test_fetch_tdx_kline_symbol_table_initializes_once_when_tdx_requires_it() -> None:
+    fake = _FakeTqStockListRequiresInitialize(
+        pd.DataFrame(
+            {
+                "code": ["000001", "510300", "399006"],
+                "market": ["SZ", "SH", "SZ"],
+                "name": ["平安银行", "沪深300ETF", "创业板指"],
+            }
+        )
+    )
+
+    table = fetch_tdx_kline_symbol_table(tq_client=fake)
+
+    assert len(fake.initialize_calls) == 1
+    assert fake.stock_list_calls == 2
     assert table["symbol"].tolist() == ["000001.SZ", "510300.SH", "399006.SZ"]
 
 
