@@ -45,6 +45,7 @@ from ashare_cross_section_similarity.review import (
     build_video_script_profile,
     build_comparison_stats,
     build_equal_weight_series,
+    rank_review_results,
     render_multi_review_text,
     render_review_text,
     render_video_script_cards_html,
@@ -1466,6 +1467,13 @@ def _render_multi_review_output(
     all_warnings.extend(comparison_warnings)
     comparison_rows = _review_multi_comparison_rows(valid_results, comparison_frames, stock_names)
     comparison_frame = pd.DataFrame(comparison_rows)
+    ranking_frame = rank_review_results(valid_results, comparison_frame, stock_names=stock_names)
+    result_by_symbol = {result.symbol: result for result in valid_results}
+    ranked_results = [
+        result_by_symbol[symbol]
+        for symbol in ranking_frame["代码"].astype(str).tolist()
+        if symbol in result_by_symbol
+    ]
     script_profiles = [
         _review_video_script_profile(
             result,
@@ -1473,13 +1481,18 @@ def _render_multi_review_output(
             benchmark_symbol=SCRIPT_BENCHMARK_SYMBOL,
             stock_names=stock_names,
         )
-        for result in valid_results
+        for result in ranked_results
     ]
+    ranking_records = ranking_frame.set_index("代码").to_dict("index") if not ranking_frame.empty else {}
+    script_profiles = [_attach_review_ranking(profile, ranking_records) for profile in script_profiles]
     st.markdown("**1. 多股票区间概览**")
+    st.caption("排序总表")
+    st.dataframe(_centered(_format_review_rankings(ranking_frame)), use_container_width=True, hide_index=True)
+    st.caption("原始区间概览")
     st.dataframe(_centered(_format_multi_review_overview(results, stock_names)), use_container_width=True, hide_index=True)
 
     st.markdown("**2. 多股票 K 线复盘**")
-    for row in _review_result_grid_rows(results):
+    for row in _review_result_grid_rows(ranked_results):
         columns = st.columns(3)
         for column, result in zip(columns, row):
             with column:
@@ -1488,7 +1501,7 @@ def _render_multi_review_output(
                 st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("**3. 自然语言复盘**")
-    st.markdown(render_multi_review_text(valid_results, comparison_frame, stock_names=stock_names))
+    st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
     st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
     st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
     for warning in dict.fromkeys(all_warnings):
@@ -3248,6 +3261,40 @@ def _format_multi_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
         "强弱结论",
     ]
     return result[[column for column in columns if column in result.columns]]
+
+
+def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "排名",
+        "代码",
+        "股票",
+        "对标指数",
+        "指数阶段",
+        "强弱等级",
+        "区间收益",
+        "最大回撤",
+        "上涨K占比",
+        "相对超额",
+        "关键转折点",
+        "当前性质",
+        "锐评结论",
+        "明日验证",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    result = frame.copy()
+    result = _format_percent_columns(result, ["区间收益", "最大回撤", "上涨K占比", "相对超额"])
+    return result[[column for column in columns if column in result.columns]]
+
+
+def _attach_review_ranking(profile: dict[str, object], ranking_records: dict[str, dict[str, object]]) -> dict[str, object]:
+    symbol = str(profile.get("代码", "") or "").strip()
+    ranked = dict(profile)
+    record = ranking_records.get(symbol, {})
+    for key in ["排名", "强弱等级", "关键转折点", "当前性质", "锐评结论", "明日验证", "对标指数", "指数阶段"]:
+        if key in record:
+            ranked[key] = record[key]
+    return ranked
 
 
 def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict[str, object], ...]) -> pd.DataFrame:

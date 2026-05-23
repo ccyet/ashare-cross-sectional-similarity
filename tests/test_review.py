@@ -8,6 +8,7 @@ from ashare_cross_section_similarity.review import (
     build_video_script_profile,
     build_comparison_stats,
     build_equal_weight_series,
+    rank_review_results,
     render_multi_video_script_text,
     render_multi_review_text,
     render_review_text,
@@ -217,7 +218,7 @@ def test_render_multi_review_text_summarizes_symbols_and_benchmark_relationships
     assert "研究复盘：讲证据" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
-    assert "结构分层" in text
+    assert "排序锐评" in text
     assert "对标关系" in text
 
 
@@ -232,6 +233,95 @@ def test_render_multi_review_text_accepts_comparison_table_without_symbol_column
 
     assert "研究复盘：讲证据" in text
     assert "沪深300" in text
+
+
+def test_rank_review_results_orders_by_strength_not_input_order() -> None:
+    high_return_high_drawdown = analyze_price_review(
+        _bars("000001.SZ", [10, 16, 10.5, 17], start="2026-01-01"),
+        ReviewConfig(symbol="000001.SZ", start="2026-01-01", end="2026-01-04"),
+    )
+    steadier_outperformer = analyze_price_review(
+        _bars("600519.SH", [10, 11, 11.6, 12.2], start="2026-01-01"),
+        ReviewConfig(symbol="600519.SH", start="2026-01-01", end="2026-01-04"),
+    )
+    comparisons = pd.DataFrame(
+        [
+            {
+                "代码": "000001.SZ",
+                **build_comparison_stats(
+                    high_return_high_drawdown.window,
+                    _bars("000300.SH", [10, 13, 15, 18], start="2026-01-01"),
+                    "沪深300",
+                ),
+            },
+            {
+                "代码": "600519.SH",
+                **build_comparison_stats(
+                    steadier_outperformer.window,
+                    _bars("000300.SH", [10, 10.2, 10.3, 10.4], start="2026-01-01"),
+                    "沪深300",
+                ),
+            },
+        ]
+    )
+
+    ranking = rank_review_results(
+        [high_return_high_drawdown, steadier_outperformer],
+        comparisons,
+        stock_names={"000001.SZ": "高波动", "600519.SH": "稳趋势"},
+    )
+
+    assert ranking["代码"].tolist() == ["600519.SH", "000001.SZ"]
+    assert ranking["排名"].tolist() == [1, 2]
+    assert ranking.loc[0, "股票"] == "稳趋势"
+    assert ranking.loc[0, "强弱等级"] in {"S", "A"}
+    assert "明日验证" in ranking.columns
+
+
+def test_render_multi_review_text_uses_ranked_critic_order() -> None:
+    high_return_high_drawdown = analyze_price_review(
+        _bars("000001.SZ", [10, 16, 10.5, 17], start="2026-01-01"),
+        ReviewConfig(symbol="000001.SZ", start="2026-01-01", end="2026-01-04"),
+    )
+    steadier_outperformer = analyze_price_review(
+        _bars("600519.SH", [10, 11, 11.6, 12.2], start="2026-01-01"),
+        ReviewConfig(symbol="600519.SH", start="2026-01-01", end="2026-01-04"),
+    )
+    comparisons = pd.DataFrame(
+        [
+            {
+                "代码": "000001.SZ",
+                **build_comparison_stats(
+                    high_return_high_drawdown.window,
+                    _bars("000300.SH", [10, 13, 15, 18], start="2026-01-01"),
+                    "沪深300",
+                ),
+            },
+            {
+                "代码": "600519.SH",
+                **build_comparison_stats(
+                    steadier_outperformer.window,
+                    _bars("000300.SH", [10, 10.2, 10.3, 10.4], start="2026-01-01"),
+                    "沪深300",
+                ),
+            },
+        ]
+    )
+
+    text = render_multi_review_text(
+        [high_return_high_drawdown, steadier_outperformer],
+        comparisons,
+        stock_names={"000001.SZ": "高波动", "600519.SH": "稳趋势"},
+    )
+
+    assert "市场总环境" in text
+    assert "排序锐评" in text
+    assert "第1，稳趋势" in text
+    assert "第2，高波动" in text
+    assert text.index("第1，稳趋势") < text.index("第2，高波动")
+    assert "关键点" in text
+    assert "明日验证" in text
+    assert "标的" not in text
 
 
 def test_build_video_script_profile_measures_ytd_entry_exit_and_index_elasticity() -> None:
