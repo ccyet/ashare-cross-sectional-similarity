@@ -1081,7 +1081,7 @@ def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, res
                     thinking=bool(deepseek_thinking),
                 )
             )
-            ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)))
+            ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)), evidence=evidence)
         except (DeepSeekAPIError, ReviewAIFormatError) as exc:
             st.error(str(exc))
         else:

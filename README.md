@@ -386,10 +386,11 @@ python -m ashare_cross_section_similarity search \
 streamlit run streamlit_app.py
 ```
 
-页面有两个工作台：
+页面有三个工作台：
 
 1. `历史时序相似`：同一标的自己的历史相似阶段回溯。
 2. `横截面相似`：同一时间窗口内从指定范围找相似标的。
+3. `走势复盘`：基于本地 K 线生成复盘、分析、锐评，并可选调用 DeepSeek V4。
 
 通用操作顺序：
 

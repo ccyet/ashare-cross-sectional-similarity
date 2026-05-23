@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -101,6 +102,74 @@ def test_parse_review_ai_result_accepts_required_fields() -> None:
     assert result.analysis == "分析内容"
     assert result.critique == "锐评内容"
     assert result.evidence_refs == ("segments[0]", "comparisons[0]")
+
+
+def test_parse_review_ai_result_accepts_refs_present_in_evidence() -> None:
+    evidence = {
+        "target": {"symbol": "000001.SZ"},
+        "overview": {"return": 0.12},
+        "segments": [{"方向": "上涨"}],
+        "comparisons": [{"标的": "沪深300"}],
+        "warnings": ["样例风险"],
+        "limits": ["仅供研究"],
+    }
+    raw = json.dumps(
+        {
+            "review": "复盘内容",
+            "analysis": "分析内容",
+            "critique": "锐评内容",
+            "evidence_refs": [
+                "target",
+                "target.symbol",
+                "overview",
+                "overview.return",
+                "segments[0]",
+                "segments[0].方向",
+                "comparisons[0]",
+                "warnings[0]",
+                "limits[0]",
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    result = parse_review_ai_result(raw, evidence=evidence)
+
+    assert result.evidence_refs == (
+        "target",
+        "target.symbol",
+        "overview",
+        "overview.return",
+        "segments[0]",
+        "segments[0].方向",
+        "comparisons[0]",
+        "warnings[0]",
+        "limits[0]",
+    )
+
+
+@pytest.mark.parametrize("ref", ["news[0]", "segments[99]", "segments[-1]", "segments[x]", "target.missing"])
+def test_parse_review_ai_result_rejects_refs_missing_from_evidence(ref: str) -> None:
+    evidence = {
+        "target": {"symbol": "000001.SZ"},
+        "overview": {"return": 0.12},
+        "segments": [{"方向": "上涨"}],
+        "comparisons": [{"标的": "沪深300"}],
+        "warnings": ["样例风险"],
+        "limits": ["仅供研究"],
+    }
+    raw = json.dumps(
+        {
+            "review": "复盘内容",
+            "analysis": "分析内容",
+            "critique": "锐评内容",
+            "evidence_refs": [ref],
+        },
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(ReviewAIFormatError, match=rf"evidence_refs.*{re.escape(ref)}"):
+        parse_review_ai_result(raw, evidence=evidence)
 
 
 def test_parse_review_ai_result_accepts_string_evidence_refs() -> None:

@@ -66,7 +66,7 @@ def build_review_ai_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def parse_review_ai_result(raw: str) -> ReviewAIResult:
+def parse_review_ai_result(raw: str, evidence: dict[str, Any] | None = None) -> ReviewAIResult:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -78,6 +78,8 @@ def parse_review_ai_result(raw: str) -> ReviewAIResult:
     critique = _required_text(payload, "critique")
     disclaimer = _optional_text(payload, "disclaimer") or "仅用于研究复盘，不构成投资建议。"
     refs = _evidence_refs(payload.get("evidence_refs"))
+    if evidence is not None:
+        _validate_evidence_refs(refs, evidence)
     return ReviewAIResult(
         review=review,
         analysis=analysis,
@@ -118,6 +120,41 @@ def _evidence_refs(refs: object) -> tuple[str, ...]:
     if not cleaned:
         raise ReviewAIFormatError("evidence_refs 必须至少包含一个证据引用。")
     return cleaned
+
+
+def _validate_evidence_refs(refs: tuple[str, ...], evidence: dict[str, Any]) -> None:
+    for ref in refs:
+        if not _evidence_ref_exists(ref, evidence):
+            raise ReviewAIFormatError(f"evidence_refs 包含不存在的证据引用：{ref}")
+
+
+def _evidence_ref_exists(ref: str, evidence: dict[str, Any]) -> bool:
+    current: Any = evidence
+    for part in ref.split("."):
+        if not part:
+            return False
+        key, index = _parse_ref_part(part)
+        if key is None:
+            return False
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+        if index is not None:
+            if not isinstance(current, list) or index >= len(current):
+                return False
+            current = current[index]
+    return True
+
+
+def _parse_ref_part(part: str) -> tuple[str | None, int | None]:
+    if "[" not in part and "]" not in part:
+        return (part, None) if part else (None, None)
+    if not part.endswith("]") or part.count("[") != 1 or part.count("]") != 1:
+        return None, None
+    key, raw_index = part[:-1].split("[", 1)
+    if not key or not raw_index.isdigit():
+        return None, None
+    return key, int(raw_index)
 
 
 def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:

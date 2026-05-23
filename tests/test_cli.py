@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from ashare_cross_section_similarity.cli import _parse_args
 from ashare_cross_section_similarity.cli import _resolve_download_symbols
+from ashare_cross_section_similarity.cli import _run_review
+from ashare_cross_section_similarity.review import ReviewResult
 
 
 def test_parse_download_command() -> None:
@@ -211,6 +215,84 @@ def test_parse_review_command() -> None:
     assert args.target_symbol == "300750.SZ"
     assert args.model == "deepseek-v4-flash"
     assert args.output == "outputs/review.json"
+
+
+def test_review_evidence_only_writes_evidence_without_deepseek(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    output_path = tmp_path / "review.json"
+    args = _parse_args(
+        [
+            "review",
+            "--target-symbol",
+            "300750.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--evidence-only",
+            "--output",
+            str(output_path),
+        ]
+    )
+    review_result = ReviewResult(
+        symbol="300750.SZ",
+        start=pd.Timestamp("2024-01-01"),
+        end=pd.Timestamp("2024-01-31"),
+        window=pd.DataFrame(),
+        overview={},
+        segments=pd.DataFrame(),
+        main_segments=pd.DataFrame(),
+        warnings=("缺少行情",),
+    )
+
+    monkeypatch.setattr("ashare_cross_section_similarity.cli.load_local_bars", lambda **_: pd.DataFrame())
+    monkeypatch.setattr("ashare_cross_section_similarity.cli.analyze_price_review", lambda *_: review_result)
+    monkeypatch.setattr(
+        "ashare_cross_section_similarity.cli.DeepSeekClient",
+        lambda *_: pytest.fail("evidence-only 不应调用 DeepSeek"),
+    )
+
+    assert _run_review(args) == 0
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["evidence"]["target"]["symbol"] == "300750.SZ"
+    assert payload["evidence"]["warnings"] == ["缺少行情"]
+    assert "ai_review" not in payload
+
+
+def test_review_empty_window_stops_before_deepseek(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    args = _parse_args(
+        [
+            "review",
+            "--target-symbol",
+            "300750.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--output",
+            str(tmp_path / "review.json"),
+        ]
+    )
+    review_result = ReviewResult(
+        symbol="300750.SZ",
+        start=pd.Timestamp("2024-01-01"),
+        end=pd.Timestamp("2024-01-31"),
+        window=pd.DataFrame(),
+        overview={},
+        segments=pd.DataFrame(),
+        main_segments=pd.DataFrame(),
+        warnings=("300750.SZ 在所选区间没有本地行情。",),
+    )
+
+    monkeypatch.setattr("ashare_cross_section_similarity.cli.load_local_bars", lambda **_: pd.DataFrame())
+    monkeypatch.setattr("ashare_cross_section_similarity.cli.analyze_price_review", lambda *_: review_result)
+    monkeypatch.setattr(
+        "ashare_cross_section_similarity.cli.DeepSeekClient",
+        lambda *_: pytest.fail("缺少本地行情时不应调用 DeepSeek"),
+    )
+
+    with pytest.raises(SystemExit, match="没有本地行情，未调用 DeepSeek"):
+        _run_review(args)
 
 
 def test_download_symbols_do_not_fallback_to_full_local_universe(tmp_path: Path) -> None:

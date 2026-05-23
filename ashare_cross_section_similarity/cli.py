@@ -181,6 +181,11 @@ def _run_review(args: argparse.Namespace) -> int:
     )
     evidence = build_review_ai_evidence(result, pd.DataFrame(), warnings=list(result.warnings))
     payload: dict[str, object] = {"evidence": evidence}
+    if not args.evidence_only and result.window.empty:
+        raise SystemExit(
+            "目标标的在所选区间没有本地行情，未调用 DeepSeek。"
+            "请检查代码、周期、复权目录或先使用 --evidence-only 查看证据包。"
+        )
     if not args.evidence_only:
         client = DeepSeekClient(
             DeepSeekConfig(
@@ -190,7 +195,7 @@ def _run_review(args: argparse.Namespace) -> int:
                 thinking=not bool(args.no_thinking),
             )
         )
-        ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)))
+        ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)), evidence=evidence)
         payload["ai_review"] = {
             "review": ai_result.review,
             "analysis": ai_result.analysis,

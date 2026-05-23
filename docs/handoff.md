@@ -128,7 +128,7 @@ python -m py_compile streamlit_app.py ashare_cross_section_similarity/*.py scrip
 git diff --check
 ```
 
-2026-05-18 最新验证结果：`110 passed`，`ruff check .` 通过。
+2026-05-24 最新验证结果：`191 passed`，`ruff check .`、`python -m py_compile streamlit_app.py ashare_cross_section_similarity/*.py scripts/download_all_a_daily.py`、`git diff --check` 通过，Streamlit 预览 `http://localhost:8503/` 通过。
 
 ## 2026-05-18 关键提交
 
