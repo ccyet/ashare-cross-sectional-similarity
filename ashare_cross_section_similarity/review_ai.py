@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ashare_cross_section_similarity.review import ReviewResult
@@ -56,8 +57,10 @@ def build_review_ai_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "你是A股走势复盘助手。必须只基于用户提供的JSON证据做复盘、分析、锐评，"
         "不得编造新闻、基本面、资金流或未提供的数据。"
         "输出必须是严格JSON对象，字段只能包含：review、analysis、critique、evidence_refs、disclaimer。"
+        "不得输出 Markdown、解释性文字或 JSON 以外的任何内容。"
         "review写结构化复盘；analysis写数据分析；critique写锐评和反证；"
-        "evidence_refs列出引用的证据字段，例如 segments[0] 或 comparisons[0]。"
+        "每个结论都必须能对应 evidence_refs 中的证据字段，"
+        "evidence_refs必须非空，例如 segments[0] 或 comparisons[0]。"
     )
     user = json.dumps(evidence, ensure_ascii=False, default=str)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -70,22 +73,51 @@ def parse_review_ai_result(raw: str) -> ReviewAIResult:
         raise ReviewAIFormatError(f"模型输出不是合法 JSON：{exc}") from exc
     if not isinstance(payload, dict):
         raise ReviewAIFormatError("模型输出必须是 JSON 对象。")
-    missing = [field for field in ("review", "analysis", "critique") if not str(payload.get(field, "")).strip()]
-    if missing:
-        raise ReviewAIFormatError(f"模型输出缺少必要字段：{', '.join(missing)}。")
-    refs = payload.get("evidence_refs", [])
+    review = _required_text(payload, "review")
+    analysis = _required_text(payload, "analysis")
+    critique = _required_text(payload, "critique")
+    disclaimer = _optional_text(payload, "disclaimer") or "仅用于研究复盘，不构成投资建议。"
+    refs = _evidence_refs(payload.get("evidence_refs"))
+    return ReviewAIResult(
+        review=review,
+        analysis=analysis,
+        critique=critique,
+        evidence_refs=refs,
+        disclaimer=disclaimer,
+        raw=raw,
+    )
+
+
+def _required_text(payload: dict[str, Any], field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str):
+        raise ReviewAIFormatError(f"{field} 必须是非空字符串。")
+    text = value.strip()
+    if not text:
+        raise ReviewAIFormatError(f"模型输出缺少必要字段：{field}。")
+    return text
+
+
+def _optional_text(payload: dict[str, Any], field: str) -> str:
+    value = payload.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ReviewAIFormatError(f"{field} 必须是字符串。")
+    return value.strip()
+
+
+def _evidence_refs(refs: object) -> tuple[str, ...]:
     if isinstance(refs, str):
         refs = [refs]
     if not isinstance(refs, list):
         raise ReviewAIFormatError("evidence_refs 必须是字符串数组。")
-    return ReviewAIResult(
-        review=str(payload["review"]).strip(),
-        analysis=str(payload["analysis"]).strip(),
-        critique=str(payload["critique"]).strip(),
-        evidence_refs=tuple(str(item).strip() for item in refs if str(item).strip()),
-        disclaimer=str(payload.get("disclaimer") or "仅用于研究复盘，不构成投资建议。").strip(),
-        raw=raw,
-    )
+    if not all(isinstance(item, str) for item in refs):
+        raise ReviewAIFormatError("evidence_refs 必须是字符串数组。")
+    cleaned = tuple(item.strip() for item in refs if item.strip())
+    if not cleaned:
+        raise ReviewAIFormatError("evidence_refs 必须至少包含一个证据引用。")
+    return cleaned
 
 
 def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
@@ -95,15 +127,23 @@ def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _json_safe_mapping(values: dict[str, Any]) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in values.items():
-        if pd.isna(value):
-            safe[str(key)] = None
-        elif isinstance(value, pd.Timestamp):
-            safe[str(key)] = _date_text(value)
-        else:
-            safe[str(key)] = value.item() if hasattr(value, "item") else value
-    return safe
+    return {str(key): _json_safe_value(value) for key, value in values.items()}
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe_value(value.tolist())
+    if isinstance(value, pd.Timestamp):
+        return _date_text(value)
+    if hasattr(value, "item"):
+        value = value.item()
+    if pd.isna(value):
+        return None
+    return value
 
 
 def _date_text(value: object) -> str:

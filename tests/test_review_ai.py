@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -44,11 +45,37 @@ def test_build_review_ai_evidence_keeps_review_analysis_critique_inputs() -> Non
     assert evidence["warnings"] == ["样例风险"]
 
 
+def test_build_review_ai_evidence_sanitizes_nested_json_values() -> None:
+    target = _bars("000001.SZ", [10, 11, 12])
+    result = analyze_price_review(target, ReviewConfig(symbol="000001.SZ", start="2024-01-01", end="2024-01-03"))
+    comparisons = pd.DataFrame(
+        [
+            {
+                "标的": "样例",
+                "nested": {"values": [np.float64(1.5), np.nan, pd.NaT], "date": pd.Timestamp("2024-02-03")},
+                "tuple": (np.int64(2), pd.Timestamp("2024-02-04")),
+                "array": np.array([np.float64(3.5), np.nan]),
+            }
+        ]
+    )
+
+    evidence = build_review_ai_evidence(result, comparisons, warnings=("ok", ""))
+
+    nested = evidence["comparisons"][0]["nested"]
+    assert nested == {"values": [1.5, None, None], "date": "2024-02-03"}
+    assert evidence["comparisons"][0]["tuple"] == [2, "2024-02-04"]
+    assert evidence["comparisons"][0]["array"] == [3.5, None]
+    assert evidence["warnings"] == ["ok"]
+    json.dumps(evidence, ensure_ascii=False)
+
+
 def test_build_review_ai_messages_require_json_contract() -> None:
     messages = build_review_ai_messages({"target": {"symbol": "000001.SZ"}, "warnings": []})
 
     assert messages[0]["role"] == "system"
     assert "JSON" in messages[0]["content"]
+    assert "不得输出 Markdown" in messages[0]["content"]
+    assert "每个结论" in messages[0]["content"]
     assert "review" in messages[0]["content"]
     assert "analysis" in messages[0]["content"]
     assert "critique" in messages[0]["content"]
@@ -76,6 +103,54 @@ def test_parse_review_ai_result_accepts_required_fields() -> None:
     assert result.evidence_refs == ("segments[0]", "comparisons[0]")
 
 
+def test_parse_review_ai_result_accepts_string_evidence_refs() -> None:
+    raw = json.dumps(
+        {
+            "review": "复盘内容",
+            "analysis": "分析内容",
+            "critique": "锐评内容",
+            "evidence_refs": "segments[0]",
+        },
+        ensure_ascii=False,
+    )
+
+    result = parse_review_ai_result(raw)
+
+    assert result.evidence_refs == ("segments[0]",)
+
+
 def test_parse_review_ai_result_rejects_missing_fields() -> None:
     with pytest.raises(ReviewAIFormatError, match="critique"):
         parse_review_ai_result('{"review":"ok","analysis":"ok"}')
+
+
+@pytest.mark.parametrize("refs", [None, "", [], [""]])
+def test_parse_review_ai_result_rejects_missing_or_empty_evidence_refs(refs: object) -> None:
+    payload = {"review": "ok", "analysis": "ok", "critique": "ok"}
+    if refs is not None:
+        payload["evidence_refs"] = refs
+
+    with pytest.raises(ReviewAIFormatError, match="evidence_refs"):
+        parse_review_ai_result(json.dumps(payload, ensure_ascii=False))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review", ["ok"]),
+        ("analysis", {"text": "ok"}),
+        ("critique", 1),
+        ("disclaimer", ["仅供研究"]),
+    ],
+)
+def test_parse_review_ai_result_rejects_non_string_text_fields(field: str, value: object) -> None:
+    payload = {
+        "review": "复盘",
+        "analysis": "分析",
+        "critique": "锐评",
+        "evidence_refs": ["segments[0]"],
+    }
+    payload[field] = value
+
+    with pytest.raises(ReviewAIFormatError, match=field):
+        parse_review_ai_result(json.dumps(payload, ensure_ascii=False))
