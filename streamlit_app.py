@@ -3,11 +3,13 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from datetime import date
 from fnmatch import fnmatch
 from html import escape
 from pathlib import Path
 from typing import Callable
+from urllib.request import urlopen
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -81,6 +83,9 @@ DOWNLOAD_JOB_STATUS_LABELS = {
     "paused": "已暂停",
     "completed": "下载完成",
 }
+ETF_SOURCE_RETRY_ATTEMPTS = 2
+ETF_SOURCE_RETRY_DELAY_SECONDS = 0.6
+TENCENT_ETF_QUOTE_BATCH_SIZE = 80
 TDX_DOWNLOAD_CATEGORY_LABELS = {
     "stock": "个股",
     "etf": "ETF",
@@ -1059,7 +1064,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     etf_meta_col1, etf_meta_col2 = st.columns([1, 3])
     if etf_meta_col1.button("重新加载 ETF 名单", key="review_reload_akshare_etf_list"):
         st.session_state[etf_reload_token_key] = int(st.session_state.get(etf_reload_token_key, 0)) + 1
-    etf_meta_col2.caption("ETF 名称和候选列表来自 AkShare；K线读取、下载口径不变。")
+    etf_meta_col2.caption("ETF 名称和候选列表优先来自新浪 / 腾讯；K线读取、下载口径不变。")
     etf_reload_token = int(st.session_state.get(etf_reload_token_key, 0))
     index_symbols: list[str] = []
     if index_enabled:
@@ -1886,7 +1891,10 @@ def _cached_akshare_etf_index(refresh_token: int = 0) -> pd.DataFrame:
     import akshare as ak
 
     _ = refresh_token
-    return _akshare_etf_index_from_table(ak.fund_etf_spot_em())
+    return _load_etf_index_from_dual_sources(
+        sina_loader=lambda: ak.fund_etf_category_sina(symbol="ETF基金"),
+        tencent_loader=_fetch_tencent_etf_index,
+    )
 
 
 def _review_etf_index_with_fallback(
@@ -1899,11 +1907,143 @@ def _review_etf_index_with_fallback(
     try:
         loaded = load(refresh_token)
     except Exception as exc:  # noqa: BLE001
-        return fallback, f"AkShare ETF 名单暂时不可用，已使用内置常用 ETF 名称表。原因：{_brief_error_text(exc)}"
+        return fallback, f"新浪 / 腾讯 ETF 名单暂时不可用，已使用内置常用 ETF 名称表。原因：{_brief_error_text(exc)}"
     merged = _merge_etf_indexes(loaded, fallback)
     if merged.empty:
-        return fallback, "AkShare ETF 名单为空，已使用内置常用 ETF 名称表。"
+        return fallback, "新浪 / 腾讯 ETF 名单为空，已使用内置常用 ETF 名称表。"
     return merged, ""
+
+
+def _load_etf_index_from_dual_sources(
+    *,
+    sina_loader: Callable[[], pd.DataFrame],
+    tencent_loader: Callable[[tuple[str, ...]], pd.DataFrame],
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    errors: list[str] = []
+    sina_index = _load_etf_source_with_retry(
+        "新浪",
+        lambda: _akshare_etf_index_from_table(sina_loader()),
+        errors=errors,
+        sleep_func=sleep_func,
+    )
+    source_symbols = []
+    if not sina_index.empty and "symbol" in sina_index.columns:
+        source_symbols.extend(sina_index["symbol"].dropna().astype(str).tolist())
+    source_symbols.extend(row[0] for row in FALLBACK_REVIEW_ETFS)
+    tencent_index = _load_etf_source_with_retry(
+        "腾讯",
+        lambda: tencent_loader(tuple(unique_symbols(source_symbols))),
+        errors=errors,
+        sleep_func=sleep_func,
+    )
+    merged = _merge_etf_indexes(sina_index, tencent_index)
+    if merged.empty:
+        detail = "；".join(errors) if errors else "两个数据源均返回空表"
+        raise RuntimeError(f"ETF 名单双源读取失败：{detail}")
+    return merged
+
+
+def _load_etf_source_with_retry(
+    source_name: str,
+    loader: Callable[[], pd.DataFrame],
+    *,
+    errors: list[str],
+    sleep_func: Callable[[float], None],
+) -> pd.DataFrame:
+    for attempt in range(ETF_SOURCE_RETRY_ATTEMPTS):
+        try:
+            result = loader()
+        except Exception as exc:  # noqa: BLE001
+            if attempt + 1 < ETF_SOURCE_RETRY_ATTEMPTS:
+                sleep_func(ETF_SOURCE_RETRY_DELAY_SECONDS)
+                continue
+            errors.append(f"{source_name}: {_brief_error_text(exc)}")
+            return pd.DataFrame()
+        if isinstance(result, pd.DataFrame) and not result.empty:
+            return result
+        if attempt + 1 < ETF_SOURCE_RETRY_ATTEMPTS:
+            sleep_func(ETF_SOURCE_RETRY_DELAY_SECONDS)
+            continue
+        errors.append(f"{source_name}: 返回空表")
+    return pd.DataFrame()
+
+
+def _fetch_tencent_etf_index(symbols: tuple[str, ...] | list[str]) -> pd.DataFrame:
+    normalized = unique_symbols(symbols)
+    if not normalized:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    frames: list[pd.DataFrame] = []
+    for batch in _chunks(normalized, TENCENT_ETF_QUOTE_BATCH_SIZE):
+        query = ",".join(_tencent_quote_symbol(symbol) for symbol in batch)
+        if not query:
+            continue
+        with urlopen(f"https://qt.gtimg.cn/q={query}", timeout=8) as response:  # noqa: S310
+            text = response.read().decode("gbk", errors="replace")
+        frame = _tencent_etf_index_from_quote_text(text)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return _merge_etf_indexes(pd.concat(frames, ignore_index=True), pd.DataFrame())
+
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    if size < 1:
+        raise ValueError("分批大小至少为 1。")
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _tencent_quote_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if "." not in normalized:
+        return ""
+    code, exchange = normalized.split(".", 1)
+    if exchange == "SH":
+        return f"sh{code}"
+    if exchange == "SZ":
+        return f"sz{code}"
+    return ""
+
+
+def _tencent_etf_index_from_quote_text(text: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for match in re.finditer(r'v_((?:sh|sz)\d{6})="([^"]*)"', str(text)):
+        raw_symbol = match.group(1)
+        fields = match.group(2).split("~")
+        if len(fields) < 3:
+            continue
+        symbol = normalize_symbol(raw_symbol)
+        if not _has_etf_like_symbol([symbol]):
+            continue
+        name = str(fields[1] if len(fields) > 1 else "").strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "amount": _tencent_quote_amount(fields),
+                "category": _etf_category_key(name),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return pd.DataFrame(rows, columns=["symbol", "name", "amount", "category"])
+
+
+def _tencent_quote_amount(fields: list[str]) -> float:
+    if len(fields) > 57:
+        amount_10k = pd.to_numeric(pd.Series([fields[57]]), errors="coerce").iloc[0]
+        if not pd.isna(amount_10k):
+            return float(amount_10k) * 10_000
+    if len(fields) > 35:
+        parts = str(fields[35]).split("/")
+        if len(parts) >= 3:
+            amount = pd.to_numeric(pd.Series([parts[2]]), errors="coerce").iloc[0]
+            if not pd.isna(amount):
+                return float(amount)
+    return 0.0
 
 
 def _fallback_review_etf_index() -> pd.DataFrame:

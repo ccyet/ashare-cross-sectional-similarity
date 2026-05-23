@@ -35,6 +35,7 @@ from streamlit_app import (
     _history_kline_series,
     _history_quick_window_feedback,
     _local_data_fingerprint,
+    _load_etf_index_from_dual_sources,
     _size_spread_chart,
     _size_spread_series,
     _size_spread_window_stats,
@@ -845,6 +846,44 @@ def test_review_etf_index_fallback_shortens_network_error_message() -> None:
     assert not index.empty
     assert len(message) < 220
     assert "88.push2.eastmoney.com" in message
+
+
+def test_dual_etf_sources_use_tencent_when_sina_fails() -> None:
+    def sina_loader() -> pd.DataFrame:
+        raise TimeoutError("sina timeout")
+
+    def tencent_loader(symbols: tuple[str, ...]) -> pd.DataFrame:
+        assert "512480.SH" in symbols
+        return pd.DataFrame([{"symbol": "512480.SH", "name": "半导体ETF", "amount": 1_000_000, "category": "半导体"}])
+
+    index = _load_etf_index_from_dual_sources(
+        sina_loader=sina_loader,
+        tencent_loader=tencent_loader,
+        sleep_func=lambda _seconds: None,
+    )
+
+    assert _etf_name_map_from_index(index, ("512480.SH",)) == {"512480.SH": "半导体ETF"}
+
+
+def test_dual_etf_sources_retry_before_switching_source() -> None:
+    calls = {"sina": 0}
+    sleeps: list[float] = []
+
+    def flaky_sina_loader() -> pd.DataFrame:
+        calls["sina"] += 1
+        if calls["sina"] == 1:
+            raise TimeoutError("temporary timeout")
+        return pd.DataFrame({"代码": ["512480"], "名称": ["半导体ETF"], "成交额": [1_000_000]})
+
+    index = _load_etf_index_from_dual_sources(
+        sina_loader=flaky_sina_loader,
+        tencent_loader=lambda _symbols: pd.DataFrame(),
+        sleep_func=sleeps.append,
+    )
+
+    assert calls["sina"] == 2
+    assert sleeps
+    assert _etf_name_map_from_index(index, ("512480.SH",)) == {"512480.SH": "半导体ETF"}
 
 
 def test_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:
