@@ -244,3 +244,24 @@ def test_search_reports_forward_returns_after_historical_window() -> None:
     assert row["t_plus_3_return"] == pytest.approx(28 / 22 - 1)
     assert row["t_plus_5_return"] == pytest.approx(32 / 22 - 1)
     assert row["t_plus_10_return"] == pytest.approx(42 / 22 - 1)
+
+
+def test_forward_returns_from_arrays_matches_frame_lookup() -> None:
+    bars = _bars("000001.SZ", [10, 12, 11, 15, 18, 21])
+    date_values = bars["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    close_values = bars["close"].to_numpy(dtype=float, copy=False)
+
+    expected = similarity_module._forward_returns(bars, pd.Timestamp("2024-01-03"), (1, 3, 10))
+    actual = similarity_module._forward_returns_from_arrays(
+        date_values,
+        close_values,
+        pd.Timestamp("2024-01-03"),
+        (1, 3, 10),
+    )
+
+    assert actual.keys() == expected.keys()
+    for key in expected:
+        if np.isnan(expected[key]):
+            assert np.isnan(actual[key])
+        else:
+            assert actual[key] == pytest.approx(expected[key])

@@ -61,6 +61,7 @@ TDX_KLINE_PREFIXES = {
 
 _TQ_CLIENT: Any | None = None
 _TQ_CLIENT_IMPORT_KEY: str | None = None
+_TQ_CLIENT_SYS_PATHS: set[str] = set()
 _INITIALIZED = False
 _INITIALIZED_CLIENT_ID: int | None = None
 
@@ -302,6 +303,7 @@ def _load_tq(tqcenter_path: str = "") -> Any:
         _INITIALIZED = False
         _INITIALIZED_CLIENT_ID = None
     if candidate_paths:
+        _remove_tqcenter_import_paths()
         sys.modules.pop("tqcenter", None)
 
     errors: list[str] = []
@@ -314,6 +316,7 @@ def _load_tq(tqcenter_path: str = "") -> Any:
         path_text = str(resolved)
         if path_text not in sys.path:
             sys.path.insert(0, path_text)
+            _TQ_CLIENT_SYS_PATHS.add(path_text)
             inserted = True
         try:
             module = importlib.import_module("tqcenter")
@@ -327,8 +330,10 @@ def _load_tq(tqcenter_path: str = "") -> Any:
                     sys.path.remove(path_text)
                 except ValueError:
                     pass
+                _TQ_CLIENT_SYS_PATHS.discard(path_text)
 
     try:
+        _remove_tqcenter_import_paths()
         module = importlib.import_module("tqcenter")
         _TQ_CLIENT = getattr(module, "tq")
         _TQ_CLIENT_IMPORT_KEY = cache_key
@@ -341,6 +346,13 @@ def _load_tq(tqcenter_path: str = "") -> Any:
             f" {TDX_TQCENTER_ENV_VAR} 或下载源输入框指向 TDX 的 PYPlugins/user 目录。"
             f" 详情: {details}"
         ) from exc
+
+
+def _remove_tqcenter_import_paths() -> None:
+    for path_text in list(_TQ_CLIENT_SYS_PATHS):
+        while path_text in sys.path:
+            sys.path.remove(path_text)
+        _TQ_CLIENT_SYS_PATHS.discard(path_text)
 
 
 def _tq_import_cache_key(paths: list[Path]) -> str:

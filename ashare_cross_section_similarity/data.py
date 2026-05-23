@@ -24,11 +24,16 @@ IMPORT_STATUS_COLUMNS = ["symbol", "status", "rows", "total_rows", "start", "end
 def resolve_timeframe_root(data_root: str | Path, timeframe: str) -> Path:
     root = Path(data_root).expanduser()
     timeframe_dir = TIMEFRAME_DIR_NAMES.get(str(timeframe), str(timeframe))
+    root_name = root.name.lower()
+    if root_name == "data":
+        return root / "market" / timeframe_dir
+    if root_name == "market":
+        return root / timeframe_dir
     if timeframe == "1d":
         return root
-    if root.name.lower() == "daily":
+    if root_name == "daily":
         return root.parent / timeframe_dir
-    return root / timeframe_dir if root.name.lower() not in TIMEFRAME_DIR_NAMES.values() else root
+    return root / timeframe_dir if root_name not in TIMEFRAME_DIR_NAMES.values() else root
 
 
 def available_symbols(data_root: str | Path, timeframe: str = "1d", adjust: str = "qfq") -> list[str]:

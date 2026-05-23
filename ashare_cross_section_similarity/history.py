@@ -19,6 +19,8 @@ from ashare_cross_section_similarity.similarity_algorithms import (
 from ashare_cross_section_similarity.similarity import _prepare_bars, _score_results
 from ashare_cross_section_similarity.universe import normalize_symbol
 
+HISTORY_CANDIDATE_CHUNK_SIZE = 4096
+
 
 @dataclass(frozen=True)
 class HistorySearchConfig:
@@ -68,7 +70,7 @@ def search_history(bars: pd.DataFrame, config: HistorySearchConfig) -> HistorySe
         raise ValueError(f"未找到 {symbol} 的本地行情。")
 
     as_of = inclusive_end_timestamp(config.as_of)
-    available = prepared.loc[prepared["date"] <= as_of].copy()
+    available = prepared.loc[prepared["date"] <= as_of]
     if config.window_start is None and len(available) < config.window_size:
         raise ValueError("as-of 之前数据不足，无法形成当前窗口。")
 
@@ -183,6 +185,57 @@ def _history_candidate_frame(
     amount = pd.to_numeric(prepared["amount"], errors="coerce").astype(float).to_numpy()
     volume = pd.to_numeric(prepared["volume"], errors="coerce").astype(float).to_numpy()
     liquidity = np.where(np.isfinite(amount), amount, volume)
+    date_values = prepared["date"].to_numpy()
+    chunk_size = max(1, int(HISTORY_CANDIDATE_CHUNK_SIZE))
+    if len(starts) <= chunk_size:
+        return _history_candidate_frame_chunk(
+            close=close,
+            liquidity=liquidity,
+            date_values=date_values,
+            symbol=symbol,
+            starts=starts,
+            window_size=window_size,
+            target_metric=target_metric,
+            target_features=target_features,
+            forward_windows=forward_windows,
+            algorithm=algorithm,
+            candidate_index_offset=0,
+        )
+    chunks: list[pd.DataFrame] = []
+    for offset in range(0, len(starts), chunk_size):
+        chunk_starts = starts[offset : offset + chunk_size]
+        chunks.append(
+            _history_candidate_frame_chunk(
+                close=close,
+                liquidity=liquidity,
+                date_values=date_values,
+                symbol=symbol,
+                starts=chunk_starts,
+                window_size=window_size,
+                target_metric=target_metric,
+                target_features=target_features,
+                forward_windows=forward_windows,
+                algorithm=algorithm,
+                candidate_index_offset=offset,
+            )
+        )
+    return pd.concat(chunks, ignore_index=True)
+
+
+def _history_candidate_frame_chunk(
+    *,
+    close: np.ndarray,
+    liquidity: np.ndarray,
+    date_values: np.ndarray,
+    symbol: str,
+    starts: np.ndarray,
+    window_size: int,
+    target_metric,
+    target_features: dict[str, float],
+    forward_windows: tuple[int, ...],
+    algorithm: str,
+    candidate_index_offset: int,
+) -> pd.DataFrame:
     close_windows = np.lib.stride_tricks.sliding_window_view(close, window_size)[starts]
     path_matrix = _normalized_close_paths(close_windows)
     distance_parts = distance_for_close_matrix(close_windows, target_metric)
@@ -199,11 +252,11 @@ def _history_candidate_frame(
     ends = starts + window_size - 1
     frame = pd.DataFrame(
         {
-            "_candidate_index": np.arange(len(starts)),
+            "_candidate_index": np.arange(candidate_index_offset, candidate_index_offset + len(starts)),
             "算法": algorithm,
             "symbol": symbol,
-            "窗口开始": prepared["date"].iloc[starts].to_numpy(),
-            "窗口结束": prepared["date"].iloc[ends].to_numpy(),
+            "窗口开始": date_values[starts],
+            "窗口结束": date_values[ends],
             "K线数量": window_size,
             "路径距离": path_distance,
             "价格路径距离": price_path_distance,

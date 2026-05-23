@@ -14,6 +14,20 @@ def test_resolve_timeframe_root_maps_daily_root_to_intraday_root(tmp_path: Path)
     assert resolve_timeframe_root(daily_root, "30m") == tmp_path / "market" / "30m"
 
 
+def test_resolve_timeframe_root_accepts_market_parent_root(tmp_path: Path) -> None:
+    market_root = tmp_path / "market"
+
+    assert resolve_timeframe_root(market_root, "1d") == market_root / "daily"
+    assert resolve_timeframe_root(market_root, "30m") == market_root / "30m"
+
+
+def test_resolve_timeframe_root_accepts_data_parent_root(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+
+    assert resolve_timeframe_root(data_root, "1d") == data_root / "market" / "daily"
+    assert resolve_timeframe_root(data_root, "30m") == data_root / "market" / "30m"
+
+
 def test_load_local_bars_reads_only_requested_symbols_and_timeframe(tmp_path: Path) -> None:
     daily_qfq = tmp_path / "market" / "daily" / "qfq"
     minute_qfq = tmp_path / "market" / "30m" / "qfq"

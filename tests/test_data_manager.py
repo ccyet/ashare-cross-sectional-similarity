@@ -60,3 +60,11 @@ def test_plan_kline_migration_rejects_destination_inside_source(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="目标目录不能位于来源目录内部"):
         plan_kline_migration(source, source / "nested")
+
+
+def test_plan_kline_migration_rejects_file_target_same_as_source(tmp_path: Path) -> None:
+    source = tmp_path / "000001.SZ.parquet"
+    source.write_text("bars")
+
+    with pytest.raises(ValueError, match="来源文件和目标文件不能相同"):
+        plan_kline_migration(source, tmp_path)

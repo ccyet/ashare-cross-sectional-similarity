@@ -30,6 +30,8 @@ from streamlit_app import (
     _format_data_check_status,
     _format_results,
     _full_daily_download_universe,
+    _fetch_tencent_etf_index,
+    _fetch_sina_etf_index,
     _history_bucket_summary,
     _history_forward_summary,
     _history_kline_series,
@@ -884,6 +886,66 @@ def test_dual_etf_sources_retry_before_switching_source() -> None:
     assert calls["sina"] == 2
     assert sleeps
     assert _etf_name_map_from_index(index, ("512480.SH",)) == {"512480.SH": "半导体ETF"}
+
+
+class _FakeHttpResponse:
+    def __init__(self, text: str, *, encoding: str = "utf-8") -> None:
+        self._text = text
+        self._encoding = encoding
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._text.encode(self._encoding)
+
+
+def test_sina_etf_index_uses_direct_sina_endpoint_and_throttles_pages() -> None:
+    requested_urls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_open(url: str, timeout: int):
+        assert timeout > 0
+        requested_urls.append(url)
+        if "getHQNodeStockCount" in url:
+            return _FakeHttpResponse('"2"')
+        return _FakeHttpResponse(
+            '[{"symbol":"sh512480","name":"半导体ETF国联安","amount":2080161895},'
+            '{"symbol":"sh510300","name":"沪深300ETF华泰柏瑞","amount":6421618436}]'
+        )
+
+    index = _fetch_sina_etf_index(page_size=1, open_func=fake_open, sleep_func=sleeps.append)
+
+    assert requested_urls[0].startswith("https://vip.stock.finance.sina.com.cn/")
+    assert all("eastmoney" not in url and "push2" not in url for url in requested_urls)
+    assert len([url for url in requested_urls if "getHQNodeData" in url]) == 2
+    assert sleeps
+    assert _etf_name_map_from_index(index, ("512480.SH",)) == {"512480.SH": "半导体ETF国联安"}
+
+
+def test_tencent_etf_index_throttles_quote_batches() -> None:
+    sleeps: list[float] = []
+    urls: list[str] = []
+
+    def fake_open(url: str, timeout: int):
+        assert timeout > 0
+        urls.append(url)
+        return _FakeHttpResponse('v_sh512480="1~半导体ETF国联安~512480~~~~~~~~~~~~~~~~~~~~~~~~~~~~";', encoding="gbk")
+
+    index = _fetch_tencent_etf_index(
+        ("512480.SH", "510300.SH"),
+        batch_size=1,
+        open_func=fake_open,
+        sleep_func=sleeps.append,
+    )
+
+    assert len(urls) == 2
+    assert all("qt.gtimg.cn" in url for url in urls)
+    assert sleeps
+    assert _etf_name_map_from_index(index, ("512480.SH",)) == {"512480.SH": "半导体ETF国联安"}
 
 
 def test_top_etf_options_uses_name_labels_and_keeps_largest_same_theme() -> None:

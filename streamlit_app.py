@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -85,6 +86,9 @@ DOWNLOAD_JOB_STATUS_LABELS = {
 }
 ETF_SOURCE_RETRY_ATTEMPTS = 2
 ETF_SOURCE_RETRY_DELAY_SECONDS = 0.6
+ETF_SOURCE_REQUEST_DELAY_SECONDS = 0.2
+ETF_SOURCE_TIMEOUT_SECONDS = 8
+SINA_ETF_PAGE_SIZE = 100
 TENCENT_ETF_QUOTE_BATCH_SIZE = 80
 TDX_DOWNLOAD_CATEGORY_LABELS = {
     "stock": "个股",
@@ -1887,12 +1891,10 @@ def _cached_review_constituents(kind: str, name: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_akshare_etf_index(refresh_token: int = 0) -> pd.DataFrame:
-    import akshare as ak
-
+def _cached_review_etf_index(refresh_token: int = 0) -> pd.DataFrame:
     _ = refresh_token
     return _load_etf_index_from_dual_sources(
-        sina_loader=lambda: ak.fund_etf_category_sina(symbol="ETF基金"),
+        sina_loader=_fetch_sina_etf_index,
         tencent_loader=_fetch_tencent_etf_index,
     )
 
@@ -1902,7 +1904,7 @@ def _review_etf_index_with_fallback(
     *,
     loader: Callable[[int], pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, str]:
-    load = loader or _cached_akshare_etf_index
+    load = loader or _cached_review_etf_index
     fallback = _fallback_review_etf_index()
     try:
         loaded = load(refresh_token)
@@ -1969,20 +1971,69 @@ def _load_etf_source_with_retry(
     return pd.DataFrame()
 
 
-def _fetch_tencent_etf_index(symbols: tuple[str, ...] | list[str]) -> pd.DataFrame:
+def _fetch_sina_etf_index(
+    *,
+    page_size: int = SINA_ETF_PAGE_SIZE,
+    open_func: Callable[..., object] = urlopen,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    if page_size < 1:
+        raise ValueError("新浪 ETF 分页大小至少为 1。")
+    count_url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=etf_hq_fund"
+    count_text = _read_http_text(count_url, open_func=open_func)
+    total = int(str(json.loads(count_text)).strip())
+    pages = max(1, math.ceil(total / page_size))
+    frames: list[pd.DataFrame] = []
+    for page in range(1, pages + 1):
+        data_url = (
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeData"
+            f"?page={page}&num={page_size}&sort=symbol&asc=1&node=etf_hq_fund&symbol="
+        )
+        text = _read_http_text(data_url, open_func=open_func)
+        payload = json.loads(text)
+        if isinstance(payload, list) and payload:
+            frame = _akshare_etf_index_from_table(pd.DataFrame(payload))
+            if not frame.empty:
+                frames.append(frame)
+        if page < pages:
+            sleep_func(ETF_SOURCE_REQUEST_DELAY_SECONDS)
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return _merge_etf_indexes(pd.concat(frames, ignore_index=True), pd.DataFrame())
+
+
+def _read_http_text(url: str, *, open_func: Callable[..., object] = urlopen) -> str:
+    with open_func(url, timeout=ETF_SOURCE_TIMEOUT_SECONDS) as response:  # noqa: S310
+        raw = response.read()
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+
+def _fetch_tencent_etf_index(
+    symbols: tuple[str, ...] | list[str],
+    *,
+    batch_size: int = TENCENT_ETF_QUOTE_BATCH_SIZE,
+    open_func: Callable[..., object] = urlopen,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
     normalized = unique_symbols(symbols)
     if not normalized:
         return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
     frames: list[pd.DataFrame] = []
-    for batch in _chunks(normalized, TENCENT_ETF_QUOTE_BATCH_SIZE):
+    batches = _chunks(normalized, batch_size)
+    for batch_index, batch in enumerate(batches):
         query = ",".join(_tencent_quote_symbol(symbol) for symbol in batch)
         if not query:
             continue
-        with urlopen(f"https://qt.gtimg.cn/q={query}", timeout=8) as response:  # noqa: S310
+        with open_func(f"https://qt.gtimg.cn/q={query}", timeout=ETF_SOURCE_TIMEOUT_SECONDS) as response:  # noqa: S310
             text = response.read().decode("gbk", errors="replace")
         frame = _tencent_etf_index_from_quote_text(text)
         if not frame.empty:
             frames.append(frame)
+        if batch_index + 1 < len(batches):
+            sleep_func(ETF_SOURCE_REQUEST_DELAY_SECONDS)
     if not frames:
         return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
     return _merge_etf_indexes(pd.concat(frames, ignore_index=True), pd.DataFrame())

@@ -79,6 +79,7 @@ class _FakeTqStockListInitializeFail(_FakeTqStockList):
 def _reset_tq_import_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT", None)
     monkeypatch.setattr(tdx_source, "_TQ_CLIENT_IMPORT_KEY", None)
+    monkeypatch.setattr(tdx_source, "_TQ_CLIENT_SYS_PATHS", set())
     monkeypatch.setattr(tdx_source, "_INITIALIZED", False)
     monkeypatch.setattr(tdx_source, "_INITIALIZED_CLIENT_ID", None)
     sys.modules.pop("tqcenter", None)
@@ -331,6 +332,8 @@ def test_load_tq_honors_changed_tqcenter_path(tmp_path, monkeypatch: pytest.Monk
     try:
         first = tdx_source._load_tq(str(first_dir))
         second = tdx_source._load_tq(str(second_dir))
+        assert str(first_dir) not in sys.path
+        assert sys.path[0] == str(second_dir)
     finally:
         sys.modules.pop("tqcenter", None)
         for item in [str(first_dir), str(second_dir)]:

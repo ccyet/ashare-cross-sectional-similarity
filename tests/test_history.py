@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import ashare_cross_section_similarity.history as history_module
 from ashare_cross_section_similarity.data import inclusive_end_timestamp
 from ashare_cross_section_similarity.features import (
     FEATURE_COLUMNS,
@@ -222,6 +223,35 @@ def test_history_baseline_candidate_frame_uses_recent_weighted_distance() -> Non
     )
 
     assert frame.loc[1, "路径距离"] > frame.loc[0, "路径距离"]
+
+
+def test_history_candidate_frame_respects_chunk_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    prepared = _prepare_bars(_bars("000001.SZ", [10, 11, 12, 13, 14, 15, 16, 17]))
+    target = prepared.iloc[:3].reset_index(drop=True)
+    starts = np.array([0, 1, 2, 3, 4])
+    calls: list[int] = []
+    original_chunk = history_module._history_candidate_frame_chunk
+
+    def counted_chunk(**kwargs):
+        calls.append(len(kwargs["starts"]))
+        return original_chunk(**kwargs)
+
+    monkeypatch.setattr(history_module, "HISTORY_CANDIDATE_CHUNK_SIZE", 2)
+    monkeypatch.setattr(history_module, "_history_candidate_frame_chunk", counted_chunk)
+
+    frame = _history_candidate_frame(
+        prepared=prepared,
+        symbol="000001.SZ",
+        starts=starts,
+        window_size=3,
+        target_metric=build_algorithm_target(target, "baseline_price_feature"),
+        target_features=window_features(target),
+        forward_windows=(1,),
+        algorithm="baseline_price_feature",
+    )
+
+    assert calls == [2, 2, 1]
+    assert frame["_candidate_index"].tolist() == [0, 1, 2, 3, 4]
 
 
 def test_search_history_matches_legacy_window_loop() -> None:

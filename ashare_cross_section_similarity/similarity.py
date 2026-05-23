@@ -81,7 +81,7 @@ def search_cross_section(
     start = pd.Timestamp(config.start)
     end = inclusive_end_timestamp(config.end)
     bars_by_symbol = _bars_by_symbol(prepared)
-    windows = _windows_by_symbol(prepared, start, end)
+    windows = _windows_by_symbol_from_groups(bars_by_symbol, start, end)
     target_window = windows.get(target_symbol)
     if target_window is None or target_window.empty:
         raise ValueError(f"目标标的 {target_symbol} 在所选区间没有行情数据。")
@@ -141,7 +141,7 @@ def search_cross_section(
         for column in FEATURE_COLUMNS:
             row[column] = features[column]
             row[f"feature_diff::{column}"] = abs(features[column] - target_features[column])
-        row.update(_forward_returns(bars_by_symbol[symbol], candidate["date"].max(), config.forward_windows))
+        row.update(_forward_returns_for_group(bars_by_symbol[symbol], candidate["date"].max(), config.forward_windows))
         rows.append(row)
 
     result_frame = pd.DataFrame(rows)
@@ -374,20 +374,17 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values(["stock_code", "date"]).reset_index(drop=True)
 
 
-def _windows_by_symbol(
-    bars: pd.DataFrame,
+def _windows_by_symbol_from_groups(
+    bars_by_symbol: dict[str, pd.DataFrame],
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> dict[str, pd.DataFrame]:
-    if bars.empty:
-        return {}
-    window = bars.loc[bars["date"].between(start, end)]
-    if window.empty:
-        return {}
-    return {
-        symbol: group.sort_values("date").reset_index(drop=True)
-        for symbol, group in window.groupby("stock_code", sort=False)
-    }
+    windows: dict[str, pd.DataFrame] = {}
+    for symbol, group in bars_by_symbol.items():
+        window = group.loc[group["date"].between(start, end)]
+        if not window.empty:
+            windows[symbol] = window.reset_index(drop=True)
+    return windows
 
 
 def _bars_by_symbol(bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -397,6 +394,19 @@ def _bars_by_symbol(bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
         symbol: group.sort_values("date").reset_index(drop=True)
         for symbol, group in bars.groupby("stock_code", sort=False)
     }
+
+
+def _forward_returns_for_group(
+    bars: pd.DataFrame,
+    window_end: object,
+    forward_windows: tuple[int, ...],
+) -> dict[str, float]:
+    return _forward_returns_from_arrays(
+        bars["date"].to_numpy(dtype="datetime64[ns]", copy=False),
+        bars["close"].to_numpy(dtype=float, copy=False),
+        window_end,
+        forward_windows,
+    )
 
 
 def _forward_returns(
@@ -419,6 +429,30 @@ def _forward_returns(
             outcomes[f"t_plus_{horizon}_return"] = float("nan")
             continue
         target_close = float(bars.iloc[target_position]["close"])
+        outcomes[f"t_plus_{horizon}_return"] = target_close / base_close - 1.0
+    return outcomes
+
+
+def _forward_returns_from_arrays(
+    date_values: np.ndarray,
+    close_values: np.ndarray,
+    window_end: object,
+    forward_windows: tuple[int, ...],
+) -> dict[str, float]:
+    outcomes: dict[str, float] = {}
+    if len(date_values) == 0:
+        return {f"t_plus_{horizon}_return": float("nan") for horizon in forward_windows}
+    end_ts = pd.Timestamp(window_end).to_datetime64()
+    end_position = int(np.searchsorted(date_values, end_ts, side="right") - 1)
+    if end_position < 0:
+        return {f"t_plus_{horizon}_return": float("nan") for horizon in forward_windows}
+    base_close = float(close_values[end_position])
+    for horizon in forward_windows:
+        target_position = end_position + horizon
+        if target_position >= len(close_values) or base_close == 0 or not np.isfinite(base_close):
+            outcomes[f"t_plus_{horizon}_return"] = float("nan")
+            continue
+        target_close = float(close_values[target_position])
         outcomes[f"t_plus_{horizon}_return"] = target_close / base_close - 1.0
     return outcomes
 

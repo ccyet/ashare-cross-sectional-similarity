@@ -84,6 +84,8 @@ def _validate_migration_paths(source: Path, destination: Path) -> None:
         raise FileNotFoundError(f"来源路径不存在：{source}")
     if source.is_file() and not _matches_patterns(source, KLINE_FILE_PATTERNS):
         raise ValueError("来源文件不是支持的 K 线数据格式。")
+    if source.is_file() and (destination / source.name).resolve(strict=False) == source.resolve(strict=True):
+        raise ValueError("来源文件和目标文件不能相同。")
     if source.is_dir() and _is_relative_to(destination.resolve(strict=False), source.resolve(strict=True)):
         raise ValueError("目标目录不能位于来源目录内部。")
     if source.resolve(strict=True) == destination.resolve(strict=False):
