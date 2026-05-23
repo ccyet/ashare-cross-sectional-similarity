@@ -173,9 +173,10 @@ def test_render_review_text_uses_data_only_language() -> None:
 
     text = render_review_text(result)
 
-    assert "总体复盘" in text
+    assert "研究复盘：讲证据" in text
     assert "区间收益 30.00%" in text
-    assert "关键波段" in text
+    assert "A股语境" in text
+    assert "关键波段证据" in text
     assert "新闻" not in text
     assert "基本面" not in text
 
@@ -213,9 +214,10 @@ def test_render_multi_review_text_summarizes_symbols_and_benchmark_relationships
 
     text = render_multi_review_text([first, second], comparisons)
 
-    assert "多股票总体复盘" in text
+    assert "研究复盘：讲证据" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
+    assert "结构分层" in text
     assert "对标关系" in text
 
 
@@ -228,7 +230,7 @@ def test_render_multi_review_text_accepts_comparison_table_without_symbol_column
 
     text = render_multi_review_text([result], comparisons)
 
-    assert "多股票总体复盘" in text
+    assert "研究复盘：讲证据" in text
     assert "沪深300" in text
 
 
@@ -292,10 +294,11 @@ def test_render_video_script_text_includes_script_structure() -> None:
 
     assert "视频脚本视角" in text
     assert "YTD" in text
-    assert "今年表现" in text
-    assert "入场难度" in text
-    assert "持有压力" in text
+    assert "定位" in text
+    assert "入场" in text
+    assert "压力" in text
     assert "指数弹性" in text
+    assert "明日验证" in text
     assert "标的" not in text
     assert "\n\n- " not in text
     assert "测试股" in text
@@ -319,8 +322,9 @@ def test_render_video_script_cards_html_uses_separate_highlight_cards() -> None:
     assert "000001.SZ" in html
     assert "今年表现" in html
     assert "入场难度" in html
-    assert "持有压力" in html
+    assert "压力" in html
     assert "指数弹性" in html
+    assert "明日验证" in html
     assert "<li" not in html
     assert "标的" not in html
 
@@ -345,8 +349,8 @@ def test_render_multi_video_script_text_lists_each_symbol() -> None:
     assert "视频脚本视角" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
-    assert "今年表现" in text
-    assert "入场难度" in text
-    assert "持有压力" in text
+    assert "定位" in text
+    assert "入场" in text
+    assert "压力" in text
     assert "标的" not in text
     assert "\n\n- " not in text

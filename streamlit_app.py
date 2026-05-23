@@ -1245,7 +1245,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         st.plotly_chart(_review_relative_chart(result.window, comparison_frames), use_container_width=True)
 
     st.markdown("**3. 自然语言复盘**")
-    st.markdown(render_review_text(result, comparison_frame))
+    st.markdown(render_review_text(result, comparison_frame, stock_names=stock_names))
     st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
     st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
     for warning in all_warnings:
@@ -1488,7 +1488,7 @@ def _render_multi_review_output(
                 st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("**3. 自然语言复盘**")
-    st.markdown(render_multi_review_text(valid_results, comparison_frame))
+    st.markdown(render_multi_review_text(valid_results, comparison_frame, stock_names=stock_names))
     st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
     st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
     for warning in dict.fromkeys(all_warnings):

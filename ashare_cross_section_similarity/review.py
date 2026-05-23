@@ -375,23 +375,34 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
 """.strip()
 
 
-def render_review_text(result: ReviewResult, comparisons: pd.DataFrame | None = None) -> str:
+def render_review_text(
+    result: ReviewResult,
+    comparisons: pd.DataFrame | None = None,
+    *,
+    stock_names: dict[str, str] | None = None,
+) -> str:
     if result.window.empty:
         return "\n".join(f"- {warning}" for warning in result.warnings) or "- 没有可复盘的数据。"
 
     overview = result.overview
+    title = _review_display_label(result.symbol, stock_names)
+    lifecycle = _lifecycle_label(overview)
     lines = [
         (
-            f"**总体复盘**：{result.symbol} 在 {_date_text(result.start)} 至 {_date_text(result.end)} "
-            f"共 {int(overview['k_bars'])} 根K线，区间收益 {_percent(overview['return'])}，"
-            f"最大回撤 {_percent(overview['max_drawdown'])}，最大浮盈 {_percent(overview['max_favorable'])}，"
-            f"上涨K线占比 {_percent(overview['up_day_share'])}。"
+            f"**研究复盘：讲证据**\n\n"
+            f"{title} 在 {_date_text(result.start)} 至 {_date_text(result.end)} 共 {int(overview['k_bars'])} 根K线。"
+            f"区间收益 {_percent(overview['return'])}，最大回撤 {_percent(overview['max_drawdown'])}，"
+            f"最大浮盈 {_percent(overview['max_favorable'])}，上涨K线占比 {_percent(overview['up_day_share'])}。"
+        ),
+        (
+            f"**A股语境**：这段走势暂归为“{lifecycle}”。"
+            f"{_lifecycle_conclusion(lifecycle)}"
         )
     ]
     if result.main_segments.empty:
         lines.append("**波段结构**：所选区间没有达到阈值的主要上涨或回撤段，走势更接近震荡或小幅单边变化。")
     else:
-        lines.append("**关键波段**：")
+        lines.append("**关键波段证据**：")
         for _, segment in result.main_segments.sort_values("开始日期").iterrows():
             lines.append(
                 "- "
@@ -407,7 +418,12 @@ def render_review_text(result: ReviewResult, comparisons: pd.DataFrame | None = 
     return "\n\n".join(lines)
 
 
-def render_multi_review_text(results: list[ReviewResult] | tuple[ReviewResult, ...], comparisons: pd.DataFrame | None = None) -> str:
+def render_multi_review_text(
+    results: list[ReviewResult] | tuple[ReviewResult, ...],
+    comparisons: pd.DataFrame | None = None,
+    *,
+    stock_names: dict[str, str] | None = None,
+) -> str:
     valid = [result for result in results if not result.window.empty]
     if not valid:
         return "- 没有可复盘的数据。"
@@ -416,18 +432,21 @@ def render_multi_review_text(results: list[ReviewResult] | tuple[ReviewResult, .
     worst = min(valid, key=lambda result: float(result.overview.get("return", float("inf"))))
     lines = [
         (
-            f"**多股票总体复盘**：本次共复盘 {len(valid)} 个标的，"
+            f"**研究复盘：讲证据**\n\n"
+            f"本次共复盘 {len(valid)} 个对象，"
             f"平均区间收益 {_percent(returns.mean()) if not returns.empty else '-'}。"
-            f"区间收益最高为 {best.symbol}（{_percent(best.overview.get('return'))}），"
-            f"最低为 {worst.symbol}（{_percent(worst.overview.get('return'))}）。"
+            f"区间收益最高为 {_review_display_label(best.symbol, stock_names)}（{_percent(best.overview.get('return'))}），"
+            f"最低为 {_review_display_label(worst.symbol, stock_names)}（{_percent(worst.overview.get('return'))}）。"
         ),
-        "**个股结构**：",
+        "**结构分层**：",
     ]
     for result in valid:
         overview = result.overview
+        lifecycle = _lifecycle_label(overview)
         lines.append(
             "- "
-            f"{result.symbol}：{int(overview['k_bars'])} 根K线，区间收益 {_percent(overview['return'])}，"
+            f"{_review_display_label(result.symbol, stock_names)}：{lifecycle}，"
+            f"{int(overview['k_bars'])} 根K线，区间收益 {_percent(overview['return'])}，"
             f"最大回撤 {_percent(overview['max_drawdown'])}，上涨K线占比 {_percent(overview['up_day_share'])}。"
         )
     if comparisons is not None and not comparisons.empty:
@@ -442,9 +461,8 @@ def render_multi_review_text(results: list[ReviewResult] | tuple[ReviewResult, .
                 strongest = valid_rows.iloc[pd.to_numeric(valid_rows["相关性"], errors="coerce").abs().argmax()]
                 relation_lines.append(
                     "- "
-                    f"{symbol} 相对 {strongest['标的']}：波动关系 {strongest.get('波动关系', '数据不足')}，"
-                    f"相关性 {_decimal(strongest.get('相关性'))}，超额收益 {_percent(strongest.get('超额收益'))}，"
-                    f"{strongest.get('强弱结论', '')}"
+                    f"{_review_display_label(symbol, stock_names)} 相对 {strongest['标的']}："
+                    f"{_comparison_script_label(strongest)}"
                 )
             if len(relation_lines) > 1:
                 lines.extend(relation_lines)
@@ -616,13 +634,14 @@ def _ytd_label(value: float) -> str:
 
 def _video_script_profile_block(profile: dict[str, object]) -> str:
     title = _video_script_title(profile)
+    setup = _video_setup_sentence(profile)
     return "\n\n".join(
         [
             f"**{title}**",
-            f"**今年表现**：YTD {_percent(profile.get('YTD收益'))}，{_video_ytd_phrase(profile.get('YTD收益'))}",
-            f"**入场难度**：{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}",
+            f"**定位**：{setup}",
+            f"**入场**：{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}",
             (
-                f"**持有压力**：入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
+                f"**压力**：入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
                 f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
             ),
             (
@@ -632,6 +651,7 @@ def _video_script_profile_block(profile: dict[str, object]) -> str:
                 f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
                 f"{profile.get('指数弹性结论', '')}"
             ),
+            f"**明日验证**：{_video_tomorrow_check(profile)}",
         ]
     )
 
@@ -647,6 +667,7 @@ def _video_script_profile_card_html(profile: dict[str, object]) -> str:
     if symbol and symbol != title:
         code_badge = f'<span class="review-script-code">{html_escape(symbol)}</span>'
 
+    setup_text = _video_setup_sentence(profile)
     entry_text = f"{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}"
     pressure_text = (
         f"入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
@@ -659,6 +680,7 @@ def _video_script_profile_card_html(profile: dict[str, object]) -> str:
         f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
         f"{profile.get('指数弹性结论', '')}"
     )
+    tomorrow_text = _video_tomorrow_check(profile)
     return f"""
 <article class="review-script-card {theme}">
   <header class="review-script-head">
@@ -674,10 +696,11 @@ def _video_script_profile_card_html(profile: dict[str, object]) -> str:
     {_video_metric_html("收盘回撤", _percent(profile.get("买入后最大收盘回撤")), drawdown_class)}
     {_video_metric_html("日内回撤", _percent(profile.get("单日最大日内回撤")), intraday_class)}
   </div>
-  {_video_card_section_html("今年表现", f"YTD {_percent(profile.get('YTD收益'))}，{_video_ytd_phrase(profile.get('YTD收益'))}")}
-  {_video_card_section_html("入场难度", entry_text)}
-  {_video_card_section_html("持有压力", pressure_text)}
+  {_video_card_section_html("定位", setup_text)}
+  {_video_card_section_html("入场", entry_text)}
+  {_video_card_section_html("压力", pressure_text)}
   {_video_card_section_html("指数弹性", elasticity_text)}
+  {_video_card_section_html("明日验证", tomorrow_text)}
 </article>
 """.strip()
 
@@ -729,6 +752,44 @@ def _video_script_title(profile: dict[str, object]) -> str:
     symbol = str(profile.get("代码", "") or "").strip()
     name = str(profile.get("股票", "") or "").strip()
     return name or symbol
+
+
+def _video_setup_sentence(profile: dict[str, object]) -> str:
+    ytd = profile.get("YTD收益")
+    entry_label = str(profile.get("买点挑战", "数据不足") or "数据不足")
+    drawdown = _video_numeric(profile.get("买入后最大收盘回撤"))
+    ytd_text = f"YTD {_percent(ytd)}，{_video_ytd_phrase(ytd)}"
+    if _video_numeric(ytd) >= 0.20 and math.isfinite(drawdown) and drawdown > -0.12:
+        position = "主线硬货"
+        comment = "强不是因为涨得多，而是涨得多、回撤还压得住。"
+    elif _video_numeric(ytd) >= 0.10 and math.isfinite(drawdown) and drawdown <= -0.15:
+        position = "弹性冲浪"
+        comment = "能赚钱，但路上会把人甩下车。"
+    elif _video_numeric(ytd) < 0:
+        position = "弱势修复"
+        comment = "不是没反弹，是现在还没走出地位。"
+    elif entry_label in {"追高区", "温和启动"}:
+        position = "趋势观察"
+        comment = "方向不差，但不要只凭热度追。"
+    else:
+        position = "轮动观察"
+        comment = "有机会，但还要看承接和放量。"
+    return f"{ytd_text}这段更像{position}。{comment}"
+
+
+def _video_tomorrow_check(profile: dict[str, object]) -> str:
+    entry_label = str(profile.get("买点挑战", "") or "")
+    ytd = _video_numeric(profile.get("YTD收益"))
+    drawdown = _video_numeric(profile.get("买入后最大收盘回撤"))
+    if entry_label == "追高区":
+        return "重点看高开后能不能继续放量；如果高开低走，就是先手资金兑现。"
+    if entry_label == "浅回调承接":
+        return "重点看回踩是否缩量、是否守住近端低点；守得住像洗盘，守不住就是转弱。"
+    if math.isfinite(ytd) and ytd < 0:
+        return "重点看反弹有没有放量；没有放量，就别急着把弱修复当主升。"
+    if math.isfinite(drawdown) and drawdown <= -0.15:
+        return "重点看大跌日能不能收回来；能收回来是弹性，收不回来就是风险。"
+    return "重点看承接。强的缩量回踩不破，才说明资金还在；高开低走就要防兑现。"
 
 
 def _video_ytd_phrase(value: object) -> str:
@@ -1042,13 +1103,70 @@ def _comparison_text_lines(comparisons: pd.DataFrame | None) -> list[str]:
     for _, row in valid.iterrows():
         lines.append(
             "- "
-            f"{row['标的']}：波动关系 {row.get('波动关系', '数据不足')}，"
-            f"同步关系 {row.get('同步关系', '数据不足')}，"
-            f"相关性 {_decimal(row.get('相关性'))}，"
-            f"超额收益 {_percent(row.get('超额收益'))}，"
-            f"{row.get('强弱结论', '')}"
+            f"{row['标的']}：{_comparison_script_label(row)}"
         )
     return lines
+
+
+def _review_display_label(symbol: str, stock_names: dict[str, str] | None) -> str:
+    name = str((stock_names or {}).get(symbol, "") or "").strip()
+    return f"{name}（{symbol}）" if name else symbol
+
+
+def _lifecycle_label(overview: dict[str, float]) -> str:
+    period_return = float(overview.get("return", float("nan")))
+    drawdown = float(overview.get("max_drawdown", float("nan")))
+    up_share = float(overview.get("up_day_share", float("nan")))
+    max_favorable = float(overview.get("max_favorable", float("nan")))
+    if not math.isfinite(period_return):
+        return "数据不足"
+    if period_return >= 0.20 and (not math.isfinite(drawdown) or drawdown > -0.12) and up_share >= 0.5:
+        return "主升"
+    if period_return >= 0.12 and math.isfinite(drawdown) and drawdown <= -0.15:
+        return "弹性冲浪"
+    if period_return >= 0.05:
+        return "温和启动"
+    if period_return >= -0.03 and max_favorable >= 0.08:
+        return "震荡修复"
+    if period_return < 0 and max_favorable >= 0.06:
+        return "弱势反抽"
+    if period_return < 0:
+        return "走弱"
+    return "横盘观察"
+
+
+def _lifecycle_conclusion(label: str) -> str:
+    mapping = {
+        "主升": "趋势有地位，但强势阶段更要防高开兑现。",
+        "弹性冲浪": "收益弹性够，但回撤也大，适合看节奏，不适合当稳定主升。",
+        "温和启动": "开始有资金参与，后续要看是否放量和是否能守住短期均线。",
+        "震荡修复": "有修复动作，但还没形成清晰主升，需要继续看突破。",
+        "弱势反抽": "有反弹，但数据还没有证明趋势反转。",
+        "走弱": "价格重心偏弱，先看止跌，不宜硬讲主线。",
+        "横盘观察": "方向还不够明确，重点看放量突破或破位。",
+        "数据不足": "样本不足，暂不下阶段结论。",
+    }
+    return mapping.get(label, "先按数据观察，不做额外推断。")
+
+
+def _comparison_script_label(row: pd.Series) -> str:
+    relationship = str(row.get("波动关系", "数据不足") or "数据不足")
+    sync = str(row.get("同步关系", "数据不足") or "数据不足")
+    corr = _decimal(row.get("相关性"))
+    excess = _percent(row.get("超额收益"))
+    conclusion = str(row.get("强弱结论", "") or "").strip().rstrip("。")
+    if relationship == "同步跟随" and str(excess).startswith("-"):
+        role = "跟得上方向，但强度不够。"
+    elif relationship == "同步跟随":
+        role = "跟着指数走，而且有一定强度。"
+    elif relationship == "不相关":
+        role = "和对比对象不是一条节奏，更像独立逻辑。"
+    elif relationship == "反向背离":
+        role = "和对比对象明显背离，需要单独看驱动。"
+    else:
+        role = "关系不算稳定，需要继续观察。"
+    suffix = f"{role}{conclusion}。" if conclusion else role
+    return f"波动关系 {relationship}，同步关系 {sync}，相关性 {corr}，超额收益 {excess}。{suffix}"
 
 
 def _segment_direction(segment_return: float, previous_return: float) -> str:
