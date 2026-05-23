@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
+import time
 from datetime import date
 from fnmatch import fnmatch
 from html import escape
 from pathlib import Path
 from typing import Callable
+from urllib.request import urlopen
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -29,6 +33,19 @@ from ashare_cross_section_similarity.data_manager import (
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
 from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
+from ashare_cross_section_similarity.review import (
+    ReviewConfig,
+    ReviewResult,
+    analyze_price_review,
+    build_comparison_stats,
+    build_equal_weight_series,
+    build_video_script_profile,
+    rank_review_results,
+    render_multi_review_text,
+    render_multi_video_script_text,
+    render_review_text,
+    render_video_script_cards_html,
+)
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
@@ -42,7 +59,9 @@ from ashare_cross_section_similarity.similarity_algorithms import (
 )
 from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols
 from ashare_cross_section_similarity.universe import (
-    DEFAULT_ANALYSIS_INDEX_SYMBOLS,
+    DEFAULT_ANALYSIS_INDEX_SYMBOLS as DEFAULT_DOWNLOAD_INDEX_SYMBOLS,
+    fetch_concept_constituents,
+    fetch_industry_constituents,
     normalize_symbol,
     symbols_with_analysis_indexes,
     unique_symbols,
@@ -59,9 +78,61 @@ DOWNLOAD_JOB_STATUS_LABELS = {
     "paused": "已暂停",
     "completed": "下载完成",
 }
+ETF_SOURCE_RETRY_ATTEMPTS = 2
+ETF_SOURCE_RETRY_DELAY_SECONDS = 0.6
+ETF_SOURCE_REQUEST_DELAY_SECONDS = 0.2
+ETF_SOURCE_TIMEOUT_SECONDS = 8
+SINA_ETF_PAGE_SIZE = 100
+TENCENT_ETF_QUOTE_BATCH_SIZE = 80
+ETF_ISSUER_SUFFIXES = (
+    "华夏",
+    "易方达",
+    "华泰柏瑞",
+    "国联安",
+    "国泰",
+    "华宝",
+    "广发",
+    "南方",
+    "嘉实",
+    "富国",
+    "博时",
+    "汇添富",
+    "鹏华",
+    "招商",
+    "天弘",
+    "银华",
+    "建信",
+    "平安",
+    "工银瑞信",
+    "华安",
+    "摩根",
+    "永赢",
+    "海富通",
+    "景顺长城",
+    "国投瑞银",
+    "西藏东财",
+    "鹏扬",
+)
+FALLBACK_REVIEW_ETFS = (
+    ("510300.SH", "沪深300ETF", 10_000_000.0, "沪深300"),
+    ("510500.SH", "中证500ETF", 9_500_000.0, "中证500"),
+    ("512100.SH", "中证1000ETF", 9_000_000.0, "中证1000"),
+    ("159915.SZ", "创业板ETF", 8_500_000.0, "创业板"),
+    ("588000.SH", "科创50ETF", 8_000_000.0, "科创50"),
+    ("159995.SZ", "芯片ETF", 7_500_000.0, "半导体"),
+    ("512480.SH", "半导体ETF", 7_000_000.0, "半导体"),
+    ("512010.SH", "医药ETF", 6_500_000.0, "医药"),
+    ("515030.SH", "新能源车ETF", 6_000_000.0, "新能源车"),
+    ("512660.SH", "军工ETF", 5_500_000.0, "军工"),
+    ("159928.SZ", "消费ETF", 5_000_000.0, "消费"),
+    ("512690.SH", "酒ETF", 4_500_000.0, "消费"),
+)
 UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.parquet")), ("所有文件", "*")]
 KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
+DEFAULT_ANALYSIS_INDEX_SYMBOLS = ("000300.SH", "000852.SH", "399006.SZ")
+REVIEW_MAX_TARGET_SYMBOLS = 20
+SCRIPT_BENCHMARK_SYMBOL = "000300.SH"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
 SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
 SIZE_SPREAD_SYMBOLS = (SIZE_SPREAD_SMALL_SYMBOL, SIZE_SPREAD_LARGE_SYMBOL)
@@ -118,7 +189,7 @@ def main() -> None:
     _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
     _render_algorithm_benchmark_entry(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
-    history_tab, cross_section_tab = st.tabs(["历史时序相似", "横截面相似"])
+    history_tab, cross_section_tab, review_tab = st.tabs(["历史时序相似", "横截面相似", "走势复盘"])
     with history_tab:
         _render_history_tab(
             trend_repo=trend_repo,
@@ -131,6 +202,14 @@ def main() -> None:
     with cross_section_tab:
         _render_cross_section_tab(
             trend_repo=trend_repo,
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            provider=provider,
+            download_engine=download_engine,
+        )
+    with review_tab:
+        _render_review_tab(
             data_root=data_root,
             timeframe=timeframe,
             adjust=adjust,
@@ -893,6 +972,1370 @@ def _render_cross_section_tab(
     )
 
 
+def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider: str, download_engine: str) -> None:
+    st.subheader("走势复盘")
+    st.caption("基于本地K线识别主要上涨、回撤、下跌和反弹段，生成可复验的数据化自然语言复盘。")
+    review_mode = st.radio(
+        "复盘模式",
+        ["单股票", "多股票"],
+        horizontal=True,
+        key="review_mode",
+        help=f"多股票模式最多支持 {REVIEW_MAX_TARGET_SYMBOLS} 个标的，所有标的使用同一个日期区间和对标设置。",
+    )
+    is_multi_review = review_mode == "多股票"
+    col1, col2, col3 = st.columns(3)
+    if is_multi_review:
+        raw_target_symbols = col1.text_area(
+            f"目标代码（最多{REVIEW_MAX_TARGET_SYMBOLS}个）",
+            value="601888.SH\n688603.SH\n300750.SZ",
+            key="review_symbols",
+            height=180,
+            help="逗号、空格或换行分隔；所有标的使用统一复盘区间。",
+        )
+        target_symbols, target_error = _review_target_symbols(raw_target_symbols)
+        target_symbol = target_symbols[0] if target_symbols else ""
+    else:
+        target_symbol = col1.text_input("目标代码", value="601888.SH", key="review_symbol")
+        normalized_single = normalize_symbol(target_symbol)
+        target_symbols = [normalized_single] if normalized_single else []
+        target_error = "" if normalized_single else "请输入目标代码。"
+    start_input = _date_input_args("review_start_date", date(2025, 12, 19))
+    end_input = _date_input_args("review_end_date", date(2026, 5, 18))
+    start_date = col2.date_input("区间开始", **start_input)
+    end_date = col3.date_input("区间结束", **end_input)
+
+    quick_cols = st.columns(4)
+    quick_cols[0].caption("快捷区间")
+    for button_col, window_size in zip(quick_cols[1:], [20, 60, 120]):
+        button_col.button(
+            f"近{window_size}根",
+            key=f"review_quick_{window_size}",
+            on_click=_set_review_quick_window,
+            args=(data_root, timeframe, adjust, target_symbol, window_size),
+        )
+    if st.session_state.get("review_quick_message"):
+        st.info(st.session_state["review_quick_message"])
+
+    start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+    end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    if error := _date_range_error(start, end):
+        st.error(error)
+        return
+
+    param_col1, param_col2 = st.columns(2)
+    min_swing_percent = param_col1.slider(
+        "最小波段幅度",
+        min_value=1,
+        max_value=30,
+        value=5,
+        step=1,
+        format="%d%%",
+        key="review_min_swing_return",
+        help="低于该涨跌幅的波动会被视为噪声，不进入主要波段。",
+    )
+    min_segment_bars = param_col2.number_input(
+        "最小段落K线数",
+        min_value=2,
+        max_value=60,
+        value=3,
+        step=1,
+        key="review_min_segment_bars",
+    )
+
+    index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
+    etf_reload_token_key = "review_akshare_etf_reload_token"
+    st.session_state.setdefault(etf_reload_token_key, 0)
+    etf_meta_col1, etf_meta_col2 = st.columns([1, 3])
+    if etf_meta_col1.button("重新加载 ETF 名单", key="review_reload_akshare_etf_list"):
+        st.session_state[etf_reload_token_key] = int(st.session_state.get(etf_reload_token_key, 0)) + 1
+    etf_meta_col2.caption("ETF 名称和候选列表优先来自新浪 / 腾讯；K线读取、下载口径不变。")
+    etf_reload_token = int(st.session_state.get(etf_reload_token_key, 0))
+    index_symbols: list[str] = []
+    if index_enabled:
+        index_col1, index_col2 = st.columns([2, 1])
+        selected_indexes = index_col1.multiselect(
+            "指数代码",
+            list(DEFAULT_ANALYSIS_INDEX_SYMBOLS),
+            default=["000300.SH", "000852.SH", "399006.SZ"],
+            key="review_index_symbols",
+        )
+        extra_indexes = index_col2.text_input("额外指数代码", value="", key="review_extra_indexes")
+        index_symbols = unique_symbols([*selected_indexes, *_split_symbol_text(extra_indexes)])
+
+    sector_enabled = st.checkbox("结合板块分析", value=False, key="review_with_sector")
+    proxy_symbols: list[str] = []
+    selected_popular_etfs: list[str] = []
+    auto_proxy_symbols: list[str] = []
+    auto_proxy_names: dict[str, str] = {}
+    etf_index = pd.DataFrame()
+    industry_name = ""
+    concept_name = ""
+    sector_min_coverage = 0.5
+    if sector_enabled:
+        sector_col1, sector_col2, sector_col3, sector_col4 = st.columns([1.4, 1, 1, 1])
+        proxy_symbols = unique_symbols(_split_symbol_text(sector_col1.text_input("板块/ETF/指数代理代码", value="", key="review_proxy_symbols")))
+        industry_name = sector_col2.text_input("行业名称", value="", key="review_industry_name")
+        concept_name = sector_col3.text_input("概念名称", value="", key="review_concept_name")
+        sector_min_coverage = sector_col4.slider(
+            "成分覆盖率",
+            min_value=0.3,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            key="review_sector_min_coverage",
+        )
+        etf_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+        if etf_message:
+            st.info(etf_message)
+        popular_etfs = _top_etf_options(etf_index, limit=10)
+        if not popular_etfs.empty:
+            selected_popular_etfs = st.multiselect(
+                "主要ETF",
+                popular_etfs["symbol"].tolist(),
+                default=[],
+                key="review_popular_etfs",
+                format_func=_etf_option_formatter(popular_etfs),
+                help="按成交额筛选，名称相近的同类 ETF 只保留成交额最大的一个。",
+            )
+        auto_proxy_symbols, auto_proxy_names, auto_matches, auto_warning = _review_auto_etf_proxies_from_index(
+            etf_index,
+            industry_name=industry_name,
+            concept_name=concept_name,
+        )
+        if auto_warning:
+            st.warning(auto_warning)
+        elif not auto_matches.empty:
+            st.caption("ETF 自动匹配（同一关键词保留成交额最大）")
+            st.dataframe(_centered(_format_etf_matches(auto_matches)), use_container_width=True, hide_index=True)
+        else:
+            st.caption("ETF 自动匹配：输入行业或概念名称后，会从 ETF 名单中选择成交额最大的同类 ETF。")
+    combined_proxy_symbols = unique_symbols([*proxy_symbols, *selected_popular_etfs, *auto_proxy_symbols])
+
+    if not st.button("生成走势复盘", type="primary", key="review_run"):
+        st.info("设置目标、区间和对比项后，点击生成走势复盘。复盘只使用本地行情数据。")
+        return
+
+    if target_error and not target_symbols:
+        st.error(target_error)
+        return
+    if target_error:
+        st.warning(target_error)
+    review_name_symbols = unique_symbols([*target_symbols, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
+    review_extra_names = dict(auto_proxy_names)
+    if _has_etf_like_symbol(review_name_symbols) or sector_enabled:
+        name_index = etf_index
+        if name_index.empty:
+            name_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+            if etf_message:
+                st.caption(etf_message)
+        review_extra_names.update(_etf_name_map_from_index(name_index, tuple(review_name_symbols)))
+    if is_multi_review:
+        _render_multi_review_output(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            target_symbols=target_symbols,
+            start=start,
+            end=end,
+            min_swing_percent=int(min_swing_percent),
+            min_segment_bars=int(min_segment_bars),
+            index_symbols=index_symbols,
+            proxy_symbols=combined_proxy_symbols,
+            industry_name=industry_name,
+            concept_name=concept_name,
+            sector_min_coverage=float(sector_min_coverage),
+            extra_stock_names=review_extra_names,
+        )
+        return
+
+    normalized_target = target_symbols[0]
+    direct_symbols = unique_symbols([normalized_target, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
+    data_start = _review_script_data_start(start, end)
+    direct_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(direct_symbols))
+    try:
+        direct_bars = _cached_load_local_bars(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            symbols=tuple(direct_symbols),
+            start=data_start,
+            end=end,
+            data_fingerprint=direct_fingerprint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"本地行情读取失败：{exc}")
+        return
+
+    target_window = direct_bars.loc[direct_bars["stock_code"] == normalized_target]
+    result = analyze_price_review(
+        target_window,
+        ReviewConfig(
+            symbol=normalized_target,
+            start=start,
+            end=end,
+            min_swing_return=float(min_swing_percent) / 100.0,
+            min_segment_bars=int(min_segment_bars),
+        ),
+    )
+
+    if result.window.empty:
+        st.markdown("**1. 区间概览**")
+        empty_comparison = pd.DataFrame()
+        for column, (label, value) in zip(st.columns(6), _review_metric_items(result, empty_comparison, index_symbols)):
+            column.metric(label, value)
+        st.warning("目标标的在所选区间没有本地行情。请检查代码、周期、复权目录或先下载数据。")
+        if hint := _symbol_data_hint(target_symbol, data_root=data_root, timeframe=timeframe, adjust=adjust):
+            st.warning(hint)
+        return
+
+    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **review_extra_names}
+    comparison_frames, comparison_rows, warnings = _review_comparison_data(
+        result.window,
+        direct_bars,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        index_symbols=index_symbols,
+        proxy_symbols=combined_proxy_symbols,
+        industry_name=industry_name,
+        concept_name=concept_name,
+        sector_min_coverage=float(sector_min_coverage),
+        stock_names=stock_names,
+    )
+    comparison_frame = pd.DataFrame(comparison_rows)
+    script_profile = _review_video_script_profile(
+        result,
+        direct_bars,
+        benchmark_symbol=SCRIPT_BENCHMARK_SYMBOL,
+        stock_names=stock_names,
+    )
+    all_warnings = [*result.warnings, *warnings]
+
+    st.markdown("**1. 区间概览**")
+    metric_values = _review_metric_items(result, comparison_frame, index_symbols)
+    for column, (label, value) in zip(st.columns(len(metric_values)), metric_values):
+        column.metric(label, value)
+
+    st.markdown("**2. 复盘图表**")
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        st.plotly_chart(_review_kline_chart(result, stock_names), use_container_width=True)
+    with chart_col2:
+        st.plotly_chart(_review_relative_chart(result.window, comparison_frames), use_container_width=True)
+
+    st.markdown("**3. 自然语言复盘**")
+    st.markdown(render_review_text(result, comparison_frame, stock_names=stock_names))
+    st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
+    st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
+    for warning in all_warnings:
+        st.warning(warning)
+
+    st.markdown("**4. 波段与对比明细**")
+    detail_col1, detail_col2 = st.columns(2)
+    with detail_col1:
+        st.caption("主要波段")
+        st.dataframe(_centered(_format_review_segments(result.main_segments)), use_container_width=True, hide_index=True)
+    with detail_col2:
+        st.caption("指数 / 板块对比")
+        st.dataframe(_centered(_format_review_comparisons(comparison_frame)), use_container_width=True, hide_index=True)
+
+def _review_shared_comparison_frames(
+    direct_bars: pd.DataFrame,
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+    index_symbols: list[str],
+    proxy_symbols: list[str],
+    industry_name: str,
+    concept_name: str,
+    sector_min_coverage: float,
+    stock_names: dict[str, str],
+) -> tuple[list[tuple[str, pd.DataFrame]], list[str]]:
+    comparison_frames: list[tuple[str, pd.DataFrame]] = []
+    warnings: list[str] = []
+
+    def append_direct(symbol: str, label: str) -> None:
+        normalized = normalize_symbol(symbol)
+        frame = direct_bars.loc[direct_bars["stock_code"] == normalized].sort_values("date")
+        frame = _filter_date_range(frame, start, end)
+        if frame.empty:
+            warnings.append(f"{label} 缺少本地行情，未纳入对比。")
+            return
+        comparison_frames.append((label, frame))
+
+    for symbol in index_symbols:
+        append_direct(symbol, _stock_chart_label(symbol, stock_names))
+    for symbol in proxy_symbols:
+        append_direct(symbol, _stock_chart_label(symbol, stock_names))
+
+    sector_specs = [
+        ("industry", "行业板块", industry_name),
+        ("concept", "概念板块", concept_name),
+    ]
+    for kind, label_prefix, raw_name in sector_specs:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        try:
+            constituents = _cached_review_constituents(kind, name)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{label_prefix} {name} 成分获取失败：{exc}")
+            continue
+        if not constituents:
+            warnings.append(f"{label_prefix} {name} 没有获取到成分。")
+            continue
+        sector_label = f"{label_prefix}:{name}"
+        sector_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(constituents))
+        sector_bars = _cached_load_local_bars(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            symbols=tuple(constituents),
+            start=start,
+            end=end,
+            data_fingerprint=sector_fingerprint,
+        )
+        equal_weight = build_equal_weight_series(
+            sector_bars,
+            constituents,
+            label=sector_label,
+            min_coverage=sector_min_coverage,
+        )
+        if equal_weight.warning:
+            warnings.append(equal_weight.warning)
+        if not equal_weight.frame.empty:
+            comparison_frames.append((sector_label, equal_weight.frame))
+    return comparison_frames, warnings
+
+def _review_script_data_start(start: str, end: str) -> str:
+    start_ts = pd.Timestamp(start)
+    ytd_start = pd.Timestamp(year=pd.Timestamp(end).year, month=1, day=1)
+    entry_context_start = start_ts - pd.Timedelta(days=90)
+    return min(entry_context_start, ytd_start).strftime("%Y-%m-%d")
+
+def _filter_date_range(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    if frame.empty or "date" not in frame.columns:
+        return frame
+    result = frame.copy()
+    dates = pd.to_datetime(result["date"], errors="coerce")
+    mask = dates.between(pd.Timestamp(start), inclusive_end_timestamp(end))
+    return result.loc[mask].sort_values("date").reset_index(drop=True)
+
+def _review_video_script_profile(
+    result: ReviewResult,
+    direct_bars: pd.DataFrame,
+    *,
+    benchmark_symbol: str,
+    stock_names: dict[str, str],
+) -> dict[str, object]:
+    symbol_bars = direct_bars.loc[direct_bars["stock_code"] == result.symbol].sort_values("date")
+    normalized_benchmark = normalize_symbol(benchmark_symbol)
+    benchmark = direct_bars.loc[direct_bars["stock_code"] == normalized_benchmark].sort_values("date")
+    profile = build_video_script_profile(
+        result,
+        symbol_bars,
+        benchmark if not benchmark.empty else None,
+        benchmark_label=_stock_chart_label(normalized_benchmark, stock_names),
+    )
+    profile["股票"] = stock_names.get(result.symbol, "")
+    return profile
+
+def _review_multi_comparison_rows(
+    results: list[ReviewResult],
+    comparison_frames: list[tuple[str, pd.DataFrame]],
+    stock_names: dict[str, str],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for result in results:
+        if result.window.empty:
+            continue
+        for label, frame in comparison_frames:
+            row = build_comparison_stats(result.window, frame, label)
+            row["代码"] = result.symbol
+            row["股票"] = stock_names.get(result.symbol, "")
+            rows.append(row)
+    return rows
+
+def _render_multi_review_output(
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    target_symbols: list[str],
+    start: str,
+    end: str,
+    min_swing_percent: int,
+    min_segment_bars: int,
+    index_symbols: list[str],
+    proxy_symbols: list[str],
+    industry_name: str,
+    concept_name: str,
+    sector_min_coverage: float,
+    extra_stock_names: dict[str, str] | None = None,
+) -> None:
+    direct_symbols = unique_symbols([*target_symbols, *index_symbols, *proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
+    data_start = _review_script_data_start(start, end)
+    direct_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(direct_symbols))
+    try:
+        direct_bars = _cached_load_local_bars(
+            data_root=data_root,
+            timeframe=timeframe,
+            adjust=adjust,
+            symbols=tuple(direct_symbols),
+            start=data_start,
+            end=end,
+            data_fingerprint=direct_fingerprint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"本地行情读取失败：{exc}")
+        return
+
+    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **(extra_stock_names or {})}
+    results: list[ReviewResult] = []
+    all_warnings: list[str] = []
+    for symbol in target_symbols:
+        target_window = direct_bars.loc[direct_bars["stock_code"] == symbol]
+        result = analyze_price_review(
+            target_window,
+            ReviewConfig(
+                symbol=symbol,
+                start=start,
+                end=end,
+                min_swing_return=float(min_swing_percent) / 100.0,
+                min_segment_bars=int(min_segment_bars),
+            ),
+        )
+        results.append(result)
+        all_warnings.extend(result.warnings)
+        if result.window.empty:
+            if hint := _symbol_data_hint(symbol, data_root=data_root, timeframe=timeframe, adjust=adjust):
+                all_warnings.append(hint)
+            continue
+
+    valid_results = [result for result in results if not result.window.empty]
+    if not valid_results:
+        st.warning("所有目标标的在所选区间都没有本地行情。请检查代码、周期、复权目录或先下载数据。")
+        for warning in all_warnings:
+            st.warning(warning)
+        return
+
+    comparison_frames, comparison_warnings = _review_shared_comparison_frames(
+        direct_bars,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        start=start,
+        end=end,
+        index_symbols=index_symbols,
+        proxy_symbols=proxy_symbols,
+        industry_name=industry_name,
+        concept_name=concept_name,
+        sector_min_coverage=float(sector_min_coverage),
+        stock_names=stock_names,
+    )
+    all_warnings.extend(comparison_warnings)
+    comparison_rows = _review_multi_comparison_rows(valid_results, comparison_frames, stock_names)
+    comparison_frame = pd.DataFrame(comparison_rows)
+    ranking_frame = rank_review_results(valid_results, comparison_frame, stock_names=stock_names)
+    result_by_symbol = {result.symbol: result for result in valid_results}
+    ranked_results = [
+        result_by_symbol[symbol]
+        for symbol in ranking_frame["代码"].astype(str).tolist()
+        if symbol in result_by_symbol
+    ]
+    script_profiles = [
+        _review_video_script_profile(
+            result,
+            direct_bars,
+            benchmark_symbol=SCRIPT_BENCHMARK_SYMBOL,
+            stock_names=stock_names,
+        )
+        for result in ranked_results
+    ]
+    ranking_records = ranking_frame.set_index("代码").to_dict("index") if not ranking_frame.empty else {}
+    script_profiles = [_attach_review_ranking(profile, ranking_records) for profile in script_profiles]
+    st.markdown("**1. 多股票区间概览**")
+    st.caption("排序总表")
+    st.dataframe(_centered(_format_review_rankings(ranking_frame)), use_container_width=True, hide_index=True)
+    st.caption("原始区间概览")
+    st.dataframe(_centered(_format_multi_review_overview(results, stock_names)), use_container_width=True, hide_index=True)
+
+    st.markdown("**2. 多股票 K 线复盘**")
+    for row in _review_result_grid_rows(ranked_results):
+        columns = st.columns(3)
+        for column, result in zip(columns, row):
+            with column:
+                fig = _review_kline_chart(result, stock_names)
+                fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=320)
+                st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("**3. 自然语言复盘**")
+    st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
+    st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
+    script_text = render_multi_video_script_text(script_profiles)
+    if script_text:
+        st.download_button(
+            "下载视频脚本文本",
+            data=script_text.encode("utf-8-sig"),
+            file_name="review_video_script.txt",
+            mime="text/plain",
+        )
+    st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
+    for warning in dict.fromkeys(all_warnings):
+        st.warning(warning)
+
+    st.markdown("**4. 对比与波段明细**")
+    detail_col1, detail_col2 = st.columns(2)
+    with detail_col1:
+        st.caption("个股主要波段")
+        st.dataframe(_centered(_format_multi_review_segments(results, stock_names)), use_container_width=True, hide_index=True)
+    with detail_col2:
+        st.caption("指数 / 板块对比")
+        st.dataframe(_centered(_format_multi_review_comparisons(comparison_frame)), use_container_width=True, hide_index=True)
+
+@st.cache_data(show_spinner=False)
+def _cached_review_constituents(kind: str, name: str) -> list[str]:
+    text = str(name or "").strip()
+    if not text:
+        return []
+    if kind == "industry":
+        return fetch_industry_constituents(text)
+    if kind == "concept":
+        return fetch_concept_constituents(text)
+    raise ValueError(f"未知板块类型：{kind}")
+
+
+@st.cache_data(show_spinner=False)
+def _cached_review_etf_index(refresh_token: int = 0) -> pd.DataFrame:
+    _ = refresh_token
+    return _load_etf_index_from_dual_sources(
+        sina_loader=_fetch_sina_etf_index,
+        tencent_loader=_fetch_tencent_etf_index,
+    )
+
+
+def _review_etf_index_with_fallback(
+    refresh_token: int = 0,
+    *,
+    loader: Callable[[int], pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, str]:
+    load = loader or _cached_review_etf_index
+    fallback = _fallback_review_etf_index()
+    try:
+        loaded = load(refresh_token)
+    except Exception as exc:  # noqa: BLE001
+        return fallback, f"新浪 / 腾讯 ETF 名单暂时不可用，已使用内置常用 ETF 名称表。原因：{_brief_error_text(exc)}"
+    merged = _merge_etf_indexes(loaded, fallback)
+    if merged.empty:
+        return fallback, "新浪 / 腾讯 ETF 名单为空，已使用内置常用 ETF 名称表。"
+    return merged, ""
+
+def _load_etf_index_from_dual_sources(
+    *,
+    sina_loader: Callable[[], pd.DataFrame],
+    tencent_loader: Callable[[tuple[str, ...]], pd.DataFrame],
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    errors: list[str] = []
+    sina_index = _load_etf_source_with_retry(
+        "新浪",
+        lambda: _akshare_etf_index_from_table(sina_loader()),
+        errors=errors,
+        sleep_func=sleep_func,
+    )
+    source_symbols = []
+    if not sina_index.empty and "symbol" in sina_index.columns:
+        source_symbols.extend(sina_index["symbol"].dropna().astype(str).tolist())
+    source_symbols.extend(row[0] for row in FALLBACK_REVIEW_ETFS)
+    tencent_index = _load_etf_source_with_retry(
+        "腾讯",
+        lambda: tencent_loader(tuple(unique_symbols(source_symbols))),
+        errors=errors,
+        sleep_func=sleep_func,
+    )
+    merged = _merge_etf_indexes(sina_index, tencent_index)
+    if merged.empty:
+        detail = "；".join(errors) if errors else "两个数据源均返回空表"
+        raise RuntimeError(f"ETF 名单双源读取失败：{detail}")
+    return merged
+
+def _load_etf_source_with_retry(
+    source_name: str,
+    loader: Callable[[], pd.DataFrame],
+    *,
+    errors: list[str],
+    sleep_func: Callable[[float], None],
+) -> pd.DataFrame:
+    for attempt in range(ETF_SOURCE_RETRY_ATTEMPTS):
+        try:
+            result = loader()
+        except Exception as exc:  # noqa: BLE001
+            if attempt + 1 < ETF_SOURCE_RETRY_ATTEMPTS:
+                sleep_func(ETF_SOURCE_RETRY_DELAY_SECONDS)
+                continue
+            errors.append(f"{source_name}: {_brief_error_text(exc)}")
+            return pd.DataFrame()
+        if isinstance(result, pd.DataFrame) and not result.empty:
+            return result
+        if attempt + 1 < ETF_SOURCE_RETRY_ATTEMPTS:
+            sleep_func(ETF_SOURCE_RETRY_DELAY_SECONDS)
+            continue
+        errors.append(f"{source_name}: 返回空表")
+    return pd.DataFrame()
+
+def _fetch_sina_etf_index(
+    *,
+    page_size: int = SINA_ETF_PAGE_SIZE,
+    open_func: Callable[..., object] = urlopen,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    if page_size < 1:
+        raise ValueError("新浪 ETF 分页大小至少为 1。")
+    count_url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=etf_hq_fund"
+    count_text = _read_http_text(count_url, open_func=open_func)
+    total = int(str(json.loads(count_text)).strip())
+    pages = max(1, math.ceil(total / page_size))
+    frames: list[pd.DataFrame] = []
+    for page in range(1, pages + 1):
+        data_url = (
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeData"
+            f"?page={page}&num={page_size}&sort=symbol&asc=1&node=etf_hq_fund&symbol="
+        )
+        text = _read_http_text(data_url, open_func=open_func)
+        payload = json.loads(text)
+        if isinstance(payload, list) and payload:
+            frame = _akshare_etf_index_from_table(pd.DataFrame(payload))
+            if not frame.empty:
+                frames.append(frame)
+        if page < pages:
+            sleep_func(ETF_SOURCE_REQUEST_DELAY_SECONDS)
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return _merge_etf_indexes(pd.concat(frames, ignore_index=True), pd.DataFrame())
+
+def _read_http_text(url: str, *, open_func: Callable[..., object] = urlopen) -> str:
+    with open_func(url, timeout=ETF_SOURCE_TIMEOUT_SECONDS) as response:  # noqa: S310
+        raw = response.read()
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+def _fetch_tencent_etf_index(
+    symbols: tuple[str, ...] | list[str],
+    *,
+    batch_size: int = TENCENT_ETF_QUOTE_BATCH_SIZE,
+    open_func: Callable[..., object] = urlopen,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    normalized = unique_symbols(symbols)
+    if not normalized:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    frames: list[pd.DataFrame] = []
+    batches = _chunks(normalized, batch_size)
+    for batch_index, batch in enumerate(batches):
+        query = ",".join(_tencent_quote_symbol(symbol) for symbol in batch)
+        if not query:
+            continue
+        with open_func(f"https://qt.gtimg.cn/q={query}", timeout=ETF_SOURCE_TIMEOUT_SECONDS) as response:  # noqa: S310
+            text = response.read().decode("gbk", errors="replace")
+        frame = _tencent_etf_index_from_quote_text(text)
+        if not frame.empty:
+            frames.append(frame)
+        if batch_index + 1 < len(batches):
+            sleep_func(ETF_SOURCE_REQUEST_DELAY_SECONDS)
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return _merge_etf_indexes(pd.concat(frames, ignore_index=True), pd.DataFrame())
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    if size < 1:
+        raise ValueError("分批大小至少为 1。")
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+def _tencent_quote_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if "." not in normalized:
+        return ""
+    code, exchange = normalized.split(".", 1)
+    if exchange == "SH":
+        return f"sh{code}"
+    if exchange == "SZ":
+        return f"sz{code}"
+    return ""
+
+def _tencent_etf_index_from_quote_text(text: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for match in re.finditer(r'v_((?:sh|sz)\d{6})="([^"]*)"', str(text)):
+        raw_symbol = match.group(1)
+        fields = match.group(2).split("~")
+        if len(fields) < 3:
+            continue
+        symbol = normalize_symbol(raw_symbol)
+        if not _has_etf_like_symbol([symbol]):
+            continue
+        name = str(fields[1] if len(fields) > 1 else "").strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "amount": _tencent_quote_amount(fields),
+                "category": _etf_category_key(name),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["symbol", "name", "amount", "category"])
+    return pd.DataFrame(rows, columns=["symbol", "name", "amount", "category"])
+
+def _tencent_quote_amount(fields: list[str]) -> float:
+    if len(fields) > 57:
+        amount_10k = pd.to_numeric(pd.Series([fields[57]]), errors="coerce").iloc[0]
+        if not pd.isna(amount_10k):
+            return float(amount_10k) * 10_000
+    if len(fields) > 35:
+        parts = str(fields[35]).split("/")
+        if len(parts) >= 3:
+            amount = pd.to_numeric(pd.Series([parts[2]]), errors="coerce").iloc[0]
+            if not pd.isna(amount):
+                return float(amount)
+    return 0.0
+
+def _fallback_review_etf_index() -> pd.DataFrame:
+    return pd.DataFrame(FALLBACK_REVIEW_ETFS, columns=["symbol", "name", "amount", "category"])
+
+def _merge_etf_indexes(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    frames = [frame for frame in [primary, fallback] if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    normalized_frames: list[pd.DataFrame] = []
+    for frame in frames:
+        normalized = frame.copy()
+        for column in columns:
+            if column not in normalized.columns:
+                normalized[column] = "" if column != "amount" else 0.0
+        normalized = normalized[columns]
+        normalized["symbol"] = normalized["symbol"].map(normalize_symbol)
+        normalized["name"] = normalized["name"].fillna("").astype(str).str.strip()
+        normalized["amount"] = pd.to_numeric(normalized["amount"], errors="coerce").fillna(0.0)
+        normalized["category"] = normalized["category"].fillna("").astype(str).str.strip()
+        normalized_frames.append(normalized)
+    result = pd.concat(normalized_frames, ignore_index=True)
+    result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
+    if result.empty:
+        return pd.DataFrame(columns=columns)
+    return result.drop_duplicates("symbol", keep="first").reset_index(drop=True)
+
+def _brief_error_text(exc: Exception, *, limit: int = 120) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+def _akshare_etf_index_from_table(table: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    if table.empty:
+        return pd.DataFrame(columns=columns)
+    code_column = next((column for column in ("代码", "基金代码", "symbol", "code", "证券代码") if column in table.columns), "")
+    name_column = next((column for column in ("名称", "基金简称", "name", "简称", "证券简称") if column in table.columns), "")
+    amount_column = next((column for column in ("成交额", "amount", "成交金额", "成交额(元)") if column in table.columns), "")
+    if not code_column or not name_column:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, object]] = []
+    for _, row in table.iterrows():
+        name = str(row.get(name_column, "") or "").strip()
+        symbol = normalize_symbol(row.get(code_column))
+        if not symbol or not name:
+            continue
+        amount = pd.to_numeric(pd.Series([row.get(amount_column, 0)]), errors="coerce").iloc[0] if amount_column else 0
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "amount": 0.0 if pd.isna(amount) else float(amount),
+                "category": _etf_category_key(name),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+def _review_auto_etf_proxies_from_index(
+    index: pd.DataFrame,
+    *,
+    industry_name: str,
+    concept_name: str,
+) -> tuple[list[str], dict[str, str], pd.DataFrame, str]:
+    queries = _etf_queries(industry_name, concept_name)
+    if not queries:
+        return [], {}, pd.DataFrame(columns=["query", "symbol", "name", "amount", "category"]), ""
+    matches = _search_review_etf_index(index, queries)
+    if matches.empty:
+        return [], {}, matches, f"ETF 名单没有匹配到：{', '.join(queries)}。"
+    symbols = unique_symbols(matches["symbol"].dropna().astype(str).tolist())
+    names = {
+        normalize_symbol(row["symbol"]): str(row["name"]).strip()
+        for _, row in matches.dropna(subset=["symbol"]).iterrows()
+        if str(row.get("name", "")).strip()
+    }
+    return symbols, names, matches, ""
+
+
+def _search_review_etf_index(
+    etf_index: pd.DataFrame,
+    queries: list[str] | tuple[str, ...],
+    *,
+    limit_per_query: int = 1,
+) -> pd.DataFrame:
+    columns = ["query", "symbol", "name", "amount", "category"]
+    if etf_index.empty:
+        return pd.DataFrame(columns=columns)
+    frame = etf_index.copy()
+    for column in ["symbol", "name", "category"]:
+        if column not in frame.columns:
+            frame[column] = ""
+    if "amount" not in frame.columns:
+        frame["amount"] = 0.0
+    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0.0)
+
+    rows: list[pd.DataFrame] = []
+    for raw_query in queries:
+        query = _etf_category_key(raw_query)
+        if not query:
+            continue
+        mask = (
+            frame["name"].astype(str).map(_etf_category_key).str.contains(query, regex=False, na=False)
+            | frame["category"].astype(str).map(_etf_category_key).str.contains(query, regex=False, na=False)
+        )
+        matched = (
+            frame.loc[mask]
+            .sort_values(["amount", "symbol"], ascending=[False, True])
+            .head(max(1, int(limit_per_query)))
+            .copy()
+        )
+        if matched.empty:
+            continue
+        matched.insert(0, "query", str(raw_query).strip())
+        rows.append(matched[columns])
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    result = pd.concat(rows, ignore_index=True)
+    return result.sort_values(["query", "amount"], ascending=[True, False]).drop_duplicates("symbol").reset_index(drop=True)
+
+
+def _etf_queries(industry_name: str, concept_name: str) -> list[str]:
+    return [text for text in dict.fromkeys([str(industry_name or "").strip(), str(concept_name or "").strip()]) if text]
+
+def _etf_category_key(name: object) -> str:
+    text = str(name or "").strip().upper()
+    text = re.sub(r"[\s　（）()【】\[\]：:·•,，、;；/\\-]+", "", text)
+    for token in [
+        "交易型开放式指数证券投资基金",
+        "交易型开放式",
+        "指数证券投资基金",
+        "证券投资基金",
+        "发起式联接",
+        "联接",
+        "增强",
+        "基金",
+        "ETF",
+        "LOF",
+    ]:
+        text = text.replace(token.upper(), "")
+    for suffix in ETF_ISSUER_SUFFIXES:
+        normalized_suffix = suffix.upper()
+        if text.endswith(normalized_suffix):
+            text = text[: -len(normalized_suffix)]
+            break
+    return text.strip("-_ ")
+
+def _etf_name_map_from_index(index: pd.DataFrame, symbols: tuple[str, ...] | list[str]) -> dict[str, str]:
+    if index.empty:
+        return {}
+    wanted = set(unique_symbols(symbols))
+    if not wanted:
+        return {}
+    frame = index.copy()
+    for column in ("symbol", "name"):
+        if column not in frame.columns:
+            return {}
+    frame["symbol"] = frame["symbol"].map(normalize_symbol)
+    frame["name"] = frame["name"].fillna("").astype(str).str.strip()
+    frame = frame.loc[frame["symbol"].isin(wanted) & frame["name"].ne("")]
+    return dict(zip(frame["symbol"], frame["name"], strict=False))
+
+def _top_etf_options(index: pd.DataFrame, *, limit: int = 10) -> pd.DataFrame:
+    columns = ["symbol", "name", "amount", "category"]
+    if index.empty:
+        return pd.DataFrame(columns=columns)
+    result = index.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = "" if column != "amount" else 0.0
+    result["symbol"] = result["symbol"].map(normalize_symbol)
+    result["name"] = result["name"].fillna("").astype(str).str.strip()
+    result["category"] = result["category"].fillna("").astype(str).str.strip()
+    result["amount"] = pd.to_numeric(result["amount"], errors="coerce").fillna(0.0)
+    result = result.loc[result["symbol"].ne("") & result["name"].ne("")]
+    if result.empty:
+        return pd.DataFrame(columns=columns)
+    result["_theme"] = result["category"].where(result["category"].ne(""), result["symbol"])
+    result = (
+        result.sort_values(["amount", "symbol"], ascending=[False, True])
+        .drop_duplicates("_theme", keep="first")
+        .head(max(0, int(limit)))
+    )
+    return result[columns].reset_index(drop=True)
+
+def _etf_option_formatter(options: pd.DataFrame) -> Callable[[str], str]:
+    frame = _top_etf_options(options, limit=len(options))
+    names = dict(zip(frame["symbol"], frame["name"], strict=False))
+
+    def format_option(symbol: str) -> str:
+        normalized = normalize_symbol(symbol)
+        name = str(names.get(normalized, "") or "").strip()
+        return f"{name}（{normalized}）" if name else normalized
+
+    return format_option
+
+def _has_etf_like_symbol(symbols: list[str] | tuple[str, ...]) -> bool:
+    for symbol in unique_symbols(symbols):
+        code = symbol.split(".", 1)[0]
+        if code.startswith(("5", "15", "16", "18")):
+            return True
+    return False
+
+def _set_review_quick_window(
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    symbol: str,
+    window_size: int,
+) -> None:
+    bars = _load_target_bars_for_quick_window(
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        target_symbol=symbol,
+    )
+    start, end, message = _review_quick_window_feedback(bars, symbol, window_size)
+    st.session_state["review_start_date"] = start
+    st.session_state["review_end_date"] = end
+    st.session_state["review_quick_message"] = message
+
+def _review_quick_window_feedback(
+    bars: pd.DataFrame,
+    symbol: str,
+    window_size: int,
+    today: pd.Timestamp | None = None,
+) -> tuple[date, date, str]:
+    start, end, selected_count, total_count, is_sparse = _cross_section_quick_window_selection(bars, window_size, today)
+    normalized = normalize_symbol(symbol)
+    window_text = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
+    if total_count == 0:
+        return start, end, f"{normalized} 未找到本地行情，已按自然日近 {window_size} 天设置复盘区间：{window_text}。"
+    if is_sparse:
+        return (
+            start,
+            end,
+            f"{normalized} 本地数据疑似不连续，近期仅有 {selected_count} 根K线，"
+            f"不足近 {window_size} 根；已使用近期可用复盘区间：{window_text}。",
+        )
+    if selected_count < window_size:
+        return start, end, f"{normalized} 本地仅有 {selected_count} 根K线，不足近 {window_size} 根；已使用全部可用区间：{window_text}。"
+    return start, end, f"{normalized} 已选择近 {window_size} 根K线：{window_text}。"
+
+def _review_target_symbols(value: str, max_symbols: int = REVIEW_MAX_TARGET_SYMBOLS) -> tuple[list[str], str]:
+    symbols = unique_symbols(_split_symbol_text(value))
+    if not symbols:
+        return [], "请至少输入 1 个目标代码。"
+    if len(symbols) > max_symbols:
+        return symbols[:max_symbols], f"最多支持 {max_symbols} 个目标代码，已保留前 {max_symbols} 个。"
+    return symbols, ""
+
+def _review_result_grid_rows(results: list[ReviewResult], columns: int = 3) -> list[list[ReviewResult]]:
+    column_count = max(1, int(columns))
+    return [results[index : index + column_count] for index in range(0, len(results), column_count)]
+
+def _review_comparison_data(
+    target_window: pd.DataFrame,
+    direct_bars: pd.DataFrame,
+    *,
+    data_root: str,
+    timeframe: str,
+    adjust: str,
+    index_symbols: list[str],
+    proxy_symbols: list[str],
+    industry_name: str,
+    concept_name: str,
+    sector_min_coverage: float,
+    stock_names: dict[str, str],
+) -> tuple[list[tuple[str, pd.DataFrame]], list[dict[str, object]], list[str]]:
+    comparison_frames, warnings = _review_shared_comparison_frames(
+        direct_bars,
+        data_root=data_root,
+        timeframe=timeframe,
+        adjust=adjust,
+        start=str(target_window["date"].min()) if not target_window.empty else "1900-01-01",
+        end=str(target_window["date"].max()) if not target_window.empty else pd.Timestamp.today().strftime("%Y-%m-%d"),
+        index_symbols=index_symbols,
+        proxy_symbols=proxy_symbols,
+        industry_name=industry_name,
+        concept_name=concept_name,
+        sector_min_coverage=sector_min_coverage,
+        stock_names=stock_names,
+    )
+    comparison_rows = [
+        build_comparison_stats(target_window, frame, label)
+        for label, frame in comparison_frames
+    ]
+    return comparison_frames, comparison_rows, warnings
+
+def _review_metric_items(
+    result: ReviewResult,
+    comparison_frame: pd.DataFrame,
+    index_symbols: list[str],
+) -> list[tuple[str, str]]:
+    overview = result.overview
+    index_excess = _review_index_excess_text(comparison_frame, index_symbols)
+    return [
+        ("区间收益", _percent_text(overview.get("return"))),
+        ("最大回撤", _percent_text(overview.get("max_drawdown"))),
+        ("最大浮盈", _percent_text(overview.get("max_favorable"))),
+        ("波动率", _percent_text(overview.get("volatility"))),
+        ("上涨K线占比", _percent_text(overview.get("up_day_share"))),
+        ("相对指数超额", index_excess),
+    ]
+
+def _review_index_excess_text(comparison_frame: pd.DataFrame, index_symbols: list[str]) -> str:
+    if comparison_frame.empty or "标的" not in comparison_frame.columns:
+        return "-"
+    labels = {normalize_symbol(symbol) for symbol in index_symbols}
+    values: list[float] = []
+    for _, row in comparison_frame.iterrows():
+        label = str(row.get("标的", ""))
+        if not any(symbol in label for symbol in labels):
+            continue
+        value = pd.to_numeric(pd.Series([row.get("超额收益")]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            values.append(float(value))
+    return _percent_text(pd.Series(values).mean()) if values else "-"
+
+def _format_multi_review_overview(results: list[ReviewResult], stock_names: dict[str, str]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for result in results:
+        overview = result.overview
+        rows.append(
+            {
+                "代码": result.symbol,
+                "股票": stock_names.get(result.symbol, ""),
+                "K线数": int(overview.get("k_bars", 0) or 0),
+                "区间收益": overview.get("return"),
+                "最大回撤": overview.get("max_drawdown"),
+                "最大浮盈": overview.get("max_favorable"),
+                "波动率": overview.get("volatility"),
+                "上涨K线占比": overview.get("up_day_share"),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    return _format_percent_columns(frame, ["区间收益", "最大回撤", "最大浮盈", "波动率", "上涨K线占比"])
+
+def _format_multi_review_segments(results: list[ReviewResult], stock_names: dict[str, str]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for result in results:
+        if result.main_segments.empty:
+            continue
+        frame = result.main_segments.copy()
+        frame.insert(0, "股票", stock_names.get(result.symbol, ""))
+        frame.insert(0, "代码", result.symbol)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["代码", "股票", "方向", "开始日期", "结束日期", "K线数", "区间收益", "最大回撤", "振幅"])
+    result = pd.concat(frames, ignore_index=True)
+    for column in ["开始日期", "结束日期"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = _format_percent_columns(
+        result,
+        ["区间收益", "最大回撤", "最大浮盈", "振幅", "成交额变化", "成交量变化", "相对贡献"],
+    )
+    result = _format_decimal_columns(result, ["起点收盘", "终点收盘"])
+    columns = [
+        "代码",
+        "股票",
+        "方向",
+        "开始日期",
+        "结束日期",
+        "K线数",
+        "区间收益",
+        "最大回撤",
+        "最大浮盈",
+        "振幅",
+        "成交额变化",
+        "成交量变化",
+        "相对贡献",
+    ]
+    return result[[column for column in columns if column in result.columns]]
+
+def _format_multi_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(
+            columns=["代码", "股票", "标的", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"]
+        )
+    result = _format_review_comparisons(frame)
+    columns = [
+        "代码",
+        "股票",
+        "标的",
+        "样本数",
+        "目标收益",
+        "对比收益",
+        "超额收益",
+        "相关性",
+        "同步关系",
+        "波动关系",
+        "强弱结论",
+    ]
+    return result[[column for column in columns if column in result.columns]]
+
+def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "排名",
+        "代码",
+        "股票",
+        "对标指数",
+        "指数阶段",
+        "强弱等级",
+        "区间收益",
+        "最大回撤",
+        "上涨K占比",
+        "相对超额",
+        "关键转折点",
+        "当前性质",
+        "锐评结论",
+        "明日验证",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    result = frame.copy()
+    result = _format_percent_columns(result, ["区间收益", "最大回撤", "上涨K占比", "相对超额"])
+    return result[[column for column in columns if column in result.columns]]
+
+def _attach_review_ranking(profile: dict[str, object], ranking_records: dict[str, dict[str, object]]) -> dict[str, object]:
+    symbol = str(profile.get("代码", "") or "").strip()
+    ranked = dict(profile)
+    record = ranking_records.get(symbol, {})
+    for key in ["排名", "强弱等级", "关键转折点", "当前性质", "锐评结论", "明日验证", "对标指数", "指数阶段"]:
+        if key in record:
+            ranked[key] = record[key]
+    return ranked
+
+def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict[str, object], ...]) -> pd.DataFrame:
+    if not profiles:
+        return pd.DataFrame(
+            columns=[
+                "代码",
+                "股票",
+                "YTD样本起点",
+                "YTD收益",
+                "YTD结论",
+                "买点挑战",
+                "买点位置",
+                "买入后最大收盘回撤",
+                "单日最大日内回撤",
+                "指数",
+                "指数大涨日样本",
+                "指数大涨日标的均值",
+                "指数大跌日样本",
+                "指数大跌日标的均值",
+                "指数弹性结论",
+            ]
+        )
+    result = pd.DataFrame(profiles).copy()
+    if "YTD样本起点" in result.columns:
+        result["YTD样本起点"] = pd.to_datetime(result["YTD样本起点"], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = _format_percent_columns(
+        result,
+        [
+            "YTD收益",
+            "买点位置",
+            "买入后最大收盘回撤",
+            "单日最大日内回撤",
+            "指数大涨日标的均值",
+            "指数大涨日指数均值",
+            "指数大跌日标的均值",
+            "指数大跌日指数均值",
+        ],
+    )
+    columns = [
+        "代码",
+        "股票",
+        "YTD样本起点",
+        "YTD收益",
+        "YTD结论",
+        "买点挑战",
+        "买点位置",
+        "买入后最大收盘回撤",
+        "单日最大日内回撤",
+        "指数",
+        "指数大涨日样本",
+        "指数大涨日标的均值",
+        "指数大涨日指数均值",
+        "指数大跌日样本",
+        "指数大跌日标的均值",
+        "指数大跌日指数均值",
+        "指数弹性结论",
+    ]
+    return result[[column for column in columns if column in result.columns]]
+
+def _format_etf_matches(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["关键词", "ETF代码", "ETF名称", "成交额", "同类键"])
+    result = frame.copy()
+    result = result.rename(
+        columns={
+            "query": "关键词",
+            "symbol": "ETF代码",
+            "name": "ETF名称",
+            "amount": "成交额",
+            "category": "同类键",
+        }
+    )
+    if "成交额" in result.columns:
+        result["成交额"] = pd.to_numeric(result["成交额"], errors="coerce").map(
+            lambda value: "-" if pd.isna(value) else f"{float(value):,.0f}"
+        )
+    columns = ["关键词", "ETF代码", "ETF名称", "成交额", "同类键"]
+    return result[[column for column in columns if column in result.columns]]
+
+def _format_review_segments(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["方向", "开始日期", "结束日期", "K线数", "区间收益", "最大回撤", "振幅"])
+    result = frame.copy()
+    for column in ["开始日期", "结束日期"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = _format_percent_columns(
+        result,
+        ["区间收益", "最大回撤", "最大浮盈", "振幅", "成交额变化", "成交量变化", "相对贡献"],
+    )
+    result = _format_decimal_columns(result, ["起点收盘", "终点收盘"])
+    columns = [
+        "方向",
+        "开始日期",
+        "结束日期",
+        "K线数",
+        "区间收益",
+        "最大回撤",
+        "最大浮盈",
+        "振幅",
+        "成交额变化",
+        "成交量变化",
+        "相对贡献",
+    ]
+    return result[[column for column in columns if column in result.columns]]
+
+def _format_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["标的", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"])
+    result = frame.copy()
+    result = _format_percent_columns(result, ["目标收益", "对比收益", "超额收益"])
+    result = _format_decimal_columns(result, ["相关性"])
+    return result
+
+def _review_kline_chart(result: ReviewResult, stock_names: dict[str, str] | None = None) -> go.Figure:
+    fig = go.Figure()
+    window = result.window.sort_values("date")
+    if window.empty:
+        fig.update_layout(title="目标K线与主要波段")
+        return fig
+    label = _stock_chart_label(result.symbol, stock_names, is_target=True)
+    x_values = pd.to_datetime(window["date"]).dt.strftime("%Y-%m-%d")
+    fig.add_trace(
+        go.Candlestick(
+            x=x_values,
+            open=window["open"],
+            high=window["high"],
+            low=window["low"],
+            close=window["close"],
+            name=label,
+            increasing_line_color="#16a34a",
+            decreasing_line_color="#dc2626",
+        )
+    )
+    for _, segment in result.main_segments.iterrows():
+        direction = str(segment.get("方向", ""))
+        color = "#16a34a" if direction in {"上涨", "反弹"} else "#dc2626"
+        fig.add_vrect(
+            x0=pd.Timestamp(segment["开始日期"]).strftime("%Y-%m-%d"),
+            x1=pd.Timestamp(segment["结束日期"]).strftime("%Y-%m-%d"),
+            fillcolor=color,
+            opacity=0.11,
+            line_width=0,
+            annotation_text=direction,
+            annotation_position="top left",
+        )
+    fig.update_layout(
+        title="目标K线与主要波段",
+        xaxis_title="日期",
+        yaxis_title="价格",
+        xaxis_rangeslider_visible=False,
+        xaxis_type="category",
+        hovermode="x unified",
+    )
+    return fig
+
+def _review_relative_chart(target_window: pd.DataFrame, comparisons: list[tuple[str, pd.DataFrame]]) -> go.Figure:
+    fig = go.Figure()
+    if target_window.empty:
+        fig.update_layout(title="目标 / 指数 / 板块归一化走势")
+        return fig
+    target_series = _normalized_chart_frame(target_window)
+    fig.add_scatter(
+        x=target_series["date"],
+        y=target_series["close"],
+        mode="lines",
+        name="目标",
+        line={"width": 4, "color": "#2563eb"},
+    )
+    palette = ["#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#64748b"]
+    for index, (label, frame) in enumerate(comparisons):
+        series = _normalized_chart_frame(frame)
+        if series.empty:
+            continue
+        fig.add_scatter(
+            x=series["date"],
+            y=series["close"],
+            mode="lines",
+            name=label,
+            line={"width": 2, "color": palette[index % len(palette)]},
+            opacity=0.78,
+        )
+    fig.update_layout(
+        title="目标 / 指数 / 板块归一化走势",
+        xaxis_title="日期",
+        yaxis_title="起点=100",
+        hovermode="x unified",
+    )
+    return fig
+
+def _normalized_chart_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "close"])
+    result = frame.copy()
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    result["close"] = pd.to_numeric(result["close"], errors="coerce")
+    result = result.dropna(subset=["date", "close"]).sort_values("date")
+    if result.empty or result["close"].iloc[0] == 0:
+        return pd.DataFrame(columns=["date", "close"])
+    result["close"] = result["close"] / result["close"].iloc[0] * 100.0
+    return result[["date", "close"]]
+
 def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: str) -> None:
     job_state = st.session_state.get("full_daily_tdx_job")
     keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
@@ -930,7 +2373,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             help="逗号、空格或换行分隔；用于补充指数、ETF 或其他代理标的，如 399006.SZ,000300.SH。",
         )
         if include_indexes:
-            st.caption("常用指数：" + "、".join(DEFAULT_ANALYSIS_INDEX_SYMBOLS))
+            st.caption("常用指数：" + "、".join(DEFAULT_DOWNLOAD_INDEX_SYMBOLS))
         start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
         end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
         if error := _date_range_error(start, end):
@@ -957,7 +2400,7 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
                 st.session_state["full_daily_tdx_summary"] = {
                     "total": len(unique_symbols(all_symbols)),
                     "stock_total": len(unique_symbols(stock_symbols)),
-                    "index_total": len(DEFAULT_ANALYSIS_INDEX_SYMBOLS) if include_indexes else 0,
+                    "index_total": len(DEFAULT_DOWNLOAD_INDEX_SYMBOLS) if include_indexes else 0,
                     "download": len(download_symbols),
                     "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
                     "skip_available": bool(skip_available),
