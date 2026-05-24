@@ -97,6 +97,28 @@ def test_parse_openbb_download_command() -> None:
     assert args.provider == "akshare"
 
 
+def test_parse_native_akshare_download_command() -> None:
+    args = _parse_args(
+        [
+            "download",
+            "--download-engine",
+            "akshare",
+            "--data-root",
+            "/tmp/market/daily",
+            "--symbols",
+            "600519.SH",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+        ]
+    )
+
+    assert args.command == "download"
+    assert args.download_engine == "akshare"
+    assert args.data_root == "/tmp/market/daily"
+
+
 def test_parse_tdx_download_command() -> None:
     args = _parse_args(
         [

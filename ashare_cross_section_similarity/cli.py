@@ -398,14 +398,14 @@ def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_download_data_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--data-root", default="data/market/daily", help="OpenBB 下载写入的本地行情根目录")
+    parser.add_argument("--data-root", default="data/market/daily", help="直接下载写入的本地行情根目录")
     parser.add_argument("--timeframe", default="1d", choices=["1d", "30m", "15m", "5m", "1m"])
     parser.add_argument("--adjust", default="qfq")
     parser.add_argument(
         "--download-engine",
         default="trend",
-        choices=["trend", "openbb", "tdx"],
-        help="下载引擎：trend 委托原 trend-backtest；openbb/tdx 直接写入 parquet。",
+        choices=["trend", "akshare", "openbb", "tdx"],
+        help="下载引擎：trend 委托原 trend-backtest；akshare/openbb/tdx 直接写入 parquet。",
     )
 
 

@@ -20,12 +20,17 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 research = ["aeon>=1.4", "tslearn>=0.8", "stumpy>=1.14"]
+desktop = ["PySide6>=6.7"]
+packaging = ["pyinstaller>=6.6"]
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 ashare-xsec-sim = "ashare_cross_section_similarity.cli:main"
+ashare-xsec-sim-qt = "ashare_cross_section_similarity.desktop.app:main"
+ashare-xsec-data-api = "ashare_cross_section_similarity.data_api:main"
 
 [tool.setuptools]
-packages = ["ashare_cross_section_similarity"]
+packages = ["ashare_cross_section_similarity", "ashare_cross_section_similarity.desktop"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,6 +12,7 @@ from ashare_cross_section_similarity.data import (
     inclusive_end_timestamp,
     resolve_timeframe_root,
 )
+from ashare_cross_section_similarity.akshare_source import fetch_akshare_bars
 from ashare_cross_section_similarity.openbb_source import fetch_openbb_bars
 from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars
 from ashare_cross_section_similarity.universe import normalize_symbol, unique_symbols
@@ -80,8 +81,17 @@ def update_local_bars(
     normalized_symbols = unique_symbols(symbols)
     if not normalized_symbols:
         return pd.DataFrame(columns=["symbol", "status", "rows", "new_rows", "message"])
-    if download_engine not in {"trend", "openbb", "tdx"}:
-        raise ValueError("download_engine 仅支持 trend、openbb 或 tdx。")
+    if download_engine not in {"trend", "akshare", "openbb", "tdx"}:
+        raise ValueError("download_engine 仅支持 trend、akshare、openbb 或 tdx。")
+    if download_engine == "akshare":
+        return _update_local_bars_with_akshare(
+            symbols=normalized_symbols,
+            timeframe=timeframe,
+            adjust=adjust,
+            start=start,
+            end=end,
+            data_root=data_root,
+        )
     if download_engine == "openbb":
         return _update_local_bars_with_openbb(
             symbols=normalized_symbols,
@@ -178,6 +188,46 @@ def _update_local_bars_with_openbb(
                     int(len(saved)),
                     int(len(frame)),
                     f"OpenBB/{provider} 行情已写入本地 parquet。",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            rows.append(_download_row(symbol, "failed", 0, 0, str(exc)))
+    return pd.DataFrame(rows)
+
+
+def _update_local_bars_with_akshare(
+    *,
+    symbols: list[str],
+    timeframe: str,
+    adjust: str,
+    start: str,
+    end: str,
+    data_root: str | Path,
+) -> pd.DataFrame:
+    root = resolve_timeframe_root(data_root, timeframe) / adjust
+    root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        try:
+            frame = fetch_akshare_bars(
+                symbols=(symbol,),
+                start=start,
+                end=end,
+                timeframe=timeframe,
+                adjust=adjust,
+            )
+            frame = frame.loc[frame["stock_code"] == symbol, CANONICAL_COLUMNS]
+            if frame.empty:
+                rows.append(_download_row(symbol, "failed", 0, 0, "AkShare 未返回行情数据"))
+                continue
+            saved = _write_symbol_bars(root / f"{symbol}.parquet", frame)
+            rows.append(
+                _download_row(
+                    symbol,
+                    "success",
+                    int(len(saved)),
+                    int(len(frame)),
+                    "AkShare 行情已写入本地 parquet。",
                 )
             )
         except Exception as exc:  # noqa: BLE001

@@ -246,6 +246,7 @@ def rank_review_results(
     comparisons: pd.DataFrame | None = None,
     *,
     stock_names: dict[str, str] | None = None,
+    direction_by_symbol: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     valid = [result for result in results if not result.window.empty]
     if not valid:
@@ -287,7 +288,7 @@ def rank_review_results(
             {
                 "代码": result.symbol,
                 "股票": str((stock_names or {}).get(result.symbol, "") or "").strip(),
-                "所属方向": "-",
+                "所属方向": str((direction_by_symbol or {}).get(result.symbol, "") or "-").strip() or "-",
                 "对标指数": comparison.get("标的", "-") or "-",
                 "指数阶段": _index_phase_label(comparison.get("对比收益")),
                 "强弱等级": grade,

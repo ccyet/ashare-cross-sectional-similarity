@@ -4,7 +4,7 @@
 
 当前版本包含完整闭环：
 
-- 数据抓取：默认委托原 `trend-backtest/scripts/update_data.py`，也可选用 OpenBB 或 TDX 直接写入本地 parquet
+- 数据抓取：默认委托原 `trend-backtest/scripts/update_data.py`，也可选用原生 AkShare、OpenBB 或 TDX 直接写入本地 parquet
 - 数据落地：统一写入本地 parquet
 - 数据检查：历史时序和横截面共用同一套本地覆盖检查、下载修复和 parquet 缓存失效逻辑
 - 历史时序搜索：同一标的自己的历史阶段相似度回溯，支持自定义起止区间和快捷近 N 根
@@ -88,6 +88,18 @@ cd /Users/a1234/Desktop/ashare-cross-sectional-similarity
 python -m pip install -r requirements.txt
 ```
 
+Qt 桌面壳和小范围数据 API 是可选增强：
+
+```bash
+python -m pip install ".[desktop,server]"
+```
+
+如果要生成 macOS 双击启动的 `.app`，再安装打包依赖：
+
+```bash
+python -m pip install ".[desktop,server,packaging]"
+```
+
 OpenBB 抓取链路是可选增强，不作为默认依赖。需要使用时再安装：
 
 ```bash
@@ -104,6 +116,8 @@ export TDX_TQCENTER_PATH=/path/to/TdxInstall/PYPlugins/user
 ## 4. 数据要求
 
 默认读取本地 parquet；缺数据时可以在本库页面或 CLI 中触发下载。下载动作默认调用原 `trend-backtest` 的 `scripts/update_data.py`，数据源、TDX/AkShare 路由和落地目录仍以原库配置为准。
+
+如果使用 `--download-engine akshare`，程序会直接通过 AkShare 抓取 `1d` 日线，并按本库目录结构直接写入 parquet。分钟线请使用 TDX。
 
 如果使用 `--download-engine openbb`，程序会通过 OpenBB 的统一接口抓取行情，并按本库目录结构直接写入 parquet。A 股默认使用 `openbb_akshare` 扩展。
 
@@ -132,6 +146,86 @@ volume, amount
 
 Streamlit 页面会缓存本地行情读取结果。缓存键包含目标 parquet 文件的修改时间和大小，因此页面内外更新 parquet 后，再刷新页面会自动读取新文件，不需要手动重启服务。
 
+## 4.1 小范围数据 API 与 Qt 桌面壳
+
+推荐把 TDX / AkShare 抓取统一收口到本地或局域网内的数据 API，再让 Qt 应用消费同一套本地 parquet。API 默认只做小范围请求，避免误触发全市场下载。
+
+启动数据 API：
+
+```bash
+ashare-xsec-data-api \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
+  --tdx-path /path/to/TdxInstall/PYPlugins/user
+```
+
+读取本地数据：
+
+```bash
+curl "http://127.0.0.1:8765/api/v1/bars?symbols=000001.SZ&start=2024-01-01&end=2024-01-31&source=local"
+```
+
+用 AkShare 自动补齐后再返回：
+
+```bash
+curl "http://127.0.0.1:8765/api/v1/bars?symbols=000001.SZ&start=2024-01-01&end=2024-01-31&source=akshare"
+```
+
+用本机 TDX 补齐后再返回：
+
+```bash
+curl "http://127.0.0.1:8765/api/v1/bars?symbols=000001.SZ&start=2024-01-01&end=2024-01-31&source=tdx"
+```
+
+启动 Qt 桌面壳：
+
+```bash
+ashare-xsec-sim-qt
+```
+
+桌面壳顶部可以选择两种模式：
+
+- `本地 parquet`：不经过 HTTP，直接读取本机行情目录，适合离线研究。
+- `数据 API`：调用 `ashare-xsec-data-api`，再选择 `local / akshare / tdx`。其中 `akshare` 会自动补数据，`tdx` 要求已配置本机通达信 `PYPlugins/user` 路径。
+
+生成 macOS 应用包：
+
+```bash
+python scripts/build_macos_qt_app.py
+```
+
+产物位置：
+
+```text
+dist/A股相似阶段.app
+```
+
+打包脚本会生成应用图标，并使用 `packaging/macos/ashare_xsec_sim_qt.spec` 固定 Qt 入口和 bundle 信息。
+
+生成 Win11 桌面版 `.exe` 需要在 Windows 侧执行。Parallels 共享目录下的已验证基线：
+
+```powershell
+cd C:\Mac\Home\Desktop\ashare-cross-sectional-similarity
+C:\Users\Public\venvs\ashare-xsec-sim\Scripts\python.exe -m pip install ".[desktop,server,packaging]"
+C:\Users\Public\venvs\ashare-xsec-sim\Scripts\python.exe scripts\build_windows_qt_app.py
+```
+
+产物位置：
+
+```text
+dist\windows\A股相似阶段\A股相似阶段.exe
+```
+
+Win11 侧使用 TDX 时，先确认通达信已启动并登录，再把 `TDX_TQCENTER_PATH` 指向实际 `PYPlugins\user` 目录：
+
+```powershell
+$env:TDX_TQCENTER_PATH="C:\path\to\TdxInstall\PYPlugins\user"
+C:\Users\Public\venvs\ashare-xsec-sim\Scripts\python.exe -m pytest tests\test_tdx_source.py tests\test_download_all_a_daily.py
+```
+
+如果 `numba` 或 `stumpy` 在 Win11 导入时报 `DLL load failed while importing _typeconv`，先安装 Microsoft Visual C++ x64 Runtime，再重跑测试，不要先改业务代码。
+
 ## 5. 数据抓取与检查
 
 ### 5.1 下载行情
@@ -157,14 +251,13 @@ python -m ashare_cross_section_similarity download \
 - 具体支持哪些周期、使用 AkShare 还是 TDX、落到哪个目录，以原 `trend-backtest/config/data_source.yaml` 和原脚本实现为准。
 - 如需指定原脚本 provider，可加 `--provider akshare` 或 `--provider tdx`。
 
-也可以用 OpenBB/AKShare 直接写入本地 parquet：
+也可以用原生 AkShare 直接写入本地 parquet：
 
 ```bash
 python -m ashare_cross_section_similarity download \
-  --download-engine openbb \
+  --download-engine akshare \
   --data-root /Users/a1234/Desktop/trend-backtest/data/market/daily \
   --timeframe 1d \
-  --provider akshare \
   --symbols 300750.SZ,000001.SZ,600519.SH \
   --start 2024-01-01 \
   --end 2024-03-31
@@ -264,6 +357,7 @@ python scripts/download_all_a_daily.py \
 | `--extra-symbols` | 额外下载指数、ETF 或代理标的，逗号或换行分隔 |
 | `--limit` | 调试时只下载前 N 个股票 |
 | `--sleep` | 批次之间暂停秒数，避免数据源限流 |
+| `--download-engine akshare` | 改用原生 AkShare 直接写入本地日线 parquet |
 | `--download-engine openbb` | 改用 OpenBB 直接写入本地 parquet |
 | `--download-engine tdx` | 改用本机 TDX 直连写入本地 parquet，`--provider` 填通达信安装目录、`PYPlugins` 或 `PYPlugins/user` |
 
@@ -397,7 +491,7 @@ streamlit run streamlit_app.py
 1. 填本地行情目录。
 2. 填原 `trend-backtest` 仓库路径。
 3. 选择周期，默认日线。
-4. 选择下载引擎：默认调用原库 `update_data.py`，也可选择 OpenBB 或 TDX 本地。
+4. 选择下载引擎：默认调用原库 `update_data.py`，也可选择 AkShare、OpenBB 或 TDX 本地。
 5. 在对应工作台填写目标代码、窗口或区间；横截面工作台还需填写搜索范围。
 6. 如需使用自有行情，在左侧 `上传自定义价格数据` 中导入 `csv / parquet`。
 7. 查看或点击数据检查。
@@ -496,7 +590,7 @@ ASHARE_HOST_DATA_DIR=/path/to/trend-backtest/data docker compose up --build
 - 历史时序搜索和横截面搜索分开运行，不自动合成总评分。
 - 指数成分、行业板块、概念板块来自 AkShare 当前接口，不保证历史成分时点准确。
 - ETF 成分暂不自动抓取，建议先用 `--universe-file` 输入 ETF 持仓或自定义成分。
-- 默认数据抓取仍按原 `trend-backtest` 处理；OpenBB 与 TDX 直连链路为可选增强，分别依赖本机 OpenBB/provider 扩展和通达信 `tqcenter` 是否可用。
+- 默认数据抓取仍可按原 `trend-backtest` 处理；小范围 API 和 Qt 桌面壳优先使用原生 AkShare 或本机 TDX。OpenBB 仍保留为可选增强。
 - 结果是研究工具，不是买卖建议。
 
 ## 12. 开发验证

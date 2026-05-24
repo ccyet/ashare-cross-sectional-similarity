@@ -129,6 +129,48 @@ def test_update_local_bars_can_fetch_and_write_with_openbb_engine(tmp_path: Path
     assert saved["close"].tolist() == [1, 2]
 
 
+def test_update_local_bars_can_fetch_and_write_with_native_akshare_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["600519.SH", "600519.SH"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_akshare_bars",
+        return_value=bars,
+    ) as fetch_akshare_bars:
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            download_engine="akshare",
+        )
+
+    fetch_akshare_bars.assert_called_once_with(
+        symbols=("600519.SH",),
+        start="2024-01-01",
+        end="2024-01-02",
+        timeframe="1d",
+        adjust="qfq",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
 def test_update_local_bars_can_fetch_and_write_with_tdx_engine(tmp_path: Path) -> None:
     bars = pd.DataFrame(
         {
