@@ -200,6 +200,15 @@ def _run_review(args: argparse.Namespace) -> int:
             "review": ai_result.review,
             "analysis": ai_result.analysis,
             "critique": ai_result.critique,
+            "script_cards": [
+                {
+                    "title": card.title,
+                    "body": card.body,
+                    "grade": card.grade,
+                    "tomorrow_check": card.tomorrow_check,
+                }
+                for card in ai_result.script_cards
+            ],
             "evidence_refs": list(ai_result.evidence_refs),
             "disclaimer": ai_result.disclaimer,
         }

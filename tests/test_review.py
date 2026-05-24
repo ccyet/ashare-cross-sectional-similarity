@@ -174,10 +174,11 @@ def test_render_review_text_uses_data_only_language() -> None:
 
     text = render_review_text(result)
 
-    assert "研究复盘：讲证据" in text
+    assert "研究端排序复盘" in text
     assert "区间收益 30.00%" in text
-    assert "A股语境" in text
-    assert "关键波段证据" in text
+    assert "排序总表" in text
+    assert "逐个锐评" in text
+    assert "关键转折点复盘" in text
     assert "新闻" not in text
     assert "基本面" not in text
 
@@ -192,9 +193,10 @@ def test_render_review_text_lists_structured_benchmark_relationship() -> None:
 
     text = render_review_text(result, comparisons)
 
-    assert "对标关系" in text
+    assert "排序总表" in text
+    assert "对标指数" in text
     assert "沪深300" in text
-    assert "同步跟随" in text
+    assert "相对超额" in text
 
 
 def test_render_multi_review_text_summarizes_symbols_and_benchmark_relationships() -> None:
@@ -215,11 +217,12 @@ def test_render_multi_review_text_summarizes_symbols_and_benchmark_relationships
 
     text = render_multi_review_text([first, second], comparisons)
 
-    assert "研究复盘：讲证据" in text
+    assert "研究端排序复盘" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
-    assert "排序锐评" in text
-    assert "对标关系" in text
+    assert "排序总表" in text
+    assert "逐个锐评" in text
+    assert "对标关系" not in text
 
 
 def test_render_multi_review_text_accepts_comparison_table_without_symbol_column() -> None:
@@ -231,7 +234,7 @@ def test_render_multi_review_text_accepts_comparison_table_without_symbol_column
 
     text = render_multi_review_text([result], comparisons)
 
-    assert "研究复盘：讲证据" in text
+    assert "研究端排序复盘" in text
     assert "沪深300" in text
 
 
@@ -274,7 +277,8 @@ def test_rank_review_results_orders_by_strength_not_input_order() -> None:
     assert ranking["代码"].tolist() == ["600519.SH", "000001.SZ"]
     assert ranking["排名"].tolist() == [1, 2]
     assert ranking.loc[0, "股票"] == "稳趋势"
-    assert ranking.loc[0, "强弱等级"] in {"S", "A"}
+    assert ranking.loc[0, "强弱等级"] == "人上人"
+    assert set(ranking["强弱等级"]).issubset({"夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"})
     assert "明日验证" in ranking.columns
 
 
@@ -315,13 +319,50 @@ def test_render_multi_review_text_uses_ranked_critic_order() -> None:
     )
 
     assert "市场总环境" in text
-    assert "排序锐评" in text
-    assert "第1，稳趋势" in text
-    assert "第2，高波动" in text
-    assert text.index("第1，稳趋势") < text.index("第2，高波动")
-    assert "关键点" in text
+    assert "逐个锐评" in text
+    assert "第1，人上人，稳趋势" in text
+    assert "第2，" in text and "高波动" in text
+    critic_section = text.split("**逐个锐评**：", maxsplit=1)[1]
+    assert critic_section.index("第1，人上人，稳趋势") < critic_section.index("高波动")
+    assert "关键转折点复盘" in text
+    assert "卡在" in text
     assert "明日验证" in text
     assert "标的" not in text
+
+
+def test_render_multi_review_text_uses_ranked_framework_sections() -> None:
+    first = analyze_price_review(
+        _bars("000001.SZ", [10, 11, 12.5, 12.2], start="2026-01-01"),
+        ReviewConfig(symbol="000001.SZ", start="2026-01-01", end="2026-01-04"),
+    )
+    second = analyze_price_review(
+        _bars("600519.SH", [20, 19.5, 19, 18.5], start="2026-01-01"),
+        ReviewConfig(symbol="600519.SH", start="2026-01-01", end="2026-01-04"),
+    )
+    comparisons = pd.DataFrame(
+        [
+            {"代码": "000001.SZ", **build_comparison_stats(first.window, _bars("000300.SH", [10, 10.2, 10.4, 10.6], start="2026-01-01"), "沪深300")},
+            {"代码": "600519.SH", **build_comparison_stats(second.window, _bars("000300.SH", [10, 10.2, 10.4, 10.6], start="2026-01-01"), "沪深300")},
+        ]
+    )
+
+    text = render_multi_review_text(
+        [second, first],
+        comparisons,
+        stock_names={"000001.SZ": "强趋势", "600519.SH": "弱修复"},
+    )
+
+    assert "市场总环境" in text
+    assert "排序总表" in text
+    assert "逐个锐评" in text
+    assert "关键转折点复盘" in text
+    assert "明日验证" in text
+    assert "谁是真强" in text
+    assert "谁只是补涨" in text
+    assert "谁已经拉完" in text
+    critic_section = text.split("**逐个锐评**：", maxsplit=1)[1]
+    assert critic_section.index("第1，") < critic_section.index("弱修复")
+    assert "对标关系" not in text
 
 
 def test_build_video_script_profile_measures_ytd_entry_exit_and_index_elasticity() -> None:
@@ -383,12 +424,14 @@ def test_render_video_script_text_includes_script_structure() -> None:
     text = render_video_script_text(profile)
 
     assert "视频脚本视角" in text
-    assert "YTD" in text
-    assert "定位" in text
-    assert "入场" in text
-    assert "压力" in text
-    assert "指数弹性" in text
-    assert "明日验证" in text
+    assert "第" in text
+    assert any(label in text for label in ["夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"])
+    assert "结局：" in text
+    assert "明日" not in text
+    assert "YTD" not in text
+    assert "入场" not in text
+    assert "压力" not in text
+    assert "指数弹性" not in text
     assert "标的" not in text
     assert "\n\n- " not in text
     assert "测试股" in text
@@ -407,14 +450,17 @@ def test_render_video_script_cards_html_uses_separate_highlight_cards() -> None:
     html = render_video_script_cards_html([profile])
 
     assert 'data-testid="video-script-cards"' in html
-    assert 'class="review-script-card positive"' in html
+    assert 'class="review-script-card grade-' in html
     assert "测试股" in html
-    assert "000001.SZ" in html
-    assert "今年表现" in html
-    assert "入场难度" in html
-    assert "压力" in html
-    assert "指数弹性" in html
-    assert "明日验证" in html
+    assert "第1" in html
+    assert "当前性质" in html
+    assert "标签" in html
+    assert "结局" in html
+    assert "明日" not in html
+    assert "一句话" in html
+    assert "入场难度" not in html
+    assert "压力" not in html
+    assert "指数弹性" not in html
     assert "<li" not in html
     assert "标的" not in html
 
@@ -439,8 +485,10 @@ def test_render_multi_video_script_text_lists_each_symbol() -> None:
     assert "视频脚本视角" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
-    assert "定位" in text
-    assert "入场" in text
-    assert "压力" in text
+    assert "结局：" in text
+    assert "明日" not in text
+    assert "数据：" in text
+    assert "入场" not in text
+    assert "压力" not in text
     assert "标的" not in text
     assert "\n\n- " not in text

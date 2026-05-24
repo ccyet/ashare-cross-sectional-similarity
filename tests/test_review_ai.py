@@ -80,6 +80,15 @@ def test_build_review_ai_messages_require_json_contract() -> None:
     assert "review" in messages[0]["content"]
     assert "analysis" in messages[0]["content"]
     assert "critique" in messages[0]["content"]
+    assert "script_cards" in messages[0]["content"]
+    assert "市场总环境" in messages[0]["content"]
+    assert "排序总表" in messages[0]["content"]
+    assert "逐个锐评" in messages[0]["content"]
+    assert "关键转折点复盘" in messages[0]["content"]
+    assert "明日验证" in messages[0]["content"]
+    assert "夯爆了 > 人上人 > 立棍单打 > 刷子 > 混子 > NPC > 拉完了" in messages[0]["content"]
+    assert "每个标的三句话封顶" in messages[0]["content"]
+    assert "视频端不得写明天" in messages[0]["content"]
     assert messages[1]["role"] == "user"
     assert "000001.SZ" in messages[1]["content"]
 
@@ -90,6 +99,14 @@ def test_parse_review_ai_result_accepts_required_fields() -> None:
             "review": "复盘内容",
             "analysis": "分析内容",
             "critique": "锐评内容",
+            "script_cards": [
+                {
+                    "title": "第1，平安银行",
+                    "body": "它排在第1，不是因为涨得最多，而是因为超额更好。",
+                    "grade": "A",
+                    "tomorrow_check": "回踩不破短均算强。",
+                }
+            ],
             "evidence_refs": ["segments[0]", "comparisons[0]"],
             "disclaimer": "仅供研究复盘",
         },
@@ -101,6 +118,9 @@ def test_parse_review_ai_result_accepts_required_fields() -> None:
     assert result.review == "复盘内容"
     assert result.analysis == "分析内容"
     assert result.critique == "锐评内容"
+    assert result.script_cards[0].title == "第1，平安银行"
+    assert result.script_cards[0].grade == "A"
+    assert result.script_cards[0].tomorrow_check == "回踩不破短均算强。"
     assert result.evidence_refs == ("segments[0]", "comparisons[0]")
 
 

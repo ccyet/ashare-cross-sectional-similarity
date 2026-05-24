@@ -254,6 +254,7 @@ def rank_review_results(
                 "排名",
                 "代码",
                 "股票",
+                "所属方向",
                 "对标指数",
                 "指数阶段",
                 "强弱等级",
@@ -286,6 +287,7 @@ def rank_review_results(
             {
                 "代码": result.symbol,
                 "股票": str((stock_names or {}).get(result.symbol, "") or "").strip(),
+                "所属方向": "-",
                 "对标指数": comparison.get("标的", "-") or "-",
                 "指数阶段": _index_phase_label(comparison.get("对比收益")),
                 "强弱等级": grade,
@@ -328,24 +330,66 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
   gap: 0.9rem;
 }}
 .review-script-card {{
-  border: 1px solid #e5e7eb;
-  border-left: 5px solid #64748b;
+  --script-accent: #64748b;
+  --script-border: #e2e8f0;
+  --script-bg: #ffffff;
+  --script-badge-bg: #f1f5f9;
+  --script-badge-text: #334155;
+  border: 1px solid var(--script-border);
+  border-left: 5px solid var(--script-accent);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--script-bg);
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
   padding: 0.95rem 1rem;
 }}
-.review-script-card.positive {{
-  border-left-color: #16a34a;
-  background: linear-gradient(90deg, rgba(22, 163, 74, 0.08), #ffffff 34%);
+.review-script-card.grade-s {{
+  --script-accent: #7c3aed;
+  --script-border: #ddd6fe;
+  --script-bg: #f5f3ff;
+  --script-badge-bg: #ede9fe;
+  --script-badge-text: #5b21b6;
 }}
-.review-script-card.negative {{
-  border-left-color: #dc2626;
-  background: linear-gradient(90deg, rgba(220, 38, 38, 0.08), #ffffff 34%);
+.review-script-card.grade-a {{
+  --script-accent: #16a34a;
+  --script-border: #bbf7d0;
+  --script-bg: #f0fdf4;
+  --script-badge-bg: #dcfce7;
+  --script-badge-text: #166534;
 }}
-.review-script-card.neutral {{
-  border-left-color: #2563eb;
-  background: linear-gradient(90deg, rgba(37, 99, 235, 0.08), #ffffff 34%);
+.review-script-card.grade-b {{
+  --script-accent: #2563eb;
+  --script-border: #bfdbfe;
+  --script-bg: #eff6ff;
+  --script-badge-bg: #dbeafe;
+  --script-badge-text: #1d4ed8;
+}}
+.review-script-card.grade-c {{
+  --script-accent: #d97706;
+  --script-border: #fde68a;
+  --script-bg: #fffbeb;
+  --script-badge-bg: #fef3c7;
+  --script-badge-text: #92400e;
+}}
+.review-script-card.grade-d {{
+  --script-accent: #64748b;
+  --script-border: #cbd5e1;
+  --script-bg: #f8fafc;
+  --script-badge-bg: #e2e8f0;
+  --script-badge-text: #334155;
+}}
+.review-script-card.grade-e {{
+  --script-accent: #475569;
+  --script-border: #cbd5e1;
+  --script-bg: #f8fafc;
+  --script-badge-bg: #e2e8f0;
+  --script-badge-text: #1e293b;
+}}
+.review-script-card.grade-f {{
+  --script-accent: #dc2626;
+  --script-border: #fecaca;
+  --script-bg: #fef2f2;
+  --script-badge-bg: #fee2e2;
+  --script-badge-text: #991b1b;
 }}
 .review-script-head {{
   display: flex;
@@ -353,14 +397,6 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
   justify-content: space-between;
   gap: 0.75rem;
   margin-bottom: 0.75rem;
-}}
-.review-script-kicker {{
-  display: block;
-  color: #64748b;
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-bottom: 0.15rem;
 }}
 .review-script-name {{
   font-size: 1.05rem;
@@ -372,8 +408,8 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
 .review-script-code {{
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #334155;
+  background: var(--script-badge-bg);
+  color: var(--script-badge-text);
   font-size: 0.76rem;
   font-weight: 700;
   padding: 0.18rem 0.48rem;
@@ -449,35 +485,8 @@ def render_review_text(
     if result.window.empty:
         return "\n".join(f"- {warning}" for warning in result.warnings) or "- 没有可复盘的数据。"
 
-    overview = result.overview
-    title = _review_display_label(result.symbol, stock_names)
-    lifecycle = _lifecycle_label(overview)
-    lines = [
-        (
-            f"**研究复盘：讲证据**\n\n"
-            f"{title} 在 {_date_text(result.start)} 至 {_date_text(result.end)} 共 {int(overview['k_bars'])} 根K线。"
-            f"区间收益 {_percent(overview['return'])}，最大回撤 {_percent(overview['max_drawdown'])}，"
-            f"最大浮盈 {_percent(overview['max_favorable'])}，上涨K线占比 {_percent(overview['up_day_share'])}。"
-        ),
-        (
-            f"**A股语境**：这段走势暂归为“{lifecycle}”。"
-            f"{_lifecycle_conclusion(lifecycle)}"
-        )
-    ]
-    if result.main_segments.empty:
-        lines.append("**波段结构**：所选区间没有达到阈值的主要上涨或回撤段，走势更接近震荡或小幅单边变化。")
-    else:
-        lines.append("**关键波段证据**：")
-        for _, segment in result.main_segments.sort_values("开始日期").iterrows():
-            lines.append(
-                "- "
-                f"{_date_text(segment['开始日期'])} 至 {_date_text(segment['结束日期'])} "
-                f"为{segment['方向']}段，共 {int(segment['K线数'])} 根K线，"
-                f"区间收益 {_percent(segment['区间收益'])}，段内最大回撤 {_percent(segment['最大回撤'])}，"
-                f"振幅 {_percent(segment['振幅'])}。"
-            )
-
-    lines.extend(_comparison_text_lines(comparisons))
+    ranked_comparisons = _comparisons_for_ranking(comparisons, result.symbol)
+    lines = _ranked_review_framework([result], ranked_comparisons, stock_names=stock_names)
     for warning in result.warnings:
         lines.append(f"**提示**：{warning}")
     return "\n\n".join(lines)
@@ -492,53 +501,120 @@ def render_multi_review_text(
     valid = [result for result in results if not result.window.empty]
     if not valid:
         return "- 没有可复盘的数据。"
-    returns = pd.Series([result.overview.get("return") for result in valid], dtype="float64").dropna()
-    ranking = rank_review_results(valid, comparisons, stock_names=stock_names)
+    ranked_comparisons = _comparisons_for_ranking(comparisons, valid[0].symbol) if len(valid) == 1 else comparisons
+    return "\n\n".join(_ranked_review_framework(valid, ranked_comparisons, stock_names=stock_names))
+
+
+def _comparisons_for_ranking(comparisons: pd.DataFrame | None, symbol: str) -> pd.DataFrame | None:
+    if comparisons is None or comparisons.empty or "代码" in comparisons.columns:
+        return comparisons
+    result = comparisons.copy()
+    result.insert(0, "代码", normalize_symbol(symbol))
+    return result
+
+
+def _ranked_review_framework(
+    results: list[ReviewResult] | tuple[ReviewResult, ...],
+    comparisons: pd.DataFrame | None,
+    *,
+    stock_names: dict[str, str] | None,
+) -> list[str]:
+    ranking = rank_review_results(results, comparisons, stock_names=stock_names)
+    returns = pd.Series([result.overview.get("return") for result in results], dtype="float64").dropna()
     best = ranking.iloc[0] if not ranking.empty else None
     worst = ranking.iloc[-1] if not ranking.empty else None
     lines = [
+        "**研究端排序复盘**",
+        f"**市场总环境**：{_market_environment_text(comparisons)}",
         (
-            f"**研究复盘：讲证据**\n\n"
-            f"本次共复盘 {len(valid)} 个对象，"
-            f"平均区间收益 {_percent(returns.mean()) if not returns.empty else '-'}。"
+            f"本次共复盘 {len(results)} 个对象，平均区间收益 "
+            f"{_percent(returns.mean()) if not returns.empty else '-'}。"
             f"排序第一是 {_ranking_row_title(best)}，最后是 {_ranking_row_title(worst)}。"
         ),
-        f"**市场总环境**：{_market_environment_text(comparisons)}",
-        "**排序锐评**：",
+        "**排序总表**：",
+        _ranking_table_markdown(ranking),
+        "**逐个锐评**：",
     ]
     for _, row in ranking.iterrows():
-        lines.append(
-            "\n".join(
-                [
-                    f"**第{int(row['排名'])}，{_ranking_row_title(row)}。**",
-                    f"它排在这里，是因为{_ranking_reason(row)}。",
-                    (
-                        f"数据上看，区间收益 {_percent(row['区间收益'])}，最大回撤 {_percent(row['最大回撤'])}，"
-                        f"相对超额 {_percent(row['相对超额'])}，属于{row['当前性质']}。"
-                    ),
-                    f"关键点在{row['关键转折点']}。明日验证：{row['明日验证']}",
-                    f"一句话：{row['锐评结论']}",
-                ]
-            )
-        )
-    if comparisons is not None and not comparisons.empty:
-        if "代码" not in comparisons.columns:
-            lines.extend(_comparison_text_lines(comparisons))
-        else:
-            relation_lines = ["**对标关系**："]
-            for symbol, rows in comparisons.groupby("代码", sort=False):
-                valid_rows = rows.dropna(subset=["相关性"])
-                if valid_rows.empty:
-                    continue
-                strongest = valid_rows.iloc[pd.to_numeric(valid_rows["相关性"], errors="coerce").abs().argmax()]
-                relation_lines.append(
-                    "- "
-                    f"{_review_display_label(symbol, stock_names)} 相对 {strongest['标的']}："
-                    f"{_comparison_script_label(strongest)}"
-                )
-            if len(relation_lines) > 1:
-                lines.extend(relation_lines)
-    return "\n\n".join(lines)
+        lines.append(_ranked_review_paragraph(row))
+    lines.append("**关键转折点复盘**：")
+    lines.extend(_turning_point_lines(ranking))
+    lines.append("**明日验证**：")
+    lines.extend(_tomorrow_check_lines(ranking))
+    lines.append(
+        "**收束**："
+        f"谁是真强，看 {_ranking_row_title(best)} 的超额和承接；"
+        "谁只是补涨，看刷子、混子里仍有正收益的对象；"
+        f"谁已经拉完或需要回避，看 {_ranking_row_title(worst)} 的破位、回撤和负超额。"
+    )
+    return lines
+
+
+def _ranking_table_markdown(ranking: pd.DataFrame) -> str:
+    if ranking.empty:
+        return "没有可排序对象。"
+    columns = [
+        "排名",
+        "代码",
+        "股票",
+        "所属方向",
+        "对标指数",
+        "指数阶段",
+        "强弱等级",
+        "区间收益",
+        "最大回撤",
+        "相对超额",
+        "关键转折点",
+        "当前性质",
+        "锐评结论",
+        "明日验证",
+    ]
+    header = "| " + " | ".join(columns) + " |"
+    divider = "|" + "|".join(["---:" if column == "排名" else "---" for column in columns]) + "|"
+    rows = []
+    for _, row in ranking.iterrows():
+        values = []
+        for column in columns:
+            value = row.get(column, "-")
+            if column in {"区间收益", "最大回撤", "相对超额"}:
+                value = _percent(value)
+            values.append(str(value if str(value).strip() else "-").replace("\n", " "))
+        rows.append("| " + " | ".join(values) + " |")
+    return "\n".join([header, divider, *rows])
+
+
+def _ranked_review_paragraph(row: pd.Series) -> str:
+    title = _video_ranked_title(row)
+    return "\n".join(
+        [
+            f"**{title}**",
+            _ranking_reason(row),
+            (
+                f"数据：收益 {_percent(row['区间收益'])}，回撤 {_percent(row['最大回撤'])}，"
+                f"超额 {_percent(row['相对超额'])}。"
+            ),
+            f"结局：{row['当前性质']}，卡在{row['关键转折点']}，{row['锐评结论']}",
+        ]
+    )
+
+
+def _video_ranked_title(row: pd.Series) -> str:
+    return f"第{int(row['排名'])}，{_ranking_label(str(row.get('强弱等级', '') or ''))}，{_ranking_row_title(row)}。"
+
+
+def _turning_point_lines(ranking: pd.DataFrame) -> list[str]:
+    if ranking.empty:
+        return ["- 暂无关键转折点。"]
+    return [
+        f"- {_ranking_row_title(row)}：当前卡在{row['关键转折点']}，性质是{row['当前性质']}。"
+        for _, row in ranking.iterrows()
+    ]
+
+
+def _tomorrow_check_lines(ranking: pd.DataFrame) -> list[str]:
+    if ranking.empty:
+        return ["- 暂无明日验证条件。"]
+    return [f"- {_ranking_row_title(row)}：{row['明日验证']}" for _, row in ranking.iterrows()]
 
 
 def _empty_video_script_profile(symbol: str, benchmark_label: str) -> dict[str, object]:
@@ -705,80 +781,47 @@ def _ytd_label(value: float) -> str:
 
 
 def _video_script_profile_block(profile: dict[str, object]) -> str:
-    title = _video_script_title(profile)
-    setup = _video_setup_sentence(profile)
-    turning_point = str(profile.get("关键转折点", "") or "").strip()
-    turning_line = f"**关键点**：{turning_point}。" if turning_point else ""
+    title = _video_profile_heading(profile)
     return "\n\n".join(
-        [line for line in [
+        [
             f"**{title}**",
-            f"**定位**：{setup}",
-            f"**入场**：{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}",
-            (
-                f"**压力**：入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
-                f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
-            ),
-            (
-                f"**指数弹性**：{profile.get('指数', '指数')}上涨日 {profile.get('指数大涨日样本', 0)} 天，"
-                f"这只票平均 {_percent(profile.get('指数大涨日标的均值'))}，指数平均 {_percent(profile.get('指数大涨日指数均值'))}；"
-                f"下跌日 {profile.get('指数大跌日样本', 0)} 天，"
-                f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
-                f"{profile.get('指数弹性结论', '')}"
-            ),
-            turning_line,
-            f"**明日验证**：{_video_tomorrow_check(profile)}",
-        ] if line]
+            _video_setup_sentence(profile),
+            _video_data_sentence(profile),
+            f"结局：{_video_profile_ending(profile)}",
+        ]
     )
 
 
 def _video_script_profile_card_html(profile: dict[str, object]) -> str:
-    title = _video_script_title(profile)
+    title = _video_profile_heading(profile)
     symbol = str(profile.get("代码", "") or "").strip()
-    theme = _video_script_card_theme(profile.get("YTD收益"))
-    ytd_class = _video_value_class(profile.get("YTD收益"), positive_is_good=True)
-    drawdown_class = _video_value_class(profile.get("买入后最大收盘回撤"), positive_is_good=False)
-    intraday_class = _video_value_class(profile.get("单日最大日内回撤"), positive_is_good=False)
+    grade = _video_profile_grade(profile)
+    theme = _video_script_card_theme(grade)
+    return_value = _video_primary_return(profile)
+    drawdown_value = _video_primary_drawdown(profile)
+    return_class = _video_value_class(return_value, positive_is_good=True)
+    drawdown_class = _video_value_class(drawdown_value, positive_is_good=False)
     code_badge = ""
     if symbol and symbol != title:
-        code_badge = f'<span class="review-script-code">{html_escape(symbol)}</span>'
+        code_badge = f'<span class="review-script-code">{html_escape(grade)}</span>'
 
-    setup_text = _video_setup_sentence(profile)
-    entry_text = f"{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}"
-    pressure_text = (
-        f"入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
-        f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
-    )
-    elasticity_text = (
-        f"{profile.get('指数', '指数')}上涨日 {profile.get('指数大涨日样本', 0)} 天，"
-        f"这只票平均 {_percent(profile.get('指数大涨日标的均值'))}，指数平均 {_percent(profile.get('指数大涨日指数均值'))}；"
-        f"下跌日 {profile.get('指数大跌日样本', 0)} 天，"
-        f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
-        f"{profile.get('指数弹性结论', '')}"
-    )
-    turning_point = str(profile.get("关键转折点", "") or "").strip()
-    turning_section = _video_card_section_html("关键点", f"{turning_point}。") if turning_point else ""
-    tomorrow_text = _video_tomorrow_check(profile)
     return f"""
 <article class="review-script-card {theme}">
   <header class="review-script-head">
     <div>
-      <span class="review-script-kicker">视频脚本</span>
       <h4 class="review-script-name">{html_escape(title)}</h4>
     </div>
     {code_badge}
   </header>
   <div class="review-script-metrics">
-    {_video_metric_html("今年表现", _percent(profile.get("YTD收益")), ytd_class)}
-    {_video_metric_html("入场难度", str(profile.get("买点挑战", "数据不足")))}
-    {_video_metric_html("收盘回撤", _percent(profile.get("买入后最大收盘回撤")), drawdown_class)}
-    {_video_metric_html("日内回撤", _percent(profile.get("单日最大日内回撤")), intraday_class)}
+    {_video_metric_html("标签", grade)}
+    {_video_metric_html("当前性质", _video_profile_nature(profile))}
+    {_video_metric_html("区间收益", _percent(return_value), return_class)}
+    {_video_metric_html("最大回撤", _percent(drawdown_value), drawdown_class)}
   </div>
-  {_video_card_section_html("定位", setup_text)}
-  {_video_card_section_html("入场", entry_text)}
-  {_video_card_section_html("压力", pressure_text)}
-  {_video_card_section_html("指数弹性", elasticity_text)}
-  {turning_section}
-  {_video_card_section_html("明日验证", tomorrow_text)}
+  {_video_card_section_html("一句话", _video_profile_critique(profile))}
+  {_video_card_section_html("数据", _video_data_sentence(profile))}
+  {_video_card_section_html("结局", _video_profile_ending(profile))}
 </article>
 """.strip()
 
@@ -802,13 +845,8 @@ def _video_card_section_html(title: str, body: str) -> str:
     )
 
 
-def _video_script_card_theme(value: object) -> str:
-    numeric = _video_numeric(value)
-    if numeric > 0:
-        return "positive"
-    if numeric < 0:
-        return "negative"
-    return "neutral"
+def _video_script_card_theme(grade: object) -> str:
+    return _ranking_label_class(str(grade or ""))
 
 
 def _video_value_class(value: object, *, positive_is_good: bool) -> str:
@@ -832,19 +870,52 @@ def _video_script_title(profile: dict[str, object]) -> str:
     return name or symbol
 
 
-def _video_setup_sentence(profile: dict[str, object]) -> str:
+def _video_profile_heading(profile: dict[str, object]) -> str:
     rank = _numeric_value(profile.get("排名"))
+    rank_text = f"第{int(rank)}" if math.isfinite(rank) else "第1"
+    grade = _video_profile_grade(profile)
+    title = _video_script_title(profile)
+    return f"{rank_text}，{grade}，{title}。"
+
+
+def _video_profile_grade(profile: dict[str, object]) -> str:
+    grade = str(profile.get("强弱等级", "") or "").strip()
+    if grade:
+        return _ranking_label(grade)
+    period_return = _video_primary_return(profile)
+    drawdown = _video_primary_drawdown(profile)
+    excess = _video_numeric(profile.get("相对超额"))
+    up_share = _video_numeric(profile.get("上涨K占比"))
+    nature = _video_profile_nature(profile)
+    score = _ranking_score(period_return, drawdown, up_share, excess, nature)
+    return _ranking_grade(period_return, drawdown, up_share, excess, nature, score)
+
+
+def _video_profile_nature(profile: dict[str, object]) -> str:
+    nature = str(profile.get("当前性质", "") or "").strip()
+    if nature:
+        return nature
+    return _video_setup_sentence(profile).split("这段更像")[-1].split("。")[0]
+
+
+def _video_profile_critique(profile: dict[str, object]) -> str:
+    critique = str(profile.get("锐评结论", "") or "").strip()
+    if critique:
+        return critique
+    grade = _video_profile_grade(profile)
+    return _ranking_critique(grade, _video_profile_nature(profile), _video_numeric(profile.get("相对超额")))
+
+
+def _video_setup_sentence(profile: dict[str, object]) -> str:
     grade = str(profile.get("强弱等级", "") or "").strip()
     nature = str(profile.get("当前性质", "") or "").strip()
     critique = str(profile.get("锐评结论", "") or "").strip()
-    if math.isfinite(rank) and grade and nature:
-        prefix = f"第{int(rank)}，强弱等级{grade}，当前是{nature}。"
-        return f"{prefix}{critique}" if critique else prefix
+    if grade and nature:
+        return critique or _ranking_critique(_ranking_label(grade), nature, _video_numeric(profile.get("相对超额")))
 
     ytd = profile.get("YTD收益")
     entry_label = str(profile.get("买点挑战", "数据不足") or "数据不足")
     drawdown = _video_numeric(profile.get("买入后最大收盘回撤"))
-    ytd_text = f"YTD {_percent(ytd)}，{_video_ytd_phrase(ytd)}"
     if _video_numeric(ytd) >= 0.20 and math.isfinite(drawdown) and drawdown > -0.12:
         position = "主线硬货"
         comment = "强不是因为涨得多，而是涨得多、回撤还压得住。"
@@ -860,7 +931,51 @@ def _video_setup_sentence(profile: dict[str, object]) -> str:
     else:
         position = "轮动观察"
         comment = "有机会，但还要看承接和放量。"
-    return f"{ytd_text}这段更像{position}。{comment}"
+    return f"{position}，{comment}"
+
+
+def _video_data_sentence(profile: dict[str, object]) -> str:
+    period_return = _video_primary_return(profile)
+    drawdown = _video_primary_drawdown(profile)
+    excess = _video_numeric(profile.get("相对超额"))
+    parts = [
+        f"收益 {_percent(period_return)}",
+        f"回撤 {_percent(drawdown)}",
+    ]
+    if math.isfinite(excess):
+        parts.append(f"超额 {_percent(excess)}")
+    return "数据：" + "，".join(parts) + "，挑最打脸的看。"
+
+
+def _video_profile_ending(profile: dict[str, object]) -> str:
+    nature = _video_profile_nature(profile)
+    turning_point = str(profile.get("关键转折点", "") or "关键均线/前高观察").strip()
+    grade = _video_profile_grade(profile)
+    if grade == "夯爆了":
+        return f"{nature}，但别信仰，卡点在{turning_point}。"
+    if grade == "人上人":
+        return f"{nature}，主线硬货，卡点在{turning_point}。"
+    if grade == "立棍单打":
+        return f"{nature}，有肉但不顺，卡点在{turning_point}。"
+    if grade == "刷子":
+        return f"{nature}，涨幅好看但体验差，卡点在{turning_point}。"
+    if grade in {"混子", "NPC"}:
+        return f"{nature}，还没走出地位，卡点在{turning_point}。"
+    return f"{nature}，这一波先当拉完了看，卡点在{turning_point}。"
+
+
+def _video_primary_return(profile: dict[str, object]) -> float:
+    value = _video_numeric(profile.get("区间收益"))
+    if math.isfinite(value):
+        return value
+    return _video_numeric(profile.get("YTD收益"))
+
+
+def _video_primary_drawdown(profile: dict[str, object]) -> float:
+    value = _video_numeric(profile.get("最大回撤"))
+    if math.isfinite(value):
+        return value
+    return _video_numeric(profile.get("买入后最大收盘回撤"))
 
 
 def _video_tomorrow_check(profile: dict[str, object]) -> str:
@@ -1250,43 +1365,60 @@ def _ranking_score(period_return: float, drawdown: float, up_share: float, exces
 
 def _ranking_grade(period_return: float, drawdown: float, up_share: float, excess: float, nature: str, score: float) -> str:
     if nature == "走弱" or (math.isfinite(period_return) and period_return < -0.08):
-        return "D"
+        return "拉完了"
+    if math.isfinite(period_return) and period_return >= 0.25 and math.isfinite(drawdown) and drawdown <= -0.15:
+        return "夯爆了"
     if math.isfinite(excess) and excess >= 0.15 and math.isfinite(drawdown) and drawdown > -0.12 and up_share >= 0.5:
-        return "S"
-    if score >= 70:
-        return "A"
+        return "人上人"
+    if math.isfinite(excess) and excess >= 0.10 and (not math.isfinite(drawdown) or drawdown <= -0.12):
+        return "立棍单打"
+    if score >= 65:
+        return "人上人"
     if score >= 55:
-        return "B"
-    if score >= 40:
-        return "C"
-    return "D"
+        return "刷子"
+    if score >= 42:
+        return "混子"
+    if math.isfinite(excess) and excess < -0.08:
+        return "NPC"
+    return "NPC"
 
 
 def _ranking_reason(row: pd.Series) -> str:
-    grade = str(row.get("强弱等级", "") or "")
+    grade = _ranking_label(str(row.get("强弱等级", "") or ""))
     excess = _numeric_value(row.get("相对超额"))
     drawdown = _numeric_value(row.get("最大回撤"))
-    if grade in {"S", "A"} and math.isfinite(excess) and excess > 0:
-        return "相对指数有超额，回撤控制也更好"
+    if grade == "夯爆了":
+        return "弹性最疯，涨得猛也砸得狠，别谈信仰。"
+    if grade == "人上人" and math.isfinite(excess) and excess > 0:
+        return "主线核心，资金真干，有超额有承接。"
+    if grade == "立棍单打":
+        return "独立逻辑，不太跟指数，能赢也能送。"
     if math.isfinite(drawdown) and drawdown <= -0.18:
-        return "弹性够大，但持有难度也大"
-    if grade in {"C", "D"}:
-        return "超额和趋势顺滑度还没证明强度"
-    return "收益、回撤和上涨K占比的综合位置更靠前"
+        return "涨幅看着能打，回撤也很感人。"
+    if grade in {"混子", "NPC"}:
+        return "没有明显超额，资金态度还没打出来。"
+    if grade == "拉完了":
+        return "高位分歧或破位已经露出来，先按被薅过处理。"
+    return "涨幅、回撤、超额和转折点综合位置更靠前。"
 
 
 def _ranking_critique(grade: str, nature: str, excess: float) -> str:
-    if grade == "S":
-        return "这个是真强，资金真干了，不是蹭行情。"
-    if grade == "A":
-        return "趋势还在，等回踩比追高舒服。"
-    if grade == "B":
-        return "有肉，但别信仰，节奏比信念更重要。"
-    if grade == "C":
-        return "便宜不等于强，低位不等于启动，现在只能先看修复。"
+    label = _ranking_label(grade)
+    if label == "夯爆了":
+        return "夯爆了，但别信仰，情绪一退就让位。"
+    if label == "人上人":
+        return "主线硬货，资金真干，不是蹭热度。"
+    if label == "立棍单打":
+        return "不跟大盘自己干，有肉但不顺，容易甩人。"
+    if label == "刷子":
+        return "涨幅好看，回撤也好看，持有体验一般。"
+    if label == "混子":
+        return "跟着指数晃，没有明显超额，没有态度。"
+    if label == "NPC":
+        return "名字可以，走势拉胯，没放量突破前别硬吹。"
     if nature == "弱势反抽" or (math.isfinite(excess) and excess < -0.05):
-        return "看着动了，其实还没地位。"
-    return "这一段大概率被薅得差不多了，先看风险。"
+        return "这一波被薅得差不多了，谁接谁站岗。"
+    return "拉完了，当初爱过，现在算了。"
 
 
 def _ranking_tomorrow_check(turning_point: str, nature: str, grade: str) -> str:
@@ -1296,9 +1428,42 @@ def _ranking_tomorrow_check(turning_point: str, nature: str, grade: str) -> str:
         return "缩量回踩不破算强，跌破短均就要降一档。"
     if "20日" in turning_point:
         return "站稳20日线才算修复延续，放量跌回去就是反抽失败。"
-    if "破位" in turning_point or grade == "D" or nature == "走弱":
+    if "破位" in turning_point or _ranking_label(grade) in {"拉完了", "NPC"} or nature == "走弱":
         return "先看能不能止跌，不能止跌就别硬说洗盘。"
     return "继续看承接和放量，强弱分界在最近的高低点。"
+
+
+def _ranking_label(grade: str) -> str:
+    normalized = grade.strip().upper()
+    mapping = {
+        "S": "夯爆了",
+        "A": "人上人",
+        "B": "立棍单打",
+        "C": "刷子",
+        "D": "混子",
+        "E": "NPC",
+        "F": "拉完了",
+        "夯爆了": "夯爆了",
+        "人上人": "人上人",
+        "立棍单打": "立棍单打",
+        "刷子": "刷子",
+        "混子": "混子",
+        "NPC": "NPC",
+        "拉完了": "拉完了",
+    }
+    return mapping.get(normalized, mapping.get(grade.strip(), grade.strip() or "NPC"))
+
+
+def _ranking_label_class(grade: str) -> str:
+    return {
+        "夯爆了": "grade-s",
+        "人上人": "grade-a",
+        "立棍单打": "grade-b",
+        "刷子": "grade-c",
+        "混子": "grade-d",
+        "NPC": "grade-e",
+        "拉完了": "grade-f",
+    }.get(_ranking_label(grade), "grade-neutral")
 
 
 def _turning_point_label(window: pd.DataFrame) -> str:

@@ -6,7 +6,7 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.history import HistorySearchResult
-from ashare_cross_section_similarity.review_ai import ReviewAIResult
+from ashare_cross_section_similarity.review_ai import ReviewAIResult, ReviewAIScriptCard
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
     _app_theme_css,
@@ -50,10 +50,15 @@ from streamlit_app import (
     _pin_symbol_row,
     _pick_directory_with_system_dialog,
     _prepare_full_daily_download_symbols,
+    _review_ai_body_html,
     _repair_partial_download_start,
     _review_ai_display_sections,
+    _review_ai_sections_html,
+    _review_ai_script_cards_html,
+    _review_ai_script_grade_class,
     _review_ai_result_is_current,
     _review_ai_signature,
+    _review_output_source_options,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
@@ -111,6 +116,78 @@ def test_review_ai_display_sections_returns_review_analysis_critique() -> None:
     assert sections == [("复盘", "复盘"), ("分析", "分析"), ("锐评", "锐评")]
 
 
+def test_review_ai_sections_html_uses_stacked_cards() -> None:
+    result = ReviewAIResult(
+        review="复盘",
+        analysis="分析",
+        critique="锐评",
+        evidence_refs=(),
+        disclaimer="仅供研究",
+        raw="{}",
+    )
+
+    html = _review_ai_sections_html(result)
+
+    assert 'data-testid="review-ai-sections"' in html
+    assert 'class="review-ai-card"' in html
+    assert "stColumn" not in html
+
+
+def test_review_ai_body_html_breaks_dense_ranking_text() -> None:
+    html = _review_ai_body_html("排序表：1. 天承科技；2. 宁德时代。关键转折点：放量上影。明日验证：看承接。")
+
+    assert "排序表：<br>1. 天承科技；<br>2. 宁德时代。" in html
+    assert "<p>关键转折点：放量上影。</p>" in html
+    assert "<p>明日验证：看承接。</p>" in html
+
+
+def test_review_ai_body_html_renders_markdown_table() -> None:
+    html = _review_ai_body_html(
+        "排序表：\n"
+        "| 排名 | 代码 | 强弱等级 |\n"
+        "| --- | --- | --- |\n"
+        "| 1 | 688603.SH | A |\n\n"
+        "关键转折点：放量上影。"
+    )
+
+    assert '<table class="review-ai-table">' in html
+    assert "<th>排名</th>" in html
+    assert "<td>688603.SH</td>" in html
+    assert "<p>关键转折点：放量上影。</p>" in html
+
+
+def test_review_ai_script_cards_hide_kicker_and_color_by_grade() -> None:
+    cards = (
+        ReviewAIScriptCard(title="天承科技", body="趋势还在。", grade="人上人", tomorrow_check="缩量不破。"),
+        ReviewAIScriptCard(title="中国中免", body="弱势反抽。", grade="拉完了", tomorrow_check="先看止跌。"),
+    )
+
+    html = _review_ai_script_cards_html(cards)
+
+    assert "AI 视频脚本" not in html
+    assert 'class="review-script-card grade-a"' in html
+    assert 'class="review-script-card grade-f"' in html
+    assert "--script-accent: #16a34a" in html
+    assert "--script-accent: #dc2626" in html
+    assert "结局" in html
+    assert "明日验证" not in html
+
+
+def test_review_ai_script_grade_class_uses_first_grade_letter() -> None:
+    assert _review_ai_script_grade_class("A+") == "grade-a"
+    assert _review_ai_script_grade_class("b") == "grade-b"
+    assert _review_ai_script_grade_class("C级") == "grade-c"
+    assert _review_ai_script_grade_class("D") == "grade-d"
+    assert _review_ai_script_grade_class("夯爆了") == "grade-s"
+    assert _review_ai_script_grade_class("人上人") == "grade-a"
+    assert _review_ai_script_grade_class("立棍单打") == "grade-b"
+    assert _review_ai_script_grade_class("刷子") == "grade-c"
+    assert _review_ai_script_grade_class("混子") == "grade-d"
+    assert _review_ai_script_grade_class("NPC") == "grade-e"
+    assert _review_ai_script_grade_class("拉完了") == "grade-f"
+    assert _review_ai_script_grade_class("") == "grade-neutral"
+
+
 def test_review_ai_signature_changes_with_evidence_model_or_thinking() -> None:
     evidence = {"target": {"symbol": "601888.SH"}, "segments": [{"return": 0.1}]}
     base = _review_ai_signature(evidence, model="deepseek-v4-flash", thinking=True)
@@ -135,6 +212,10 @@ def test_review_ai_result_is_current_requires_matching_signature() -> None:
     assert _review_ai_result_is_current(state, result_key="review_ai_result", signature=signature)
     assert not _review_ai_result_is_current(state, result_key="review_ai_result", signature="stale")
     assert not _review_ai_result_is_current({"review_ai_result_signature": signature}, result_key="review_ai_result", signature=signature)
+
+
+def test_review_output_source_options_are_default_or_ai() -> None:
+    assert _review_output_source_options() == ["默认复盘", "AI 复盘"]
 
 
 def test_picker_path_text_makes_empty_and_existing_selection_clear() -> None:

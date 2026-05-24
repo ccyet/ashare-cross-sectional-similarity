@@ -15,6 +15,14 @@ class ReviewAIFormatError(ValueError):
 
 
 @dataclass(frozen=True)
+class ReviewAIScriptCard:
+    title: str
+    body: str
+    grade: str = ""
+    tomorrow_check: str = ""
+
+
+@dataclass(frozen=True)
 class ReviewAIResult:
     review: str
     analysis: str
@@ -22,6 +30,7 @@ class ReviewAIResult:
     evidence_refs: tuple[str, ...]
     disclaimer: str
     raw: str
+    script_cards: tuple[ReviewAIScriptCard, ...] = ()
 
 
 def build_review_ai_evidence(
@@ -56,9 +65,18 @@ def build_review_ai_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     system = (
         "你是A股走势复盘助手。必须只基于用户提供的JSON证据做复盘、分析、锐评，"
         "不得编造新闻、基本面、资金流或未提供的数据。"
-        "输出必须是严格JSON对象，字段只能包含：review、analysis、critique、evidence_refs、disclaimer。"
+        "输出必须是严格JSON对象，字段只能包含：review、analysis、critique、script_cards、evidence_refs、disclaimer。"
         "不得输出 Markdown、解释性文字或 JSON 以外的任何内容。"
-        "review写结构化复盘；analysis写数据分析；critique写锐评和反证；"
+        "必须统一按《A股多股/ETF排序锐评框架》组织：市场总环境、排序总表、逐个锐评、关键转折点复盘、明日验证。"
+        "排序不按代码顺序，按指数环境、相对强弱、回撤控制、关键转折点和A股语境综合排序。"
+        "review写研究端内容：先给排序表，再给关键转折点，最后给明日验证。"
+        "analysis写数据分析：解释指数阶段、超额收益、最大回撤、上涨K占比和转折位置。"
+        "critique写视频端脚本：不按代码顺序，按市场地位排序；"
+        "等级顺序固定为夯爆了 > 人上人 > 立棍单打 > 刷子 > 混子 > NPC > 拉完了。"
+        "每个标的三句话封顶：一句定性、一句数据、一句结局；不预测，视频端不得写明天。"
+        "script_cards必须是数组，每个元素包含title、body、grade、tomorrow_check；"
+        "grade必须使用夯爆了/人上人/立棍单打/刷子/混子/NPC/拉完了之一；"
+        "tomorrow_check字段沿用字段名但内容必须写当前结局或状态，不得写明天。"
         "每个结论都必须能对应 evidence_refs 中的证据字段，"
         "evidence_refs必须非空，例如 segments[0] 或 comparisons[0]。"
     )
@@ -76,6 +94,7 @@ def parse_review_ai_result(raw: str, evidence: dict[str, Any] | None = None) -> 
     review = _required_text(payload, "review")
     analysis = _required_text(payload, "analysis")
     critique = _required_text(payload, "critique")
+    script_cards = _script_cards(payload.get("script_cards"))
     disclaimer = _optional_text(payload, "disclaimer") or "仅用于研究复盘，不构成投资建议。"
     refs = _evidence_refs(payload.get("evidence_refs"))
     if evidence is not None:
@@ -87,6 +106,7 @@ def parse_review_ai_result(raw: str, evidence: dict[str, Any] | None = None) -> 
         evidence_refs=refs,
         disclaimer=disclaimer,
         raw=raw,
+        script_cards=script_cards,
     )
 
 
@@ -120,6 +140,28 @@ def _evidence_refs(refs: object) -> tuple[str, ...]:
     if not cleaned:
         raise ReviewAIFormatError("evidence_refs 必须至少包含一个证据引用。")
     return cleaned
+
+
+def _script_cards(value: object) -> tuple[ReviewAIScriptCard, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ReviewAIFormatError("script_cards 必须是对象数组。")
+    cards: list[ReviewAIScriptCard] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ReviewAIFormatError(f"script_cards[{index}] 必须是对象。")
+        title = _required_text(item, "title")
+        body = _required_text(item, "body")
+        cards.append(
+            ReviewAIScriptCard(
+                title=title,
+                body=body,
+                grade=_optional_text(item, "grade"),
+                tomorrow_check=_optional_text(item, "tomorrow_check"),
+            )
+        )
+    return tuple(cards)
 
 
 def _validate_evidence_refs(refs: tuple[str, ...], evidence: dict[str, Any]) -> None:

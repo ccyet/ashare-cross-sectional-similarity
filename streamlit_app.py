@@ -56,6 +56,7 @@ from ashare_cross_section_similarity.review import (
 from ashare_cross_section_similarity.review_ai import (
     ReviewAIFormatError,
     ReviewAIResult,
+    ReviewAIScriptCard,
     build_review_ai_evidence,
     build_review_ai_messages,
     parse_review_ai_result,
@@ -1019,14 +1020,409 @@ def _review_ai_display_sections(result: ReviewAIResult) -> list[tuple[str, str]]
     return [("复盘", result.review), ("分析", result.analysis), ("锐评", result.critique)]
 
 
+def _review_output_source_options() -> list[str]:
+    return ["默认复盘", "AI 复盘"]
+
+
 def _render_review_ai_result(result: ReviewAIResult) -> None:
-    for column, (title, body) in zip(st.columns(3), _review_ai_display_sections(result)):
-        with column:
-            st.markdown(f"**{title}**")
-            st.markdown(body)
+    st.markdown(_review_ai_sections_html(result), unsafe_allow_html=True)
+    if result.script_cards:
+        st.markdown(_review_ai_script_cards_html(result.script_cards), unsafe_allow_html=True)
     if result.evidence_refs:
         st.caption("证据引用：" + "、".join(result.evidence_refs))
     st.caption(result.disclaimer)
+
+
+def _review_ai_sections_html(result: ReviewAIResult) -> str:
+    items = "\n".join(
+        _review_ai_section_html(index=index, title=title, body=body)
+        for index, (title, body) in enumerate(_review_ai_display_sections(result))
+    )
+    return f"""
+<style>
+.review-ai-stack {{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+  margin: 0.35rem 0 1.15rem;
+  max-width: 1080px;
+}}
+.review-ai-card {{
+  border: 1px solid #e5e7eb;
+  border-left: 5px solid var(--review-ai-accent, #2563eb);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  padding: 1rem 1.12rem 1.05rem;
+}}
+.review-ai-card[data-section="1"] {{
+  --review-ai-accent: #0f766e;
+}}
+.review-ai-card[data-section="2"] {{
+  --review-ai-accent: #b45309;
+}}
+.review-ai-title {{
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #111827;
+  font-size: 0.98rem;
+  line-height: 1.25;
+  font-weight: 800;
+  margin: 0 0 0.72rem;
+}}
+.review-ai-index {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 0.74rem;
+  font-weight: 800;
+}}
+.review-ai-body {{
+  color: #1f2937;
+  font-size: 0.95rem;
+  line-height: 1.82;
+  overflow-wrap: anywhere;
+}}
+.review-ai-body p {{
+  margin: 0.45rem 0 0;
+}}
+.review-ai-body p:first-child {{
+  margin-top: 0;
+}}
+.review-ai-table-wrap {{
+  margin: 0.58rem 0 0.35rem;
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}}
+.review-ai-table {{
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1380px;
+  background: #ffffff;
+  font-size: 0.86rem;
+  line-height: 1.55;
+}}
+.review-ai-table th {{
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 800;
+  text-align: left;
+  white-space: nowrap;
+}}
+.review-ai-table th,
+.review-ai-table td {{
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.48rem 0.55rem;
+  vertical-align: top;
+}}
+.review-ai-table td {{
+  white-space: nowrap;
+}}
+.review-ai-table td:nth-child(n+11) {{
+  min-width: 10rem;
+  white-space: normal;
+}}
+.review-ai-table tr:last-child td {{
+  border-bottom: 0;
+}}
+</style>
+<div class="review-ai-stack" data-testid="review-ai-sections">
+  {items}
+</div>
+""".strip()
+
+
+def _review_ai_section_html(index: int, title: str, body: str) -> str:
+    return f"""
+<article class="review-ai-card" data-section="{index}">
+  <h4 class="review-ai-title"><span class="review-ai-index">{index + 1}</span>{escape(title)}</h4>
+  <div class="review-ai-body">{_review_ai_body_html(body)}</div>
+</article>
+""".strip()
+
+
+def _review_ai_body_html(body: str) -> str:
+    text = _format_review_ai_body_text(body)
+    if not text:
+        return "<p>-</p>"
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    return "".join(_review_ai_paragraph_html(paragraph) for paragraph in paragraphs)
+
+
+def _review_ai_paragraph_html(paragraph: str) -> str:
+    html_parts: list[str] = []
+    text_lines: list[str] = []
+    table_lines: list[str] = []
+
+    def flush_text() -> None:
+        if text_lines:
+            text = "\n".join(line for line in text_lines if line.strip()).strip()
+            if text:
+                html_parts.append(f"<p>{escape(text).replace(chr(10), '<br>')}</p>")
+            text_lines.clear()
+
+    def flush_table() -> None:
+        if table_lines:
+            html_parts.append(_review_ai_markdown_table_html(table_lines))
+            table_lines.clear()
+
+    for line in paragraph.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            flush_text()
+            table_lines.append(stripped)
+        else:
+            flush_table()
+            text_lines.append(line)
+    flush_text()
+    flush_table()
+    return "".join(html_parts)
+
+
+def _review_ai_markdown_table_html(lines: list[str]) -> str:
+    rows = [_review_ai_table_row(line) for line in lines]
+    rows = [row for row in rows if row and not _review_ai_is_separator_row(row)]
+    if not rows:
+        return ""
+    header = rows[0]
+    body_rows = rows[1:]
+    head = "".join(f"<th>{escape(cell)}</th>" for cell in header)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{escape(cell)}</td>" for cell in row) + "</tr>"
+        for row in body_rows
+    )
+    if not body:
+        body = '<tr><td colspan="{0}">-</td></tr>'.format(len(header))
+    return (
+        '<div class="review-ai-table-wrap">'
+        '<table class="review-ai-table">'
+        f"<thead><tr>{head}</tr></thead>"
+        f"<tbody>{body}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
+def _review_ai_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _review_ai_is_separator_row(row: list[str]) -> bool:
+    return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in row)
+
+
+def _format_review_ai_body_text(body: str) -> str:
+    text = re.sub(r"[ \t]+", " ", body.strip())
+    text = re.sub(r"(排序表[:：])\s*(?=\d+[.．、])", r"\1\n", text)
+    text = re.sub(r"；\s*(?=\d+[.．、])", "；\n", text)
+    markers = (
+        "市场总环境",
+        "逐个锐评",
+        "关键转折点复盘",
+        "关键转折点",
+        "明日验证",
+        "总结一下",
+        "谁是真强",
+    )
+    for marker in markers:
+        text = re.sub(rf"([。；])\s*({re.escape(marker)}[:：])", r"\1\n\n\2", text)
+    return text.strip()
+
+
+def _review_ai_script_cards_html(cards: tuple[ReviewAIScriptCard, ...]) -> str:
+    if not cards:
+        return ""
+    items = "\n".join(_review_ai_script_card_html(card) for card in cards)
+    return f"""
+<style>
+.review-script-wrap {{
+  margin: 0.35rem 0 1.1rem;
+}}
+.review-script-title {{
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #1f2937;
+  margin: 0 0 0.65rem;
+}}
+.review-script-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0.9rem;
+}}
+.review-script-card {{
+  --script-accent: #64748b;
+  --script-border: #e2e8f0;
+  --script-bg: #ffffff;
+  --script-badge-bg: #f1f5f9;
+  --script-badge-text: #334155;
+  border: 1px solid var(--script-border);
+  border-left: 5px solid var(--script-accent);
+  border-radius: 8px;
+  background: var(--script-bg);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+  padding: 0.95rem 1rem;
+}}
+.review-script-card.grade-a {{
+  --script-accent: #16a34a;
+  --script-border: #bbf7d0;
+  --script-bg: #f0fdf4;
+  --script-badge-bg: #dcfce7;
+  --script-badge-text: #166534;
+}}
+.review-script-card.grade-s {{
+  --script-accent: #7c3aed;
+  --script-border: #ddd6fe;
+  --script-bg: #f5f3ff;
+  --script-badge-bg: #ede9fe;
+  --script-badge-text: #5b21b6;
+}}
+.review-script-card.grade-b {{
+  --script-accent: #2563eb;
+  --script-border: #bfdbfe;
+  --script-bg: #eff6ff;
+  --script-badge-bg: #dbeafe;
+  --script-badge-text: #1d4ed8;
+}}
+.review-script-card.grade-c {{
+  --script-accent: #d97706;
+  --script-border: #fde68a;
+  --script-bg: #fffbeb;
+  --script-badge-bg: #fef3c7;
+  --script-badge-text: #92400e;
+}}
+.review-script-card.grade-d {{
+  --script-accent: #64748b;
+  --script-border: #cbd5e1;
+  --script-bg: #f8fafc;
+  --script-badge-bg: #e2e8f0;
+  --script-badge-text: #334155;
+}}
+.review-script-card.grade-e {{
+  --script-accent: #475569;
+  --script-border: #cbd5e1;
+  --script-bg: #f8fafc;
+  --script-badge-bg: #e2e8f0;
+  --script-badge-text: #1e293b;
+}}
+.review-script-card.grade-f {{
+  --script-accent: #dc2626;
+  --script-border: #fecaca;
+  --script-bg: #fef2f2;
+  --script-badge-bg: #fee2e2;
+  --script-badge-text: #991b1b;
+}}
+.review-script-head {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}}
+.review-script-name {{
+  font-size: 1.05rem;
+  line-height: 1.25;
+  font-weight: 800;
+  color: #111827;
+  margin: 0;
+}}
+.review-script-code {{
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--script-badge-bg);
+  color: var(--script-badge-text);
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 0.18rem 0.48rem;
+}}
+.review-script-section {{
+  border-top: 1px solid #eef2f7;
+  padding-top: 0.62rem;
+  margin-top: 0.62rem;
+}}
+.review-script-section-title {{
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 800;
+  margin-bottom: 0.22rem;
+}}
+.review-script-body {{
+  color: #1f2937;
+  font-size: 0.9rem;
+  line-height: 1.72;
+  margin: 0;
+}}
+</style>
+<div class="review-script-wrap" data-testid="ai-video-script-cards">
+  <div class="review-script-title">视频脚本卡片</div>
+  <div class="review-script-grid">
+    {items}
+  </div>
+</div>
+""".strip()
+
+
+def _review_ai_script_card_html(card: ReviewAIScriptCard) -> str:
+    grade = escape(card.grade) if card.grade else "-"
+    grade_class = _review_ai_script_grade_class(card.grade)
+    tomorrow = escape(card.tomorrow_check) if card.tomorrow_check else "看关键位承接和高开低走。"
+    return f"""
+<article class="review-script-card {grade_class}">
+  <header class="review-script-head">
+    <div>
+      <h4 class="review-script-name">{escape(card.title)}</h4>
+    </div>
+    <span class="review-script-code">{grade}</span>
+  </header>
+  {_video_card_section_html("一句话", escape(card.body))}
+  {_video_card_section_html("结局", tomorrow)}
+</article>
+""".strip()
+
+
+def _review_ai_script_grade_class(grade: str) -> str:
+    normalized = grade.strip().upper()
+    label_mapping = {
+        "夯爆了": "grade-s",
+        "人上人": "grade-a",
+        "立棍单打": "grade-b",
+        "刷子": "grade-c",
+        "混子": "grade-d",
+        "NPC": "grade-e",
+        "拉完了": "grade-f",
+    }
+    if grade.strip() in label_mapping:
+        return label_mapping[grade.strip()]
+    if normalized.startswith("A"):
+        return "grade-a"
+    if normalized.startswith("B"):
+        return "grade-b"
+    if normalized.startswith("C"):
+        return "grade-c"
+    if normalized.startswith("D"):
+        return "grade-d"
+    if normalized.startswith("S"):
+        return "grade-s"
+    if normalized.startswith("E"):
+        return "grade-e"
+    if normalized.startswith("F"):
+        return "grade-f"
+    return "grade-neutral"
+
+
+def _video_card_section_html(title: str, body: str) -> str:
+    return (
+        '<section class="review-script-section">'
+        f'<div class="review-script-section-title">{title}</div>'
+        f'<p class="review-script-body">{body}</p>'
+        "</section>"
+    )
 
 
 def _review_ai_signature(evidence: dict[str, object], *, model: str, thinking: bool) -> str:
@@ -1079,11 +1475,11 @@ def _render_review_ai_controls(*, key_prefix: str) -> tuple[str, str, bool]:
 def _render_review_ai_panel(
     evidence: dict[str, object],
     *,
-    key_prefix: str,
     result_key: str,
     model: str,
     api_key: str,
     thinking: bool,
+    run_requested: bool,
 ) -> None:
     st.caption(f"当前模型：{model}；API Key 留空时读取环境变量 DEEPSEEK_API_KEY。")
     deepseek_model = str(model)
@@ -1092,7 +1488,7 @@ def _render_review_ai_panel(
     result_signature = _review_ai_signature(evidence, model=str(deepseek_model), thinking=bool(deepseek_thinking))
     with st.expander("查看发送给 DeepSeek 的证据摘要"):
         st.json(evidence)
-    if st.button("生成 DeepSeek 复盘/分析/锐评", type="secondary", key=f"{key_prefix}_run"):
+    if run_requested:
         _clear_review_ai_result(st.session_state, result_key)
         try:
             client = DeepSeekClient(
@@ -1110,6 +1506,8 @@ def _render_review_ai_panel(
             st.session_state[_review_ai_signature_key(result_key)] = result_signature
     if _review_ai_result_is_current(st.session_state, result_key=result_key, signature=result_signature):
         _render_review_ai_result(st.session_state[result_key])
+    elif not run_requested:
+        st.info("选择 AI 复盘后，点击生成走势复盘会调用 DeepSeek 输出单一来源的复盘和视频脚本。")
 
 
 def _review_ai_frame_records(frame: pd.DataFrame) -> list[dict[str, object]]:
@@ -1205,9 +1603,21 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         step=1,
         key="review_min_segment_bars",
     )
-    st.markdown("**DeepSeek 设置**")
-    st.caption("用户可在这里临时填写 API Key 并选择模型；不会写入源码或配置文件。")
-    deepseek_model, deepseek_api_key, deepseek_thinking = _render_review_ai_controls(key_prefix="review_ai_settings")
+    review_source = st.radio(
+        "复盘来源",
+        _review_output_source_options(),
+        horizontal=True,
+        key="review_output_source",
+        help="生成前选择来源；结果区只展示一个来源的复盘和视频脚本。",
+    )
+    is_ai_review = review_source == "AI 复盘"
+    deepseek_model = DEFAULT_DEEPSEEK_MODEL
+    deepseek_api_key = ""
+    deepseek_thinking = True
+    if is_ai_review:
+        st.markdown("**DeepSeek 设置**")
+        st.caption("用户可在这里临时填写 API Key 并选择模型；不会写入源码或配置文件。")
+        deepseek_model, deepseek_api_key, deepseek_thinking = _render_review_ai_controls(key_prefix="review_ai_settings")
 
     index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
     etf_reload_token_key = "review_akshare_etf_reload_token"
@@ -1288,6 +1698,9 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             "target_symbols": target_symbols,
             "start": start,
             "end": end,
+            "review_source": review_source,
+            "deepseek_model": deepseek_model if is_ai_review else "",
+            "deepseek_thinking": bool(deepseek_thinking) if is_ai_review else False,
             "min_swing_percent": int(min_swing_percent),
             "min_segment_bars": int(min_segment_bars),
             "index_enabled": bool(index_enabled),
@@ -1300,7 +1713,8 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         }
     )
     review_active_key = "review_active_signature"
-    if st.button("生成走势复盘", type="primary", key="review_run"):
+    review_run_clicked = st.button("生成走势复盘", type="primary", key="review_run")
+    if review_run_clicked:
         st.session_state[review_active_key] = review_signature
         _clear_review_ai_result(st.session_state, "review_ai_result")
         _clear_review_ai_result(st.session_state, "multi_review_ai_result")
@@ -1342,6 +1756,8 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             deepseek_model=deepseek_model,
             deepseek_api_key=deepseek_api_key,
             deepseek_thinking=deepseek_thinking,
+            is_ai_review=is_ai_review,
+            ai_run_requested=review_run_clicked,
         )
         return
 
@@ -1406,6 +1822,12 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         benchmark_symbol=SCRIPT_BENCHMARK_SYMBOL,
         stock_names=stock_names,
     )
+    single_comparison_frame = comparison_frame.copy()
+    if not single_comparison_frame.empty and "代码" not in single_comparison_frame.columns:
+        single_comparison_frame.insert(0, "代码", normalized_target)
+    single_ranking_frame = rank_review_results([result], single_comparison_frame, stock_names=stock_names)
+    single_ranking_records = single_ranking_frame.set_index("代码").to_dict("index") if not single_ranking_frame.empty else {}
+    script_profile = _attach_review_ranking(script_profile, single_ranking_records)
     all_warnings = [*result.warnings, *warnings]
 
     st.markdown("**1. 区间概览**")
@@ -1420,30 +1842,32 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     with chart_col2:
         st.plotly_chart(_review_relative_chart(result.window, comparison_frames), use_container_width=True)
 
-    st.markdown("**3. 自然语言复盘**")
-    st.markdown(render_review_text(result, comparison_frame, stock_names=stock_names))
-    st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
-    st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
+    if is_ai_review:
+        st.markdown("**3. AI 复盘 / 分析 / 锐评**")
+        evidence = build_review_ai_evidence(
+            result,
+            single_comparison_frame,
+            stock_names=stock_names,
+            warnings=all_warnings,
+        )
+        evidence["rankings"] = _review_ai_frame_records(single_ranking_frame)
+        _render_review_ai_panel(
+            evidence,
+            result_key="review_ai_result",
+            model=deepseek_model,
+            api_key=deepseek_api_key,
+            thinking=deepseek_thinking,
+            run_requested=review_run_clicked,
+        )
+    else:
+        st.markdown("**3. 复盘与锐评**")
+        st.markdown(render_review_text(result, comparison_frame, stock_names=stock_names))
+        st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
+        st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
     for warning in all_warnings:
         st.warning(warning)
 
-    st.markdown("**4. DeepSeek V4 复盘 / 分析 / 锐评**")
-    evidence = build_review_ai_evidence(
-        result,
-        comparison_frame,
-        stock_names=stock_names,
-        warnings=all_warnings,
-    )
-    _render_review_ai_panel(
-        evidence,
-        key_prefix="review_ai",
-        result_key="review_ai_result",
-        model=deepseek_model,
-        api_key=deepseek_api_key,
-        thinking=deepseek_thinking,
-    )
-
-    st.markdown("**5. 波段与对比明细**")
+    st.markdown("**4. 波段与对比明细**")
     detail_col1, detail_col2 = st.columns(2)
     with detail_col1:
         st.caption("主要波段")
@@ -1590,6 +2014,8 @@ def _render_multi_review_output(
     deepseek_model: str,
     deepseek_api_key: str,
     deepseek_thinking: bool,
+    is_ai_review: bool,
+    ai_run_requested: bool,
     extra_stock_names: dict[str, str] | None = None,
 ) -> None:
     direct_symbols = unique_symbols([*target_symbols, *index_symbols, *proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
@@ -1688,32 +2114,33 @@ def _render_multi_review_output(
                 fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=320)
                 st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("**3. 自然语言复盘**")
-    st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
-    st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
-    st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
+    if is_ai_review:
+        st.markdown("**3. AI 复盘 / 分析 / 锐评**")
+        multi_evidence = {
+            "mode": "multi_stock",
+            "targets": [result.symbol for result in valid_results],
+            "rankings": _review_ai_frame_records(ranking_frame),
+            "comparisons": _review_ai_frame_records(comparison_frame),
+            "warnings": list(dict.fromkeys(all_warnings)),
+            "limits": ["只基于本地行情和对比统计，不读取新闻或基本面。"],
+        }
+        _render_review_ai_panel(
+            multi_evidence,
+            result_key="multi_review_ai_result",
+            model=deepseek_model,
+            api_key=deepseek_api_key,
+            thinking=deepseek_thinking,
+            run_requested=ai_run_requested,
+        )
+    else:
+        st.markdown("**3. 复盘与锐评**")
+        st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
+        st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
+        st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
     for warning in dict.fromkeys(all_warnings):
         st.warning(warning)
 
-    st.markdown("**4. DeepSeek V4 复盘 / 分析 / 锐评**")
-    multi_evidence = {
-        "mode": "multi_stock",
-        "targets": [result.symbol for result in valid_results],
-        "rankings": _review_ai_frame_records(ranking_frame),
-        "comparisons": _review_ai_frame_records(comparison_frame),
-        "warnings": list(dict.fromkeys(all_warnings)),
-        "limits": ["只基于本地行情和对比统计，不读取新闻或基本面。"],
-    }
-    _render_review_ai_panel(
-        multi_evidence,
-        key_prefix="multi_review_ai",
-        result_key="multi_review_ai_result",
-        model=deepseek_model,
-        api_key=deepseek_api_key,
-        thinking=deepseek_thinking,
-    )
-
-    st.markdown("**5. 对比与波段明细**")
+    st.markdown("**4. 对比与波段明细**")
     detail_col1, detail_col2 = st.columns(2)
     with detail_col1:
         st.caption("个股主要波段")
@@ -2340,6 +2767,7 @@ def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
         "排名",
         "代码",
         "股票",
+        "所属方向",
         "对标指数",
         "指数阶段",
         "强弱等级",
@@ -2362,7 +2790,20 @@ def _attach_review_ranking(profile: dict[str, object], ranking_records: dict[str
     symbol = str(profile.get("代码", "") or "").strip()
     ranked = dict(profile)
     record = ranking_records.get(symbol, {})
-    for key in ["排名", "强弱等级", "关键转折点", "当前性质", "锐评结论", "明日验证", "对标指数", "指数阶段"]:
+    for key in [
+        "排名",
+        "所属方向",
+        "对标指数",
+        "指数阶段",
+        "强弱等级",
+        "区间收益",
+        "最大回撤",
+        "相对超额",
+        "关键转折点",
+        "当前性质",
+        "锐评结论",
+        "明日验证",
+    ]:
         if key in record:
             ranked[key] = record[key]
     return ranked
@@ -2373,19 +2814,17 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
             columns=[
                 "代码",
                 "股票",
-                "YTD样本起点",
-                "YTD收益",
-                "YTD结论",
-                "买点挑战",
-                "买点位置",
-                "买入后最大收盘回撤",
-                "单日最大日内回撤",
-                "指数",
-                "指数大涨日样本",
-                "指数大涨日标的均值",
-                "指数大跌日样本",
-                "指数大跌日标的均值",
-                "指数弹性结论",
+                "排名",
+                "强弱等级",
+                "当前性质",
+                "对标指数",
+                "指数阶段",
+                "区间收益",
+                "最大回撤",
+                "相对超额",
+                "关键转折点",
+                "锐评结论",
+                "结局",
             ]
         )
     result = pd.DataFrame(profiles).copy()
@@ -2395,6 +2834,9 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
         result,
         [
             "YTD收益",
+            "区间收益",
+            "最大回撤",
+            "相对超额",
             "买点位置",
             "买入后最大收盘回撤",
             "单日最大日内回撤",
@@ -2407,23 +2849,29 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
     columns = [
         "代码",
         "股票",
-        "YTD样本起点",
-        "YTD收益",
-        "YTD结论",
-        "买点挑战",
-        "买点位置",
-        "买入后最大收盘回撤",
-        "单日最大日内回撤",
-        "指数",
-        "指数大涨日样本",
-        "指数大涨日标的均值",
-        "指数大涨日指数均值",
-        "指数大跌日样本",
-        "指数大跌日标的均值",
-        "指数大跌日指数均值",
-        "指数弹性结论",
+        "排名",
+        "标签",
+        "当前性质",
+        "对标指数",
+        "指数阶段",
+        "区间收益",
+        "最大回撤",
+        "相对超额",
+        "关键转折点",
+        "锐评结论",
+        "结局",
     ]
+    if "强弱等级" in result.columns and "标签" not in result.columns:
+        result["标签"] = result["强弱等级"]
+    if "结局" not in result.columns:
+        result["结局"] = result.apply(_video_profile_summary_ending, axis=1)
     return result[[column for column in columns if column in result.columns]]
+
+def _video_profile_summary_ending(row: pd.Series) -> str:
+    nature = str(row.get("当前性质", "") or "").strip() or "观察"
+    turning_point = str(row.get("关键转折点", "") or "").strip() or "关键位"
+    critique = str(row.get("锐评结论", "") or "").strip()
+    return f"{nature}，卡在{turning_point}。{critique}".strip()
 
 def _format_etf_matches(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
