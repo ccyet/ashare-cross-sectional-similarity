@@ -544,7 +544,7 @@ def _ranked_review_framework(
     lines.append(
         "**收束**："
         f"谁是真强，看 {_ranking_row_title(best)} 的超额和承接；"
-        "谁只是补涨，看刷子、混子里仍有正收益的对象；"
+        "谁只是补涨，看刷子、路边里仍有正收益的对象；"
         f"谁已经拉完或需要回避，看 {_ranking_row_title(worst)} 的破位、回撤和负超额。"
     )
     return lines
@@ -599,7 +599,7 @@ def _ranked_review_paragraph(row: pd.Series) -> str:
 
 
 def _video_ranked_title(row: pd.Series) -> str:
-    return f"第{int(row['排名'])}，{_ranking_label(str(row.get('强弱等级', '') or ''))}，{_ranking_row_title(row)}。"
+    return f"{_ranking_row_title(row)}。"
 
 
 def _turning_point_lines(ranking: pd.DataFrame) -> list[str]:
@@ -875,7 +875,7 @@ def _video_profile_heading(profile: dict[str, object]) -> str:
     rank_text = f"第{int(rank)}" if math.isfinite(rank) else "第1"
     grade = _video_profile_grade(profile)
     title = _video_script_title(profile)
-    return f"{rank_text}，{grade}，{title}。"
+    return f"{title}。"
 
 
 def _video_profile_grade(profile: dict[str, object]) -> str:
@@ -959,7 +959,7 @@ def _video_profile_ending(profile: dict[str, object]) -> str:
         return f"{nature}，有肉但不顺，卡点在{turning_point}。"
     if grade == "刷子":
         return f"{nature}，涨幅好看但体验差，卡点在{turning_point}。"
-    if grade in {"混子", "NPC"}:
+    if grade in {"路边", "NPC"}:
         return f"{nature}，还没走出地位，卡点在{turning_point}。"
     return f"{nature}，这一波先当拉完了看，卡点在{turning_point}。"
 
@@ -1377,7 +1377,7 @@ def _ranking_grade(period_return: float, drawdown: float, up_share: float, exces
     if score >= 55:
         return "刷子"
     if score >= 42:
-        return "混子"
+        return "路边"
     if math.isfinite(excess) and excess < -0.08:
         return "NPC"
     return "NPC"
@@ -1395,7 +1395,7 @@ def _ranking_reason(row: pd.Series) -> str:
         return "独立逻辑，不太跟指数，能赢也能送。"
     if math.isfinite(drawdown) and drawdown <= -0.18:
         return "涨幅看着能打，回撤也很感人。"
-    if grade in {"混子", "NPC"}:
+    if grade in {"路边", "NPC"}:
         return "没有明显超额，资金态度还没打出来。"
     if grade == "拉完了":
         return "高位分歧或破位已经露出来，先按被薅过处理。"
@@ -1412,7 +1412,7 @@ def _ranking_critique(grade: str, nature: str, excess: float) -> str:
         return "不跟大盘自己干，有肉但不顺，容易甩人。"
     if label == "刷子":
         return "涨幅好看，回撤也好看，持有体验一般。"
-    if label == "混子":
+    if label == "路边":
         return "跟着指数晃，没有明显超额，没有态度。"
     if label == "NPC":
         return "名字可以，走势拉胯，没放量突破前别硬吹。"
@@ -1440,14 +1440,14 @@ def _ranking_label(grade: str) -> str:
         "A": "人上人",
         "B": "立棍单打",
         "C": "刷子",
-        "D": "混子",
+        "D": "路边",
         "E": "NPC",
         "F": "拉完了",
         "夯爆了": "夯爆了",
         "人上人": "人上人",
         "立棍单打": "立棍单打",
         "刷子": "刷子",
-        "混子": "混子",
+        "路边": "路边",
         "NPC": "NPC",
         "拉完了": "拉完了",
     }
@@ -1460,7 +1460,7 @@ def _ranking_label_class(grade: str) -> str:
         "人上人": "grade-a",
         "立棍单打": "grade-b",
         "刷子": "grade-c",
-        "混子": "grade-d",
+        "路边": "grade-d",
         "NPC": "grade-e",
         "拉完了": "grade-f",
     }.get(_ranking_label(grade), "grade-neutral")
