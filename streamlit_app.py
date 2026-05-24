@@ -1057,22 +1057,38 @@ def _review_generation_signature(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _render_review_ai_panel(evidence: dict[str, object], *, key_prefix: str, result_key: str) -> None:
+def _render_review_ai_controls(*, key_prefix: str) -> tuple[str, str, bool]:
     ai_col1, ai_col2, ai_col3 = st.columns([1.2, 1.2, 1])
     deepseek_model = ai_col1.selectbox(
-        "模型",
+        "DeepSeek 模型",
         [DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"],
         index=0,
         key=f"{key_prefix}_model",
     )
     deepseek_key = ai_col2.text_input(
-        "DeepSeek API Key",
+        "用户 API Key",
         value="",
         type="password",
         key=f"{key_prefix}_api_key",
-        help="留空时读取环境变量 DEEPSEEK_API_KEY。",
+        help="只在当前页面会话中使用；留空时读取环境变量 DEEPSEEK_API_KEY。",
     )
     deepseek_thinking = ai_col3.checkbox("启用 Thinking", value=True, key=f"{key_prefix}_thinking")
+    return str(deepseek_model), deepseek_key, bool(deepseek_thinking)
+
+
+def _render_review_ai_panel(
+    evidence: dict[str, object],
+    *,
+    key_prefix: str,
+    result_key: str,
+    model: str,
+    api_key: str,
+    thinking: bool,
+) -> None:
+    st.caption(f"当前模型：{model}；API Key 留空时读取环境变量 DEEPSEEK_API_KEY。")
+    deepseek_model = str(model)
+    deepseek_key = str(api_key or "")
+    deepseek_thinking = bool(thinking)
     result_signature = _review_ai_signature(evidence, model=str(deepseek_model), thinking=bool(deepseek_thinking))
     with st.expander("查看发送给 DeepSeek 的证据摘要"):
         st.json(evidence)
@@ -1189,6 +1205,9 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         step=1,
         key="review_min_segment_bars",
     )
+    st.markdown("**DeepSeek 设置**")
+    st.caption("用户可在这里临时填写 API Key 并选择模型；不会写入源码或配置文件。")
+    deepseek_model, deepseek_api_key, deepseek_thinking = _render_review_ai_controls(key_prefix="review_ai_settings")
 
     index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
     etf_reload_token_key = "review_akshare_etf_reload_token"
@@ -1320,6 +1339,9 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             concept_name=concept_name,
             sector_min_coverage=float(sector_min_coverage),
             extra_stock_names=review_extra_names,
+            deepseek_model=deepseek_model,
+            deepseek_api_key=deepseek_api_key,
+            deepseek_thinking=deepseek_thinking,
         )
         return
 
@@ -1412,7 +1434,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         stock_names=stock_names,
         warnings=all_warnings,
     )
-    _render_review_ai_panel(evidence, key_prefix="review_ai", result_key="review_ai_result")
+    _render_review_ai_panel(
+        evidence,
+        key_prefix="review_ai",
+        result_key="review_ai_result",
+        model=deepseek_model,
+        api_key=deepseek_api_key,
+        thinking=deepseek_thinking,
+    )
 
     st.markdown("**5. 波段与对比明细**")
     detail_col1, detail_col2 = st.columns(2)
@@ -1558,6 +1587,9 @@ def _render_multi_review_output(
     industry_name: str,
     concept_name: str,
     sector_min_coverage: float,
+    deepseek_model: str,
+    deepseek_api_key: str,
+    deepseek_thinking: bool,
     extra_stock_names: dict[str, str] | None = None,
 ) -> None:
     direct_symbols = unique_symbols([*target_symbols, *index_symbols, *proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
@@ -1672,7 +1704,14 @@ def _render_multi_review_output(
         "warnings": list(dict.fromkeys(all_warnings)),
         "limits": ["只基于本地行情和对比统计，不读取新闻或基本面。"],
     }
-    _render_review_ai_panel(multi_evidence, key_prefix="multi_review_ai", result_key="multi_review_ai_result")
+    _render_review_ai_panel(
+        multi_evidence,
+        key_prefix="multi_review_ai",
+        result_key="multi_review_ai_result",
+        model=deepseek_model,
+        api_key=deepseek_api_key,
+        thinking=deepseek_thinking,
+    )
 
     st.markdown("**5. 对比与波段明细**")
     detail_col1, detail_col2 = st.columns(2)
