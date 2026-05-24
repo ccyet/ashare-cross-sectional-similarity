@@ -1,11 +1,30 @@
 services:
   ashare-similarity:
     build: .
+    restart: unless-stopped
     ports:
       - "${ASHARE_PORT:-8502}:8501"
     environment:
       ASHARE_DATA_ROOT: /data/market/daily
       ASHARE_TREND_REPO: /trend-backtest
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - ${ASHARE_HOST_DATA_DIR:-/Users/a1234/Desktop/trend-backtest/data}:/data
+      - ${ASHARE_HOST_TREND_REPO:-/Users/a1234/Desktop/trend-backtest}:/trend-backtest:ro
       - ./outputs:/app/outputs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

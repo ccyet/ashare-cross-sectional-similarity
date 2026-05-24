@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -67,6 +68,7 @@ from streamlit_app import (
     _stock_name_map_from_table,
     _symbol_data_hint,
     _symbols_requiring_download,
+    main,
 )
 
 
@@ -88,9 +90,24 @@ def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
 def test_app_theme_css_uses_workbench_palette() -> None:
     css = _app_theme_css()
 
+    assert "--ashare-surface: #ffffff" in css
+    assert "--ashare-text: #0f172a" in css
     assert "#2563eb" in css
-    assert "#111827" in css
+    assert "#14b8a6" in css
+    assert '[data-testid="stSidebar"]' in css
+    assert '.stTabs [data-baseweb="tab-list"]' in css
+    assert "line-height: 1.65" in css
+    assert "min-height: 2.5rem" in css
     assert "linear-gradient" not in css
+
+
+def test_streamlit_app_keeps_all_three_workbenches() -> None:
+    source = inspect.getsource(main)
+
+    assert 'st.tabs(["历史时序相似", "横截面相似", "走势复盘"])' in source
+    assert "_render_history_tab(" in source
+    assert "_render_cross_section_tab(" in source
+    assert "_render_review_tab(" in source
 
 
 def test_picker_initial_directory_uses_existing_directory_or_file_parent(tmp_path: Path) -> None:

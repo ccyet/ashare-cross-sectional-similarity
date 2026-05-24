@@ -500,12 +500,12 @@ streamlit run streamlit_app.py
 10. 运行搜索。
 11. 查看结果表、统计计量、走势图和 K 线图；横截面工作台会展示目标与相似标的收盘价折线图、单票 K 线聚合图，并可下载 CSV。
 
-## 走势复盘来源与 DeepSeek V4
+## 走势复盘来源与 AI 模型
 
 页面里的 `走势复盘` 先选择来源：
 
 - `默认复盘`：使用本地 K 线和对标统计，研究端按“市场总环境、排序总表、逐个锐评、关键转折点复盘、明日验证”输出；视频端按 `夯爆了 > 人上人 > 立棍单打 > 刷子 > 混子 > NPC > 拉完了` 打标签，每个标的三句话封顶，不写“明天”。
-- `AI 复盘`：使用同一份本地证据包调用 DeepSeek V4，按同一框架输出 `复盘 / 分析 / 锐评 / 视频脚本卡片`。页面不会同时展示默认复盘和 AI 复盘，AI 视频卡片也使用同一套标签和颜色。
+- `AI 复盘`：使用同一份本地证据包调用 DeepSeek、Qwen、OpenAI 或 Claude，按同一框架输出 `复盘 / 分析 / 锐评 / 视频脚本卡片`。页面不会同时展示默认复盘和 AI 复盘，AI 视频卡片也使用同一套标签和颜色。
 
 ```bash
 export DEEPSEEK_API_KEY=your_api_key
@@ -534,16 +534,32 @@ python -m ashare_cross_section_similarity review \
   --output outputs/review.json
 ```
 
-调用 DeepSeek 且未通过环境变量、CLI 参数或页面输入提供 API Key 时，会明确报错；使用 `--evidence-only` 不会调用 DeepSeek。
+调用 AI 且未通过环境变量、CLI 参数或页面输入提供 API Key 时，会明确报错；使用 `--evidence-only` 不会调用模型。
 
 ## 9. Docker 服务
 
-本分支提供 Docker 服务化运行方式，默认把本机 `/Users/a1234/Desktop/trend-backtest/data` 挂载到容器内 `/data`，并把行情根目录设为 `/data/market/daily`。
+本分支提供 Docker 服务化运行方式，默认把本机 `/Users/a1234/Desktop/trend-backtest/data` 挂载到容器内 `/data`，把原 `trend-backtest` 仓库挂载到 `/trend-backtest`，并把行情根目录设为 `/data/market/daily`。
+
+首次部署先复制配置模板：
+
+```bash
+cp .env.example .env
+```
+
+按机器实际路径修改 `.env`：
+
+```text
+ASHARE_PORT=8502
+ASHARE_HOST_DATA_DIR=/path/to/trend-backtest/data
+ASHARE_HOST_TREND_REPO=/path/to/trend-backtest
+```
+
+如果要让朋友直接使用 AI 复盘，可以在 `.env` 里填对应供应商的 key；也可以留空，让用户在页面会话中临时输入。
 
 启动：
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 浏览器打开：
@@ -563,6 +579,15 @@ ASHARE_PORT=8510 docker compose up --build
 ```bash
 ASHARE_HOST_DATA_DIR=/path/to/trend-backtest/data docker compose up --build
 ```
+
+健康检查：
+
+```bash
+curl http://localhost:8502/_stcore/health
+docker compose ps
+```
+
+面向局域网分享时，把 Mac mini 的防火墙放行 `ASHARE_PORT` 对应端口即可；上云或绑定域名时，建议在反向代理层增加访问控制，不要把 API Key 写入源码或镜像。
 
 在 Docker 服务里有两种使用自定义价格数据的方式：
 

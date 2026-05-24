@@ -160,25 +160,221 @@ def _app_theme_css() -> str:
     return """
 <style>
 :root {
-  --ashare-text: #111827;
-  --ashare-muted: #6b7280;
-  --ashare-line: #e5e7eb;
+  --ashare-bg: #f6f8fb;
+  --ashare-surface: #ffffff;
+  --ashare-surface-subtle: #f8fafc;
+  --ashare-sidebar: #eef4f8;
+  --ashare-text: #0f172a;
+  --ashare-muted: #64748b;
+  --ashare-line: #dbe3ec;
+  --ashare-line-strong: #cbd5e1;
   --ashare-blue: #2563eb;
-  --ashare-bg: #f8fafc;
+  --ashare-accent: #14b8a6;
+  --ashare-green: #16a34a;
+  --ashare-amber: #d97706;
+  --ashare-red: #dc2626;
+  --ashare-shadow: 0 12px 28px rgba(15, 23, 42, 0.07);
+  --ashare-radius: 8px;
 }
+
 .stApp {
   background: var(--ashare-bg);
   color: var(--ashare-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
 }
-div[data-testid="stMetric"] {
-  background: #ffffff;
+
+.block-container {
+  max-width: 1240px;
+  padding-top: 1.7rem;
+  padding-bottom: 3rem;
+}
+
+h1, h2, h3 {
+  color: var(--ashare-text);
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: 2rem;
+  font-weight: 760;
+  line-height: 1.2;
+  margin-bottom: 0.25rem;
+}
+
+h2, h3 {
+  font-weight: 720;
+  line-height: 1.32;
+}
+
+p, li, [data-testid="stMarkdownContainer"] {
+  color: var(--ashare-text);
+  line-height: 1.65;
+}
+
+small, caption, .stCaptionContainer, [data-testid="stCaptionContainer"] {
+  color: var(--ashare-muted);
+  line-height: 1.55;
+}
+
+[data-testid="stSidebar"] {
+  background: var(--ashare-sidebar);
+  border-right: 1px solid var(--ashare-line);
+}
+
+[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+  padding-top: 1.5rem;
+}
+
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] label {
+  color: var(--ashare-text);
+}
+
+[data-testid="stSidebar"] label {
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.35rem;
+  padding: 0.25rem;
+  width: fit-content;
+  background: #e9eff6;
   border: 1px solid var(--ashare-line);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: var(--ashare-radius);
 }
+
+.stTabs [data-baseweb="tab"] {
+  min-height: 2.5rem;
+  padding: 0.45rem 1rem;
+  border-radius: 6px;
+  color: var(--ashare-muted);
+  font-weight: 680;
+}
+
+.stTabs [aria-selected="true"] {
+  background: var(--ashare-surface);
+  color: var(--ashare-blue);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+}
+
+.stTabs [data-baseweb="tab-highlight"] {
+  display: none;
+}
+
+.stButton > button,
+.stDownloadButton > button,
+button[data-testid="baseButton-secondary"],
+button[data-testid="baseButton-primary"] {
+  min-height: 2.5rem;
+  border-radius: var(--ashare-radius);
+  border: 1px solid var(--ashare-line-strong);
+  font-weight: 680;
+  letter-spacing: 0;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+  border-color: var(--ashare-blue);
+  color: var(--ashare-blue);
+}
+
+.stButton > button:focus,
+.stDownloadButton > button:focus,
+input:focus,
+textarea:focus {
+  border-color: var(--ashare-blue) !important;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14) !important;
+}
+
 .stButton > button[kind="primary"] {
   background: var(--ashare-blue);
   border-color: var(--ashare-blue);
+  color: #ffffff;
+}
+
+.stButton > button[kind="primary"]:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+input,
+textarea,
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+[data-baseweb="textarea"] > div {
+  border-radius: var(--ashare-radius) !important;
+  border-color: var(--ashare-line) !important;
+  background: var(--ashare-surface) !important;
+}
+
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div {
+  min-height: 2.5rem;
+}
+
+textarea {
+  line-height: 1.55 !important;
+}
+
+div[data-testid="stMetric"] {
+  background: var(--ashare-surface);
+  border: 1px solid var(--ashare-line);
+  border-radius: var(--ashare-radius);
+  padding: 0.9rem 1rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+div[data-testid="stMetric"] label {
+  color: var(--ashare-muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+div[data-testid="stMetricValue"] {
+  color: var(--ashare-text);
+  font-weight: 760;
+}
+
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+  border: 1px solid var(--ashare-line);
+  border-radius: var(--ashare-radius);
+  overflow: hidden;
+  background: var(--ashare-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+[data-testid="stExpander"] {
+  border: 1px solid var(--ashare-line);
+  border-radius: var(--ashare-radius);
+  background: var(--ashare-surface);
+}
+
+[data-testid="stAlert"] {
+  border-radius: var(--ashare-radius);
+  border: 1px solid var(--ashare-line);
+}
+
+hr {
+  border-color: var(--ashare-line);
+}
+
+a {
+  color: var(--ashare-blue);
+}
+
+code {
+  border-radius: 5px;
+  color: #0f766e;
+  background: #ecfeff;
+}
+
+.review-ai-sections,
+.review-script-wrap {
+  color: var(--ashare-text);
 }
 </style>
 """
@@ -207,9 +403,10 @@ def main() -> None:
         adjust = st.text_input("复权", value="qfq")
         download_engine = st.selectbox(
             "下载引擎",
-            ["trend", "openbb", "tdx"],
+            ["trend", "akshare", "openbb", "tdx"],
             format_func=lambda value: {
                 "trend": "trend-backtest",
+                "akshare": "AkShare 原生",
                 "openbb": "OpenBB",
                 "tdx": "TDX 本地",
             }[value],
@@ -221,6 +418,9 @@ def main() -> None:
                 "tdx_tqcenter",
             )
             st.caption("可选择通达信安装目录、PYPlugins 或 PYPlugins/user；留空则尝试系统导入路径。")
+        elif download_engine == "akshare":
+            provider = ""
+            st.caption("AkShare 原生日线直连；分钟线请使用 TDX。")
         else:
             provider_default = "akshare" if download_engine == "openbb" else ""
             provider = st.text_input(
