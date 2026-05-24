@@ -56,6 +56,9 @@ from streamlit_app import (
     _review_ai_sections_html,
     _review_ai_script_cards_html,
     _review_ai_script_grade_class,
+    _review_ai_default_base_url,
+    _review_ai_default_model,
+    _review_ai_provider_options,
     _review_ai_result_is_current,
     _review_ai_signature,
     _review_output_source_options,
@@ -116,7 +119,17 @@ def test_review_ai_display_sections_returns_review_analysis_critique() -> None:
     assert sections == [("复盘", "复盘"), ("分析", "分析"), ("锐评", "锐评")]
 
 
-def test_review_ai_sections_html_uses_stacked_cards() -> None:
+def test_review_ai_provider_options_cover_major_vendors() -> None:
+    options = _review_ai_provider_options()
+
+    assert options == ["DeepSeek", "Qwen", "OpenAI", "Claude"]
+    assert _review_ai_default_model("DeepSeek") == "deepseek-v4-flash"
+    assert _review_ai_default_model("Qwen") == "qwen-plus"
+    assert _review_ai_default_base_url("OpenAI") == "https://api.openai.com/v1"
+    assert _review_ai_default_base_url("Claude") == "https://api.anthropic.com"
+
+
+def test_review_ai_sections_html_uses_two_column_reading_cards() -> None:
     result = ReviewAIResult(
         review="复盘",
         analysis="分析",
@@ -130,15 +143,28 @@ def test_review_ai_sections_html_uses_stacked_cards() -> None:
 
     assert 'data-testid="review-ai-sections"' in html
     assert 'class="review-ai-card"' in html
+    assert "grid-template-columns: repeat(2, minmax(320px, 1fr));" in html
+    assert '.review-ai-card[data-section="2"]' in html
+    assert "grid-column: 1 / -1;" in html
+    assert 'class="review-ai-title-text">复盘</span>' in html
     assert "stColumn" not in html
 
 
 def test_review_ai_body_html_breaks_dense_ranking_text() -> None:
-    html = _review_ai_body_html("排序表：1. 天承科技；2. 宁德时代。关键转折点：放量上影。明日验证：看承接。")
+    html = _review_ai_body_html("排序表：1. 天承科技；2. 宁德时代。关键转折点：放量上影。路边：消费ETF。")
 
-    assert "排序表：<br>1. 天承科技；<br>2. 宁德时代。" in html
-    assert "<p>关键转折点：放量上影。</p>" in html
-    assert "<p>明日验证：看承接。</p>" in html
+    assert '<span class="review-ai-point-label">排序表</span>' in html
+    assert "<p>1. 天承科技；</p>" in html
+    assert "<p>2. 宁德时代。</p>" in html
+    assert '<span class="review-ai-point-label">关键转折点</span>' in html
+    assert '<span class="review-ai-point-label">路边</span>' in html
+
+
+def test_review_ai_body_html_highlights_bracketed_grade_labels() -> None:
+    html = _review_ai_body_html("【夯爆了】159516.SZ半导体设备：弹性冲浪。")
+
+    assert '<span class="review-ai-point-label">夯爆了</span>' in html
+    assert '<span class="review-ai-point-text">159516.SZ半导体设备：弹性冲浪。</span>' in html
 
 
 def test_review_ai_body_html_renders_markdown_table() -> None:
@@ -153,7 +179,8 @@ def test_review_ai_body_html_renders_markdown_table() -> None:
     assert '<table class="review-ai-table">' in html
     assert "<th>排名</th>" in html
     assert "<td>688603.SH</td>" in html
-    assert "<p>关键转折点：放量上影。</p>" in html
+    assert '<span class="review-ai-point-label">关键转折点</span>' in html
+    assert '<span class="review-ai-point-text">放量上影。</span>' in html
 
 
 def test_review_ai_script_cards_hide_kicker_and_color_by_grade() -> None:
@@ -182,7 +209,7 @@ def test_review_ai_script_grade_class_uses_first_grade_letter() -> None:
     assert _review_ai_script_grade_class("人上人") == "grade-a"
     assert _review_ai_script_grade_class("立棍单打") == "grade-b"
     assert _review_ai_script_grade_class("刷子") == "grade-c"
-    assert _review_ai_script_grade_class("混子") == "grade-d"
+    assert _review_ai_script_grade_class("路边") == "grade-d"
     assert _review_ai_script_grade_class("NPC") == "grade-e"
     assert _review_ai_script_grade_class("拉完了") == "grade-f"
     assert _review_ai_script_grade_class("") == "grade-neutral"
@@ -190,15 +217,16 @@ def test_review_ai_script_grade_class_uses_first_grade_letter() -> None:
 
 def test_review_ai_signature_changes_with_evidence_model_or_thinking() -> None:
     evidence = {"target": {"symbol": "601888.SH"}, "segments": [{"return": 0.1}]}
-    base = _review_ai_signature(evidence, model="deepseek-v4-flash", thinking=True)
+    base = _review_ai_signature(evidence, provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-flash", thinking=True)
 
-    assert _review_ai_signature({"target": {"symbol": "300750.SZ"}, "segments": [{"return": 0.1}]}, model="deepseek-v4-flash", thinking=True) != base
-    assert _review_ai_signature(evidence, model="deepseek-v4-pro", thinking=True) != base
-    assert _review_ai_signature(evidence, model="deepseek-v4-flash", thinking=False) != base
+    assert _review_ai_signature({"target": {"symbol": "300750.SZ"}, "segments": [{"return": 0.1}]}, provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-flash", thinking=True) != base
+    assert _review_ai_signature(evidence, provider="openai", base_url="https://api.openai.com/v1", model="gpt-4.1", thinking=True) != base
+    assert _review_ai_signature(evidence, provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-pro", thinking=True) != base
+    assert _review_ai_signature(evidence, provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-flash", thinking=False) != base
 
 
 def test_review_ai_result_is_current_requires_matching_signature() -> None:
-    signature = _review_ai_signature({"target": "601888.SH"}, model="deepseek-v4-flash", thinking=True)
+    signature = _review_ai_signature({"target": "601888.SH"}, provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-flash", thinking=True)
     result = ReviewAIResult(
         review="复盘",
         analysis="分析",

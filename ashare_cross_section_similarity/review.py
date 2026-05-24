@@ -871,9 +871,6 @@ def _video_script_title(profile: dict[str, object]) -> str:
 
 
 def _video_profile_heading(profile: dict[str, object]) -> str:
-    rank = _numeric_value(profile.get("排名"))
-    rank_text = f"第{int(rank)}" if math.isfinite(rank) else "第1"
-    grade = _video_profile_grade(profile)
     title = _video_script_title(profile)
     return f"{title}。"
 

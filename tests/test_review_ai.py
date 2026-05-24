@@ -86,7 +86,12 @@ def test_build_review_ai_messages_require_json_contract() -> None:
     assert "逐个锐评" in messages[0]["content"]
     assert "关键转折点复盘" in messages[0]["content"]
     assert "明日验证" in messages[0]["content"]
-    assert "夯爆了 > 人上人 > 立棍单打 > 刷子 > 混子 > NPC > 拉完了" in messages[0]["content"]
+    assert "夯爆了 > 人上人 > 立棍单打 > 刷子 > 路边 > NPC > 拉完了" in messages[0]["content"]
+    assert "网感锐评" in messages[0]["content"]
+    assert "体育解说式" in messages[0]["content"]
+    assert "不得模仿具体真人" in messages[0]["content"]
+    assert "立棍单打=独立于指数" in messages[0]["content"]
+    assert "指数弱或横盘时自己打出节奏" in messages[0]["content"]
     assert "每个标的三句话封顶" in messages[0]["content"]
     assert "视频端不得写明天" in messages[0]["content"]
     assert messages[1]["role"] == "user"
@@ -122,6 +127,29 @@ def test_parse_review_ai_result_accepts_required_fields() -> None:
     assert result.script_cards[0].grade == "A"
     assert result.script_cards[0].tomorrow_check == "回踩不破短均算强。"
     assert result.evidence_refs == ("segments[0]", "comparisons[0]")
+
+
+def test_parse_review_ai_result_accepts_structured_section_fields() -> None:
+    raw = json.dumps(
+        {
+            "review": {"市场总环境": "指数主升", "排序总表": ["夯爆了：半导体", "路边：消费"]},
+            "analysis": ["指数阶段：主升", "最大回撤：消费更大"],
+            "critique": {"【夯爆了】": "半导体弹性冲浪"},
+            "script_cards": [],
+            "evidence_refs": ["segments[0]"],
+            "disclaimer": "仅供研究",
+        },
+        ensure_ascii=False,
+    )
+
+    result = parse_review_ai_result(raw)
+
+    assert "市场总环境：指数主升" in result.review
+    assert "排序总表：" in result.review
+    assert "夯爆了：半导体" in result.review
+    assert "路边：消费" in result.review
+    assert "指数阶段：主升" in result.analysis
+    assert "【夯爆了】：半导体弹性冲浪" in result.critique
 
 
 def test_parse_review_ai_result_accepts_refs_present_in_evidence() -> None:
@@ -226,8 +254,8 @@ def test_parse_review_ai_result_rejects_missing_or_empty_evidence_refs(refs: obj
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("review", ["ok"]),
-        ("analysis", {"text": "ok"}),
+        ("review", 1),
+        ("analysis", None),
         ("critique", 1),
         ("disclaimer", ["仅供研究"]),
     ],

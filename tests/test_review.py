@@ -278,7 +278,7 @@ def test_rank_review_results_orders_by_strength_not_input_order() -> None:
     assert ranking["排名"].tolist() == [1, 2]
     assert ranking.loc[0, "股票"] == "稳趋势"
     assert ranking.loc[0, "强弱等级"] == "人上人"
-    assert set(ranking["强弱等级"]).issubset({"夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"})
+    assert set(ranking["强弱等级"]).issubset({"夯爆了", "人上人", "立棍单打", "刷子", "路边", "NPC", "拉完了"})
     assert "明日验证" in ranking.columns
 
 
@@ -320,10 +320,10 @@ def test_render_multi_review_text_uses_ranked_critic_order() -> None:
 
     assert "市场总环境" in text
     assert "逐个锐评" in text
-    assert "第1，人上人，稳趋势" in text
-    assert "第2，" in text and "高波动" in text
+    assert "**稳趋势" in text
+    assert "高波动" in text
     critic_section = text.split("**逐个锐评**：", maxsplit=1)[1]
-    assert critic_section.index("第1，人上人，稳趋势") < critic_section.index("高波动")
+    assert critic_section.index("稳趋势") < critic_section.index("高波动")
     assert "关键转折点复盘" in text
     assert "卡在" in text
     assert "明日验证" in text
@@ -361,7 +361,7 @@ def test_render_multi_review_text_uses_ranked_framework_sections() -> None:
     assert "谁只是补涨" in text
     assert "谁已经拉完" in text
     critic_section = text.split("**逐个锐评**：", maxsplit=1)[1]
-    assert critic_section.index("第1，") < critic_section.index("弱修复")
+    assert critic_section.index("强趋势") < critic_section.index("弱修复")
     assert "对标关系" not in text
 
 
@@ -424,8 +424,6 @@ def test_render_video_script_text_includes_script_structure() -> None:
     text = render_video_script_text(profile)
 
     assert "视频脚本视角" in text
-    assert "第" in text
-    assert any(label in text for label in ["夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"])
     assert "结局：" in text
     assert "明日" not in text
     assert "YTD" not in text
@@ -452,7 +450,6 @@ def test_render_video_script_cards_html_uses_separate_highlight_cards() -> None:
     assert 'data-testid="video-script-cards"' in html
     assert 'class="review-script-card grade-' in html
     assert "测试股" in html
-    assert "第1" in html
     assert "当前性质" in html
     assert "标签" in html
     assert "结局" in html

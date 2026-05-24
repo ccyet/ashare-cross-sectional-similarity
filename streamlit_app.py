@@ -27,11 +27,12 @@ from ashare_cross_section_similarity.data import (
     read_price_data_file,
     resolve_timeframe_root,
 )
-from ashare_cross_section_similarity.deepseek_client import (
-    DEFAULT_DEEPSEEK_MODEL,
-    DeepSeekAPIError,
-    DeepSeekClient,
-    DeepSeekConfig,
+from ashare_cross_section_similarity.llm_client import (
+    DEFAULT_LLM_PROVIDER,
+    LLMAPIError,
+    LLMClient,
+    LLMConfig,
+    provider_presets,
 )
 from ashare_cross_section_similarity.data_manager import (
     KLINE_FILE_PATTERNS,
@@ -1042,10 +1043,10 @@ def _review_ai_sections_html(result: ReviewAIResult) -> str:
 <style>
 .review-ai-stack {{
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0.9rem;
-  margin: 0.35rem 0 1.15rem;
-  max-width: 1080px;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 1rem;
+  margin: 0.45rem 0 1.2rem;
+  max-width: 1180px;
 }}
 .review-ai-card {{
   border: 1px solid #e5e7eb;
@@ -1053,23 +1054,24 @@ def _review_ai_sections_html(result: ReviewAIResult) -> str:
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
-  padding: 1rem 1.12rem 1.05rem;
+  padding: 1.18rem 1.25rem 1.2rem;
 }}
 .review-ai-card[data-section="1"] {{
   --review-ai-accent: #0f766e;
 }}
 .review-ai-card[data-section="2"] {{
   --review-ai-accent: #b45309;
+  grid-column: 1 / -1;
 }}
 .review-ai-title {{
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.6rem;
   color: #111827;
-  font-size: 0.98rem;
+  font-size: 1rem;
   line-height: 1.25;
   font-weight: 800;
-  margin: 0 0 0.72rem;
+  margin: 0 0 0.95rem;
 }}
 .review-ai-index {{
   display: inline-flex;
@@ -1083,20 +1085,44 @@ def _review_ai_sections_html(result: ReviewAIResult) -> str:
   font-size: 0.74rem;
   font-weight: 800;
 }}
+.review-ai-title-text {{
+  display: block;
+  font-size: 1.3rem;
+  line-height: 1.18;
+  font-weight: 900;
+  letter-spacing: 0;
+}}
 .review-ai-body {{
   color: #1f2937;
-  font-size: 0.95rem;
-  line-height: 1.82;
+  font-size: 1.02rem;
+  line-height: 1.92;
   overflow-wrap: anywhere;
 }}
 .review-ai-body p {{
-  margin: 0.45rem 0 0;
+  margin: 0.66rem 0 0;
 }}
 .review-ai-body p:first-child {{
   margin-top: 0;
 }}
+.review-ai-point {{
+  display: grid;
+  grid-template-columns: minmax(4.5rem, max-content) minmax(0, 1fr);
+  column-gap: 0.68rem;
+  align-items: start;
+}}
+.review-ai-point-label {{
+  color: var(--review-ai-accent, #2563eb);
+  font-weight: 900;
+  white-space: nowrap;
+}}
+.review-ai-point-label::after {{
+  content: "：";
+}}
+.review-ai-point-text {{
+  min-width: 0;
+}}
 .review-ai-table-wrap {{
-  margin: 0.58rem 0 0.35rem;
+  margin: 0.7rem 0 0.45rem;
   overflow-x: auto;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -1132,6 +1158,14 @@ def _review_ai_sections_html(result: ReviewAIResult) -> str:
 .review-ai-table tr:last-child td {{
   border-bottom: 0;
 }}
+@media (max-width: 980px) {{
+  .review-ai-stack {{
+    grid-template-columns: minmax(0, 1fr);
+  }}
+  .review-ai-card[data-section="2"] {{
+    grid-column: auto;
+  }}
+}}
 </style>
 <div class="review-ai-stack" data-testid="review-ai-sections">
   {items}
@@ -1142,7 +1176,7 @@ def _review_ai_sections_html(result: ReviewAIResult) -> str:
 def _review_ai_section_html(index: int, title: str, body: str) -> str:
     return f"""
 <article class="review-ai-card" data-section="{index}">
-  <h4 class="review-ai-title"><span class="review-ai-index">{index + 1}</span>{escape(title)}</h4>
+  <h4 class="review-ai-title"><span class="review-ai-index">{index + 1}</span><span class="review-ai-title-text">{escape(title)}</span></h4>
   <div class="review-ai-body">{_review_ai_body_html(body)}</div>
 </article>
 """.strip()
@@ -1165,7 +1199,7 @@ def _review_ai_paragraph_html(paragraph: str) -> str:
         if text_lines:
             text = "\n".join(line for line in text_lines if line.strip()).strip()
             if text:
-                html_parts.append(f"<p>{escape(text).replace(chr(10), '<br>')}</p>")
+                html_parts.append(_review_ai_text_lines_html(text.splitlines()))
             text_lines.clear()
 
     def flush_table() -> None:
@@ -1184,6 +1218,44 @@ def _review_ai_paragraph_html(paragraph: str) -> str:
     flush_text()
     flush_table()
     return "".join(html_parts)
+
+
+def _review_ai_text_lines_html(lines: list[str]) -> str:
+    return "".join(_review_ai_text_line_html(line.strip()) for line in lines if line.strip())
+
+
+def _review_ai_text_line_html(line: str) -> str:
+    bracketed = re.match(r"^【([^】]{1,18})】\s*(.*)$", line)
+    if bracketed and _review_ai_should_highlight_label(bracketed.group(1)):
+        return _review_ai_point_html(bracketed.group(1), bracketed.group(2))
+
+    labeled = re.match(r"^([^:：]{1,24})[:：]\s*(.*)$", line)
+    if labeled and _review_ai_should_highlight_label(labeled.group(1)):
+        return _review_ai_point_html(labeled.group(1), labeled.group(2))
+
+    return f"<p>{escape(line)}</p>"
+
+
+def _review_ai_should_highlight_label(label: str) -> bool:
+    clean = label.strip().strip("[]【】")
+    if not clean:
+        return False
+    if any(separator in clean for separator in ("。", "，", "；", "\n", "|")):
+        return False
+    return len(clean) <= 24
+
+
+def _review_ai_point_html(label: str, text: str) -> str:
+    clean_label = escape(label.strip().strip("[]【】"))
+    clean_text = escape(text.strip())
+    if not clean_text:
+        return f'<p class="review-ai-point review-ai-point-empty"><span class="review-ai-point-label">{clean_label}</span></p>'
+    return (
+        '<p class="review-ai-point">'
+        f'<span class="review-ai-point-label">{clean_label}</span>'
+        f'<span class="review-ai-point-text">{clean_text}</span>'
+        "</p>"
+    )
 
 
 def _review_ai_markdown_table_html(lines: list[str]) -> str:
@@ -1224,15 +1296,26 @@ def _format_review_ai_body_text(body: str) -> str:
     text = re.sub(r"；\s*(?=\d+[.．、])", "；\n", text)
     markers = (
         "市场总环境",
+        "排序总表",
+        "排序表",
         "逐个锐评",
         "关键转折点复盘",
         "关键转折点",
         "明日验证",
         "总结一下",
         "谁是真强",
+        "夯爆了",
+        "人上人",
+        "立棍单打",
+        "刷子",
+        "路边",
+        "混子",
+        "NPC",
+        "拉完了",
     )
     for marker in markers:
         text = re.sub(rf"([。；])\s*({re.escape(marker)}[:：])", r"\1\n\n\2", text)
+        text = re.sub(rf"([。；])\s*(【{re.escape(marker)}】)", r"\1\n\n\2", text)
     return text.strip()
 
 
@@ -1393,6 +1476,7 @@ def _review_ai_script_grade_class(grade: str) -> str:
         "人上人": "grade-a",
         "立棍单打": "grade-b",
         "刷子": "grade-c",
+        "路边": "grade-d",
         "混子": "grade-d",
         "NPC": "grade-e",
         "拉完了": "grade-f",
@@ -1425,9 +1509,11 @@ def _video_card_section_html(title: str, body: str) -> str:
     )
 
 
-def _review_ai_signature(evidence: dict[str, object], *, model: str, thinking: bool) -> str:
+def _review_ai_signature(evidence: dict[str, object], *, provider: str, base_url: str, model: str, thinking: bool) -> str:
     payload = {
         "evidence": evidence,
+        "provider": str(provider),
+        "base_url": str(base_url),
         "model": str(model),
         "thinking": bool(thinking),
     }
@@ -1453,53 +1539,107 @@ def _review_generation_signature(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _render_review_ai_controls(*, key_prefix: str) -> tuple[str, str, bool]:
-    ai_col1, ai_col2, ai_col3 = st.columns([1.2, 1.2, 1])
-    deepseek_model = ai_col1.selectbox(
-        "DeepSeek 模型",
-        [DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"],
+def _review_ai_provider_options() -> list[str]:
+    return [preset.label for preset in provider_presets().values()]
+
+
+def _review_ai_provider_from_label(label: str) -> str:
+    for provider, preset in provider_presets().items():
+        if preset.label == label:
+            return provider
+    return DEFAULT_LLM_PROVIDER
+
+
+def _review_ai_default_model(label: str) -> str:
+    return provider_presets()[_review_ai_provider_from_label(label)].default_model
+
+
+def _review_ai_default_base_url(label: str) -> str:
+    return provider_presets()[_review_ai_provider_from_label(label)].default_base_url
+
+
+def _render_review_ai_controls(*, key_prefix: str) -> LLMConfig:
+    provider_col, model_col = st.columns([0.9, 1.1])
+    provider_label = provider_col.selectbox(
+        "供应商",
+        _review_ai_provider_options(),
         index=0,
-        key=f"{key_prefix}_model",
+        key=f"{key_prefix}_provider",
     )
-    deepseek_key = ai_col2.text_input(
-        "用户 API Key",
+    provider = _review_ai_provider_from_label(str(provider_label))
+    preset = provider_presets()[provider]
+    model_options = [*preset.model_options, "自定义模型"]
+    selected_model = model_col.selectbox(
+        "模型",
+        model_options,
+        index=0,
+        key=f"{key_prefix}_{provider}_model_choice",
+    )
+    if selected_model == "自定义模型":
+        model = model_col.text_input(
+            "模型名",
+            value=preset.default_model,
+            key=f"{key_prefix}_{provider}_custom_model",
+        )
+    else:
+        model = str(selected_model)
+
+    url_col, key_col = st.columns([1.35, 1])
+    base_url = url_col.text_input(
+        "Base URL",
+        value=preset.default_base_url,
+        key=f"{key_prefix}_{provider}_base_url",
+        help="可填官方地址、代理地址或自建网关；系统会自动补齐 chat/messages 路径。",
+    )
+    api_key = key_col.text_input(
+        "API Key",
         value="",
         type="password",
-        key=f"{key_prefix}_api_key",
-        help="只在当前页面会话中使用；留空时读取环境变量 DEEPSEEK_API_KEY。",
+        key=f"{key_prefix}_{provider}_api_key",
+        help=f"只在当前页面会话中使用；留空时读取环境变量 {preset.api_key_env_var}。",
     )
-    deepseek_thinking = ai_col3.checkbox("启用 Thinking", value=True, key=f"{key_prefix}_thinking")
-    return str(deepseek_model), deepseek_key, bool(deepseek_thinking)
+    thinking = True
+    if preset.supports_thinking:
+        thinking = st.checkbox("启用 Thinking", value=True, key=f"{key_prefix}_{provider}_thinking")
+    return LLMConfig(
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        thinking=bool(thinking),
+    )
 
 
 def _render_review_ai_panel(
     evidence: dict[str, object],
     *,
     result_key: str,
-    model: str,
-    api_key: str,
-    thinking: bool,
+    config: LLMConfig,
     run_requested: bool,
 ) -> None:
-    st.caption(f"当前模型：{model}；API Key 留空时读取环境变量 DEEPSEEK_API_KEY。")
-    deepseek_model = str(model)
-    deepseek_key = str(api_key or "")
-    deepseek_thinking = bool(thinking)
-    result_signature = _review_ai_signature(evidence, model=str(deepseek_model), thinking=bool(deepseek_thinking))
-    with st.expander("查看发送给 DeepSeek 的证据摘要"):
+    try:
+        preset = config.preset
+        model = config.resolved_model()
+        base_url = config.resolved_base_url()
+    except LLMAPIError as exc:
+        st.error(str(exc))
+        return
+    st.caption(f"当前供应商：{preset.label}；模型：{model}；Base URL：{base_url}；API Key 留空时读取 {preset.api_key_env_var}。")
+    result_signature = _review_ai_signature(
+        evidence,
+        provider=preset.provider,
+        base_url=base_url,
+        model=model,
+        thinking=bool(config.thinking),
+    )
+    with st.expander(f"查看发送给 {preset.label} 的证据摘要"):
         st.json(evidence)
     if run_requested:
         _clear_review_ai_result(st.session_state, result_key)
         try:
-            client = DeepSeekClient(
-                DeepSeekConfig(
-                    api_key=deepseek_key,
-                    model=str(deepseek_model),
-                    thinking=bool(deepseek_thinking),
-                )
-            )
+            client = LLMClient(config)
             ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)), evidence=evidence)
-        except (DeepSeekAPIError, ReviewAIFormatError) as exc:
+        except (LLMAPIError, ReviewAIFormatError) as exc:
             st.error(str(exc))
         else:
             st.session_state[result_key] = ai_result
@@ -1507,7 +1647,7 @@ def _render_review_ai_panel(
     if _review_ai_result_is_current(st.session_state, result_key=result_key, signature=result_signature):
         _render_review_ai_result(st.session_state[result_key])
     elif not run_requested:
-        st.info("选择 AI 复盘后，点击生成走势复盘会调用 DeepSeek 输出单一来源的复盘和视频脚本。")
+        st.info("选择 AI 复盘后，点击生成走势复盘会调用所选模型输出单一来源的复盘和视频脚本。")
 
 
 def _review_ai_frame_records(frame: pd.DataFrame) -> list[dict[str, object]]:
@@ -1611,13 +1751,11 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         help="生成前选择来源；结果区只展示一个来源的复盘和视频脚本。",
     )
     is_ai_review = review_source == "AI 复盘"
-    deepseek_model = DEFAULT_DEEPSEEK_MODEL
-    deepseek_api_key = ""
-    deepseek_thinking = True
+    review_ai_config = LLMConfig(provider=DEFAULT_LLM_PROVIDER)
     if is_ai_review:
-        st.markdown("**DeepSeek 设置**")
-        st.caption("用户可在这里临时填写 API Key 并选择模型；不会写入源码或配置文件。")
-        deepseek_model, deepseek_api_key, deepseek_thinking = _render_review_ai_controls(key_prefix="review_ai_settings")
+        st.markdown("**AI 模型设置**")
+        st.caption("供应商、Base URL、模型和 API Key 均由用户配置；不会写入源码或配置文件。")
+        review_ai_config = _render_review_ai_controls(key_prefix="review_ai_settings")
 
     index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
     etf_reload_token_key = "review_akshare_etf_reload_token"
@@ -1699,8 +1837,10 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             "start": start,
             "end": end,
             "review_source": review_source,
-            "deepseek_model": deepseek_model if is_ai_review else "",
-            "deepseek_thinking": bool(deepseek_thinking) if is_ai_review else False,
+            "ai_provider": review_ai_config.provider if is_ai_review else "",
+            "ai_base_url": review_ai_config.base_url if is_ai_review else "",
+            "ai_model": review_ai_config.model if is_ai_review else "",
+            "ai_thinking": bool(review_ai_config.thinking) if is_ai_review else False,
             "min_swing_percent": int(min_swing_percent),
             "min_segment_bars": int(min_segment_bars),
             "index_enabled": bool(index_enabled),
@@ -1753,9 +1893,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             concept_name=concept_name,
             sector_min_coverage=float(sector_min_coverage),
             extra_stock_names=review_extra_names,
-            deepseek_model=deepseek_model,
-            deepseek_api_key=deepseek_api_key,
-            deepseek_thinking=deepseek_thinking,
+            ai_config=review_ai_config,
             is_ai_review=is_ai_review,
             ai_run_requested=review_run_clicked,
         )
@@ -1854,9 +1992,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         _render_review_ai_panel(
             evidence,
             result_key="review_ai_result",
-            model=deepseek_model,
-            api_key=deepseek_api_key,
-            thinking=deepseek_thinking,
+            config=review_ai_config,
             run_requested=review_run_clicked,
         )
     else:
@@ -2011,9 +2147,7 @@ def _render_multi_review_output(
     industry_name: str,
     concept_name: str,
     sector_min_coverage: float,
-    deepseek_model: str,
-    deepseek_api_key: str,
-    deepseek_thinking: bool,
+    ai_config: LLMConfig,
     is_ai_review: bool,
     ai_run_requested: bool,
     extra_stock_names: dict[str, str] | None = None,
@@ -2127,9 +2261,7 @@ def _render_multi_review_output(
         _render_review_ai_panel(
             multi_evidence,
             result_key="multi_review_ai_result",
-            model=deepseek_model,
-            api_key=deepseek_api_key,
-            thinking=deepseek_thinking,
+            config=ai_config,
             run_requested=ai_run_requested,
         )
     else:

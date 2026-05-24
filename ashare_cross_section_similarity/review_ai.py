@@ -73,6 +73,10 @@ def build_review_ai_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "analysis写数据分析：解释指数阶段、超额收益、最大回撤、上涨K占比和转折位置。"
         "critique写视频端脚本：不按代码顺序，按市场地位排序；"
         "等级顺序固定为夯爆了 > 人上人 > 立棍单打 > 刷子 > 路边 > NPC > 拉完了。"
+        "critique和script_cards要有网感锐评，允许体育解说式节奏、短句和梗感，但不得模仿具体真人、不得复刻固定口癖。"
+        "档位语义固定：立棍单打=独立于指数，尤其指数弱或横盘时自己打出节奏、靠自身结构走强；"
+        "人上人=指数配合下的强趋势核心；夯爆了=全场最强且回撤控制好；"
+        "刷子=涨幅或数据好看但回撤和体验一般；路边=跟着指数晃但没地位；NPC=存在感弱或假突破；拉完了=破位、退潮或明显跑输。"
         "每个标的三句话封顶：一句定性、一句数据、一句结局；不预测，视频端不得写明天。"
         "script_cards必须是数组，每个元素包含title、body、grade、tomorrow_check；"
         "grade必须使用夯爆了/人上人/立棍单打/刷子/路边/NPC/拉完了之一；"
@@ -90,9 +94,9 @@ def parse_review_ai_result(raw: str, evidence: dict[str, Any] | None = None) -> 
         raise ReviewAIFormatError(f"模型输出不是合法 JSON：{exc}") from exc
     if not isinstance(payload, dict):
         raise ReviewAIFormatError("模型输出必须是 JSON 对象。")
-    review = _required_text(payload, "review")
-    analysis = _required_text(payload, "analysis")
-    critique = _required_text(payload, "critique")
+    review = _required_section_text(payload, "review")
+    analysis = _required_section_text(payload, "analysis")
+    critique = _required_section_text(payload, "critique")
     script_cards = _script_cards(payload.get("script_cards"))
     disclaimer = _optional_text(payload, "disclaimer") or "仅用于研究复盘，不构成投资建议。"
     refs = _evidence_refs(payload.get("evidence_refs"))
@@ -107,6 +111,38 @@ def parse_review_ai_result(raw: str, evidence: dict[str, Any] | None = None) -> 
         raw=raw,
         script_cards=script_cards,
     )
+
+
+def _required_section_text(payload: dict[str, Any], field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, (str, list, dict)):
+        raise ReviewAIFormatError(f"{field} 必须是非空字符串、数组或对象。")
+    text = _section_text(value).strip()
+    if not text:
+        raise ReviewAIFormatError(f"模型输出缺少必要字段：{field}。")
+    return text
+
+
+def _section_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(part for item in value if (part := _section_text(item).strip()))
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for raw_key, raw_value in value.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            child = _section_text(raw_value).strip()
+            if not child:
+                continue
+            separator = "\n" if isinstance(raw_value, (list, dict)) else ""
+            lines.append(f"{key}：{separator}{child}")
+        return "\n".join(lines)
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _required_text(payload: dict[str, Any], field: str) -> str:
