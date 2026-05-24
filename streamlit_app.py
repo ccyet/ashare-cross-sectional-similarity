@@ -152,10 +152,20 @@ SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
 SIZE_SPREAD_SYMBOLS = (SIZE_SPREAD_SMALL_SYMBOL, SIZE_SPREAD_LARGE_SYMBOL)
 DATE_INPUT_MIN = date(1990, 1, 1)
 DATE_INPUT_MAX = date(2100, 12, 31)
+FINANCE_PRIMARY_BLUE = "#2f63e8"
+FINANCE_MARK_BLUE = "#2457d8"
+FINANCE_PALETTE = ("#2f63e8", "#0f766e", "#b7791f", "#7c3aed", "#0284c7", "#64748b", "#8c3232")
+FINANCE_SOFT_BLUE = "#e8f0ff"
+FINANCE_SOFT_GREEN = "#dcfce7"
+FINANCE_UP_RED = "#ff4d4f"
+FINANCE_DOWN_GREEN = "#00b050"
+FINANCE_UP_SHADE = "rgba(255, 77, 79, 0.16)"
+FINANCE_DOWN_SHADE = "rgba(0, 176, 80, 0.16)"
 
 
 def main() -> None:
     st.set_page_config(page_title="A股相似阶段搜集", layout="wide")
+    _inject_app_theme()
     st.title("A股相似阶段搜集")
     st.caption("保留同一标的历史时序相似阶段搜索，并新增同一时间内的横截面相似标的搜索。")
     with st.sidebar:
@@ -230,6 +240,141 @@ def main() -> None:
             provider=provider,
             download_engine=download_engine,
         )
+
+
+def _inject_app_theme() -> None:
+    st.markdown(
+        """
+<style>
+:root {
+  --as-bg: #f6f8fa;
+  --as-surface: #ffffff;
+  --as-surface-soft: #f3f6f5;
+  --as-border: #dce3e8;
+  --as-border-soft: #edf1f4;
+  --as-text: #1f2937;
+  --as-muted: #667085;
+  --as-primary: #2f63e8;
+  --as-primary-hover: #2457d8;
+  --as-primary-soft: #e8f0ff;
+  --as-up: #ff4d4f;
+  --as-down: #00b050;
+}
+.stApp {
+  background: var(--as-bg);
+  color: var(--as-text);
+}
+section[data-testid="stSidebar"] {
+  background: #eef3f6;
+  border-right: 1px solid var(--as-border);
+}
+.block-container {
+  padding-top: 2.1rem;
+  padding-bottom: 2.4rem;
+}
+h1, h2, h3, h4, h5, h6,
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3 {
+  color: var(--as-text);
+  letter-spacing: 0;
+}
+h1 {
+  font-size: 2.35rem;
+  line-height: 1.16;
+  margin-bottom: 0.35rem;
+}
+[data-testid="stCaptionContainer"],
+[data-testid="stMarkdownContainer"] p {
+  color: var(--as-muted);
+}
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--as-border);
+}
+.stTabs [data-baseweb="tab"] {
+  color: var(--as-muted);
+  padding: 0.55rem 0.8rem;
+}
+.stTabs [aria-selected="true"] {
+  color: var(--as-text);
+  border-bottom-color: var(--as-primary) !important;
+}
+.stButton > button,
+.stDownloadButton > button {
+  border-radius: 6px;
+  border-color: var(--as-border);
+  color: var(--as-text);
+  background: var(--as-surface);
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+  border-color: var(--as-primary);
+  color: var(--as-text);
+  background: #f8fcfe;
+}
+.stButton > button[kind="primary"],
+.stDownloadButton > button[kind="primary"],
+button[kind="primary"] {
+  background: var(--as-primary) !important;
+  border-color: var(--as-primary) !important;
+  color: #ffffff !important;
+  font-weight: 700;
+}
+.stButton > button[kind="primary"] *,
+.stDownloadButton > button[kind="primary"] *,
+button[kind="primary"] * {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+.stButton > button[kind="primary"]:hover,
+.stDownloadButton > button[kind="primary"]:hover,
+button[kind="primary"]:hover {
+  background: var(--as-primary-hover) !important;
+  border-color: var(--as-primary-hover) !important;
+  color: #ffffff !important;
+}
+.stButton > button[kind="primary"]:disabled,
+.stDownloadButton > button[kind="primary"]:disabled,
+button[kind="primary"]:disabled {
+  background: var(--as-primary) !important;
+  border-color: var(--as-primary) !important;
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+.stButton > button[kind="primary"]:disabled *,
+.stDownloadButton > button[kind="primary"]:disabled *,
+button[kind="primary"]:disabled * {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+  opacity: 1 !important;
+}
+.stButton > button:focus-visible,
+.stDownloadButton > button:focus-visible {
+  outline: 3px solid var(--as-primary-soft);
+  outline-offset: 1px;
+}
+[data-testid="stMetric"] {
+  background: transparent;
+}
+[data-testid="stMetricLabel"] p {
+  color: var(--as-muted);
+}
+[data-testid="stMetricValue"] {
+  color: var(--as-text);
+}
+.stDataFrame,
+.stPlotlyChart,
+[data-testid="stTable"] {
+  color: var(--as-text);
+}
+div[data-testid="stAlert"] {
+  border-radius: 6px;
+}
+</style>
+        """.strip(),
+        unsafe_allow_html=True,
+    )
 
 
 def _render_directory_picker(label: str, default_path: str | Path, key: str) -> str:
@@ -3244,13 +3389,13 @@ def _format_multi_review_segments(results: list[ReviewResult], stock_names: dict
 def _format_multi_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(
-            columns=["代码", "股票", "标的", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"]
+            columns=["代码", "股票", "对标对象", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"]
         )
     result = _format_review_comparisons(frame)
     columns = [
         "代码",
         "股票",
-        "标的",
+        "对标对象",
         "样本数",
         "目标收益",
         "对比收益",
@@ -3277,6 +3422,8 @@ def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
         "相对超额",
         "关键转折点",
         "当前性质",
+        "交易难度",
+        "锐评档位",
         "锐评结论",
         "明日验证",
     ]
@@ -3291,7 +3438,20 @@ def _attach_review_ranking(profile: dict[str, object], ranking_records: dict[str
     symbol = str(profile.get("代码", "") or "").strip()
     ranked = dict(profile)
     record = ranking_records.get(symbol, {})
-    for key in ["排名", "强弱等级", "关键转折点", "当前性质", "锐评结论", "明日验证", "对标指数", "指数阶段"]:
+    for key in [
+        "排名",
+        "强弱等级",
+        "区间收益",
+        "相对超额",
+        "关键转折点",
+        "当前性质",
+        "交易难度",
+        "锐评档位",
+        "锐评结论",
+        "明日验证",
+        "对标指数",
+        "指数阶段",
+    ]:
         if key in record:
             ranked[key] = record[key]
     return ranked
@@ -3305,16 +3465,20 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
                 "股票",
                 "YTD样本起点",
                 "YTD收益",
+                "区间收益",
+                "相对超额",
                 "YTD结论",
-                "买点挑战",
-                "买点位置",
-                "买入后最大收盘回撤",
+                "强弱等级",
+                "交易难度",
+                "锐评档位",
+                "明日验证",
+                "区间最大收盘回撤",
                 "单日最大日内回撤",
                 "指数",
                 "指数大涨日样本",
-                "指数大涨日标的均值",
+                "指数大涨日本品种均值",
                 "指数大跌日样本",
-                "指数大跌日标的均值",
+                "指数大跌日本品种均值",
                 "指数弹性结论",
             ]
         )
@@ -3325,12 +3489,13 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
         result,
         [
             "YTD收益",
-            "买点位置",
-            "买入后最大收盘回撤",
+            "区间收益",
+            "相对超额",
+            "区间最大收盘回撤",
             "单日最大日内回撤",
-            "指数大涨日标的均值",
+            "指数大涨日本品种均值",
             "指数大涨日指数均值",
-            "指数大跌日标的均值",
+            "指数大跌日本品种均值",
             "指数大跌日指数均值",
         ],
     )
@@ -3339,17 +3504,21 @@ def _format_video_script_profiles(profiles: list[dict[str, object]] | tuple[dict
         "股票",
         "YTD样本起点",
         "YTD收益",
+        "区间收益",
+        "相对超额",
         "YTD结论",
-        "买点挑战",
-        "买点位置",
-        "买入后最大收盘回撤",
+        "强弱等级",
+        "交易难度",
+        "锐评档位",
+        "明日验证",
+        "区间最大收盘回撤",
         "单日最大日内回撤",
         "指数",
         "指数大涨日样本",
-        "指数大涨日标的均值",
+        "指数大涨日本品种均值",
         "指数大涨日指数均值",
         "指数大跌日样本",
-        "指数大跌日标的均值",
+        "指数大跌日本品种均值",
         "指数大跌日指数均值",
         "指数弹性结论",
     ]
@@ -3407,10 +3576,12 @@ def _format_review_segments(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _format_review_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
-        return pd.DataFrame(columns=["标的", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"])
+        return pd.DataFrame(columns=["对标对象", "样本数", "目标收益", "对比收益", "超额收益", "相关性", "同步关系", "波动关系", "强弱结论"])
     result = frame.copy()
     result = _format_percent_columns(result, ["目标收益", "对比收益", "超额收益"])
     result = _format_decimal_columns(result, ["相关性"])
+    if "标的" in result.columns:
+        result = result.rename(columns={"标的": "对标对象"})
     return result
 
 
@@ -3848,8 +4019,10 @@ def _format_file_size(value: object) -> str:
 
 
 def _centered(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
-    return frame.style.set_properties(**{"text-align": "center"}).set_table_styles(
-        [{"selector": "th", "props": [("text-align", "center")]}]
+    return frame.style.set_properties(**{"text-align": "center", "color": "#1f2937"}).set_table_styles(
+        [
+            {"selector": "th", "props": [("text-align", "center"), ("color", "#1f2937")]},
+        ]
     )
 
 
@@ -3869,18 +4042,20 @@ def _review_kline_chart(result: ReviewResult, stock_names: dict[str, str] | None
             low=window["low"],
             close=window["close"],
             name=label,
-            increasing_line_color="#16a34a",
-            decreasing_line_color="#dc2626",
+            increasing_line_color=FINANCE_UP_RED,
+            increasing_fillcolor=FINANCE_UP_RED,
+            decreasing_line_color=FINANCE_DOWN_GREEN,
+            decreasing_fillcolor=FINANCE_DOWN_GREEN,
         )
     )
     for _, segment in result.main_segments.iterrows():
         direction = str(segment.get("方向", ""))
-        color = "#16a34a" if direction in {"上涨", "反弹"} else "#dc2626"
+        color = FINANCE_UP_SHADE if direction in {"上涨", "反弹"} else FINANCE_DOWN_SHADE
         fig.add_vrect(
             x0=pd.Timestamp(segment["开始日期"]).strftime("%Y-%m-%d"),
             x1=pd.Timestamp(segment["结束日期"]).strftime("%Y-%m-%d"),
             fillcolor=color,
-            opacity=0.11,
+            opacity=1,
             line_width=0,
             annotation_text=direction,
             annotation_position="top left",
@@ -3907,9 +4082,8 @@ def _review_relative_chart(target_window: pd.DataFrame, comparisons: list[tuple[
         y=target_series["close"],
         mode="lines",
         name="目标",
-        line={"width": 4, "color": "#2563eb"},
+        line={"width": 4, "color": FINANCE_PRIMARY_BLUE},
     )
-    palette = ["#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#64748b"]
     for index, (label, frame) in enumerate(comparisons):
         series = _normalized_chart_frame(frame)
         if series.empty:
@@ -3919,8 +4093,8 @@ def _review_relative_chart(target_window: pd.DataFrame, comparisons: list[tuple[
             y=series["close"],
             mode="lines",
             name=label,
-            line={"width": 2, "color": palette[index % len(palette)]},
-            opacity=0.78,
+            line={"width": 2, "color": FINANCE_PALETTE[(index + 1) % len(FINANCE_PALETTE)]},
+            opacity=0.84,
         )
     fig.update_layout(
         title="目标 / 指数 / 板块归一化走势",
@@ -3953,18 +4127,22 @@ def _cross_section_price_chart(
     fig = go.Figure()
     symbols = unique_symbols([result.target_symbol, *result.results["symbol"].head(top_n).tolist()])
     end_marker = pd.Timestamp(result.end).strftime("%Y-%m-%d")
+    compare_index = 0
     for symbol in symbols:
         window_start, _window_end = _cross_section_symbol_window(result, symbol)
         symbol_bars = bars.loc[(bars["stock_code"] == symbol) & (bars["date"] >= window_start)].sort_values("date")
         if symbol_bars.empty:
             continue
         is_target = symbol == result.target_symbol
+        line_color = FINANCE_PRIMARY_BLUE if is_target else FINANCE_PALETTE[(compare_index + 1) % len(FINANCE_PALETTE)]
+        if not is_target:
+            compare_index += 1
         fig.add_scatter(
             x=symbol_bars["date"],
             y=symbol_bars["close"],
             mode="lines",
             name=_stock_chart_label(symbol, stock_names, is_target=is_target),
-            line={"width": 4 if is_target else 1.8},
+            line={"width": 4 if is_target else 1.8, "color": line_color},
             opacity=1.0 if is_target else 0.72,
         )
     fig.add_shape(
@@ -3975,7 +4153,7 @@ def _cross_section_price_chart(
         y1=1,
         xref="x",
         yref="paper",
-        line={"color": "#2563eb", "dash": "dot", "width": 1.5},
+        line={"color": FINANCE_MARK_BLUE, "dash": "dot", "width": 1.5},
     )
     fig.add_annotation(
         x=end_marker,
@@ -3986,7 +4164,7 @@ def _cross_section_price_chart(
         showarrow=False,
         xanchor="left",
         yanchor="bottom",
-        font={"color": "#2563eb", "size": 12},
+        font={"color": FINANCE_MARK_BLUE, "size": 12},
     )
     fig.update_layout(
         title="目标区间与Top相似标的命中区间收盘价走势",
@@ -4016,12 +4194,12 @@ def _size_spread_chart(
         y=spread_frame["大小盘价差率"],
         mode="lines",
         name="大小盘价差率",
-        line={"color": "#dc2626", "width": 2},
+        line={"color": FINANCE_PRIMARY_BLUE, "width": 2},
     )
-    fig.add_hline(y=0, line={"color": "#6b7280", "dash": "dot", "width": 1})
-    _add_spread_window_vrect(fig, current_window, label="当前窗口", color="#2563eb", opacity=0.14)
+    fig.add_hline(y=0, line={"color": "#667085", "dash": "dot", "width": 1})
+    _add_spread_window_vrect(fig, current_window, label="当前窗口", color=FINANCE_SOFT_BLUE, opacity=0.48)
     for index, window in enumerate(historical_windows[:top_n], start=1):
-        _add_spread_window_vrect(fig, window, label=f"样本{index}", color="#64748b", opacity=0.07)
+        _add_spread_window_vrect(fig, window, label=f"样本{index}", color=FINANCE_SOFT_GREEN, opacity=0.22)
     fig.update_layout(
         title="大小盘价差率：中证1000 - 沪深300（2016-01-01归一）",
         xaxis_title="日期",
@@ -4054,11 +4232,18 @@ def _history_path_chart(current_window: pd.DataFrame, historical_windows: list[p
     fig = go.Figure()
     current_path = z_normalize(normalized_close_path(current_window))
     x_values = list(range(1, len(current_path) + 1))
-    fig.add_scatter(x=x_values, y=current_path, mode="lines", name="当前窗口", line={"width": 4})
+    fig.add_scatter(x=x_values, y=current_path, mode="lines", name="当前窗口", line={"width": 4, "color": FINANCE_PRIMARY_BLUE})
     for index, window in enumerate(historical_windows[:6], start=1):
         path = z_normalize(normalized_close_path(window))
         label = f"样本{index}: {_date_text(window['date'].min())} 至 {_date_text(window['date'].max())}"
-        fig.add_scatter(x=x_values, y=path, mode="lines", name=label, opacity=0.65)
+        fig.add_scatter(
+            x=x_values,
+            y=path,
+            mode="lines",
+            name=label,
+            line={"width": 2, "color": FINANCE_PALETTE[index % len(FINANCE_PALETTE)]},
+            opacity=0.82,
+        )
     fig.update_layout(title="当前窗口 vs 历史相似窗口", xaxis_title="窗口内第 N 根K线", yaxis_title="标准化路径")
     return fig
 
@@ -4233,7 +4418,7 @@ def _kline_chart_component_height(series: list[dict[str, object]]) -> int:
 
 def _kline_empty_message() -> str:
     return """
-<div style="padding:12px;border:1px solid #e5e7eb;border-radius:6px;color:#6b7280;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">
+<div style="padding:12px;border:1px solid #dce3e8;border-radius:6px;color:#667085;background:#ffffff;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">
   没有可绘制的K线数据，请检查目标与相似标的在当前区间是否有本地行情。
 </div>
 """
@@ -4246,9 +4431,9 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
     forward_size = int(item.get("forwardSize") or 0)
     if not rows:
         return f"""
-<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#ffffff;">
-  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
-  <div style="height:300px;display:flex;align-items:center;justify-content:center;color:#6b7280;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">没有可绘制的K线数据</div>
+<div data-kline-panel="1" style="border:1px solid #dce3e8;border-radius:6px;padding:10px;background:#ffffff;">
+  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#1f2937;">{title}</div>
+  <div style="height:300px;display:flex;align-items:center;justify-content:center;color:#667085;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">没有可绘制的K线数据</div>
 </div>
 """
 
@@ -4280,13 +4465,13 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
     ]
     for step in range(5):
         y = top + plot_height * step / 4
-        elements.append(f'<line x1="{left:.2f}" y1="{y:.2f}" x2="{width - right:.2f}" y2="{y:.2f}" stroke="#eef2f7" stroke-width="1"/>')
+        elements.append(f'<line x1="{left:.2f}" y1="{y:.2f}" x2="{width - right:.2f}" y2="{y:.2f}" stroke="#edf1f4" stroke-width="1"/>')
     elements.extend(
         [
-            f'<text x="4" y="{top + 4:.2f}" fill="#6b7280" font-size="10">{high:.2f}</text>',
-            f'<text x="4" y="{top + plot_height:.2f}" fill="#6b7280" font-size="10">{low:.2f}</text>',
-            f'<text x="{left:.2f}" y="{height - 14:.2f}" fill="#6b7280" font-size="10">{escape(rows[0]["time"][5:])}</text>',
-            f'<text x="{width - right:.2f}" y="{height - 14:.2f}" text-anchor="end" fill="#6b7280" font-size="10">{escape(rows[-1]["time"][5:])}</text>',
+            f'<text x="4" y="{top + 4:.2f}" fill="#667085" font-size="10">{high:.2f}</text>',
+            f'<text x="4" y="{top + plot_height:.2f}" fill="#667085" font-size="10">{low:.2f}</text>',
+            f'<text x="{left:.2f}" y="{height - 14:.2f}" fill="#667085" font-size="10">{escape(rows[0]["time"][5:])}</text>',
+            f'<text x="{width - right:.2f}" y="{height - 14:.2f}" text-anchor="end" fill="#667085" font-size="10">{escape(rows[-1]["time"][5:])}</text>',
         ]
     )
 
@@ -4298,16 +4483,16 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
             shade_x = min(width - right, divider_x + candle_width / 2)
             shade_width = max(0.0, width - right - shade_x)
             elements.append(
-                f'<rect class="forwardShade" x="{shade_x:.2f}" y="{top:.2f}" width="{shade_width:.2f}" height="{plot_height:.2f}" fill="#2563eb" opacity="0.08"/>'
+                f'<rect class="forwardShade" x="{shade_x:.2f}" y="{top:.2f}" width="{shade_width:.2f}" height="{plot_height:.2f}" fill="{FINANCE_SOFT_BLUE}" opacity="0.42"/>'
             )
         elements.append(
-            f'<line class="positionWindowDivider" x1="{divider_x:.2f}" y1="{top:.2f}" x2="{divider_x:.2f}" y2="{top + plot_height:.2f}" stroke="#2563eb" stroke-width="1.5">'
+            f'<line class="positionWindowDivider" x1="{divider_x:.2f}" y1="{top:.2f}" x2="{divider_x:.2f}" y2="{top + plot_height:.2f}" stroke="{FINANCE_MARK_BLUE}" stroke-width="1.5">'
             "<title>命中区间结束</title></line>"
         )
 
     for index, row in enumerate(rows):
         x = x_position(index)
-        color = "#d62728" if row["close"] >= row["open"] else "#2ca02c"
+        color = FINANCE_UP_RED if row["close"] >= row["open"] else FINANCE_DOWN_GREEN
         high_y = y_position(row["high"])
         low_y = y_position(row["low"])
         open_y = y_position(row["open"])
@@ -4323,10 +4508,10 @@ def _kline_svg_panel(item: dict[str, object]) -> str:
 
     svg = "\n".join(elements)
     return f"""
-<div data-kline-panel="1" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#ffffff;">
-  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#111827;">{title}</div>
+<div data-kline-panel="1" style="border:1px solid #dce3e8;border-radius:6px;padding:10px;background:#ffffff;">
+  <div style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin-bottom:6px;color:#1f2937;">{title}</div>
   <svg viewBox="0 0 420 300" role="img" aria-label="{title} K线图" style="width:100%;height:300px;display:block;">{svg}</svg>
-  <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#4b5563;margin-top:4px;">命中区间 {window_size} 根 | 后续 {forward_size} 根</div>
+  <div style="font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#667085;margin-top:4px;">命中区间 {window_size} 根 | 后续 {forward_size} 根</div>
 </div>
 """
 

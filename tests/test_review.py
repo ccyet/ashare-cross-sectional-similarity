@@ -82,7 +82,7 @@ def test_build_comparison_stats_reports_excess_return_and_strength() -> None:
     assert round(float(stats["超额收益"]), 4) == 0.08
     assert stats["同步关系"] == "同向"
     assert stats["波动关系"] == "同步跟随"
-    assert stats["强弱结论"] == "目标明显强于对比标的。"
+    assert stats["强弱结论"] == "目标明显强于对比对象。"
 
 
 def test_build_comparison_stats_reports_inverse_relationship() -> None:
@@ -176,7 +176,7 @@ def test_render_review_text_uses_data_only_language() -> None:
 
     assert "研究复盘：讲证据" in text
     assert "区间收益 30.00%" in text
-    assert "A股语境" in text
+    assert "趋势背景" in text
     assert "关键波段证据" in text
     assert "新闻" not in text
     assert "基本面" not in text
@@ -195,6 +195,9 @@ def test_render_review_text_lists_structured_benchmark_relationship() -> None:
     assert "对标关系" in text
     assert "沪深300" in text
     assert "同步跟随" in text
+    assert "趋势背景" in text
+    assert "相对强度" in text
+    assert "交易难度" in text
 
 
 def test_render_multi_review_text_summarizes_symbols_and_benchmark_relationships() -> None:
@@ -275,7 +278,8 @@ def test_rank_review_results_orders_by_strength_not_input_order() -> None:
     assert ranking["排名"].tolist() == [1, 2]
     assert ranking.loc[0, "股票"] == "稳趋势"
     assert ranking.loc[0, "强弱等级"] in {"S", "A"}
-    assert "明日验证" in ranking.columns
+    assert "交易难度" in ranking.columns
+    assert "锐评档位" in ranking.columns
 
 
 def test_render_multi_review_text_uses_ranked_critic_order() -> None:
@@ -316,11 +320,12 @@ def test_render_multi_review_text_uses_ranked_critic_order() -> None:
 
     assert "市场总环境" in text
     assert "排序锐评" in text
-    assert "第1，稳趋势" in text
-    assert "第2，高波动" in text
-    assert text.index("第1，稳趋势") < text.index("第2，高波动")
-    assert "关键点" in text
+    assert "关键转折点复盘" in text
     assert "明日验证" in text
+    assert "第1，" in text and "稳趋势" in text
+    assert "第2，" in text and "高波动" in text
+    assert text.index("稳趋势") < text.index("高波动")
+    assert "结局" in text
     assert "标的" not in text
 
 
@@ -346,8 +351,8 @@ def test_build_video_script_profile_measures_ytd_entry_exit_and_index_elasticity
     assert profile["代码"] == "000001.SZ"
     assert round(float(profile["YTD收益"]), 4) == 0.4
     assert profile["YTD结论"] == "年内正收益"
-    assert profile["买点挑战"] in {"浅回调承接", "破位左侧", "温和启动", "追高区"}
-    assert round(float(profile["买入后最大收盘回撤"]), 4) == -0.0769
+    assert profile["结构位置"] in {"浅回调承接", "破位修复", "深回调修复", "温和启动", "高位强势"}
+    assert round(float(profile["区间最大收盘回撤"]), 4) == -0.0769
     assert round(float(profile["单日最大日内回撤"]), 4) == -0.0392
     assert int(profile["指数大涨日样本"]) >= 1
     assert int(profile["指数大跌日样本"]) >= 1
@@ -367,8 +372,8 @@ def test_build_video_script_profile_uses_pre_entry_context_for_cross_year_range(
 
     profile = build_video_script_profile(result, bars)
 
-    assert profile["买点挑战"] != "数据不足"
-    assert "近20根" in str(profile["买点说明"])
+    assert profile["结构位置"] != "数据不足"
+    assert "近20根" in str(profile["结构说明"])
 
 
 def test_render_video_script_text_includes_script_structure() -> None:
@@ -384,11 +389,11 @@ def test_render_video_script_text_includes_script_structure() -> None:
 
     assert "视频脚本视角" in text
     assert "YTD" in text
-    assert "定位" in text
-    assert "入场" in text
-    assert "压力" in text
-    assert "指数弹性" in text
-    assert "明日验证" in text
+    assert "结局" in text
+    assert any(word in text for word in ["夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"])
+    assert "入场" not in text
+    assert "买点" not in text
+    assert "明日验证" not in text
     assert "标的" not in text
     assert "\n\n- " not in text
     assert "测试股" in text
@@ -411,10 +416,14 @@ def test_render_video_script_cards_html_uses_separate_highlight_cards() -> None:
     assert "测试股" in html
     assert "000001.SZ" in html
     assert "今年表现" in html
-    assert "入场难度" in html
-    assert "压力" in html
-    assert "指数弹性" in html
-    assert "明日验证" in html
+    assert "锐评档位" in html
+    assert "定性" in html
+    assert "数据" in html
+    assert "结局" in html
+    assert any(word in html for word in ["夯爆了", "人上人", "立棍单打", "刷子", "混子", "NPC", "拉完了"])
+    assert "入场" not in html
+    assert "买点" not in html
+    assert "明日验证" not in html
     assert "<li" not in html
     assert "标的" not in html
 
@@ -439,8 +448,8 @@ def test_render_multi_video_script_text_lists_each_symbol() -> None:
     assert "视频脚本视角" in text
     assert "000001.SZ" in text
     assert "600519.SH" in text
-    assert "定位" in text
-    assert "入场" in text
-    assert "压力" in text
+    assert "结局" in text
+    assert "入场" not in text
+    assert "买点" not in text
     assert "标的" not in text
     assert "\n\n- " not in text

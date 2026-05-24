@@ -139,14 +139,14 @@ def build_video_script_profile(
         ytd_window = result.window.copy()
     if available_window.empty:
         available_window = result.window.copy()
-    post_entry = available_window.loc[pd.to_datetime(available_window["date"], errors="coerce") >= result.start]
-    if post_entry.empty:
-        post_entry = result.window.copy()
+    review_hold_window = available_window.loc[pd.to_datetime(available_window["date"], errors="coerce") >= result.start]
+    if review_hold_window.empty:
+        review_hold_window = result.window.copy()
 
     ytd_return = _period_return(ytd_window["close"])
-    max_close_drawdown = max_drawdown(pd.to_numeric(post_entry["close"], errors="coerce").dropna().to_numpy(dtype=float))
-    intraday_drawdown = _max_intraday_drawdown(post_entry)
-    entry = _entry_challenge(available_window, result.start)
+    max_close_drawdown = max_drawdown(pd.to_numeric(review_hold_window["close"], errors="coerce").dropna().to_numpy(dtype=float))
+    intraday_drawdown = _max_intraday_drawdown(review_hold_window)
+    position = _structure_position(available_window, result.start)
     elasticity = _index_elasticity(
         result.window,
         benchmark,
@@ -158,10 +158,10 @@ def build_video_script_profile(
         "YTD样本起点": ytd_window["date"].min() if "date" in ytd_window.columns and not ytd_window.empty else pd.NaT,
         "YTD收益": ytd_return,
         "YTD结论": _ytd_label(ytd_return),
-        "买点挑战": entry["label"],
-        "买点位置": entry["position"],
-        "买点说明": entry["text"],
-        "买入后最大收盘回撤": max_close_drawdown,
+        "结构位置": position["label"],
+        "结构分位": position["position"],
+        "结构说明": position["text"],
+        "区间最大收盘回撤": max_close_drawdown,
         "单日最大日内回撤": intraday_drawdown,
         **elasticity,
     }
@@ -263,6 +263,8 @@ def rank_review_results(
                 "相对超额",
                 "关键转折点",
                 "当前性质",
+                "交易难度",
+                "锐评档位",
                 "锐评结论",
                 "明日验证",
                 "排序分",
@@ -278,16 +280,20 @@ def rank_review_results(
         drawdown = _numeric_value(overview.get("max_drawdown"))
         up_share = _numeric_value(overview.get("up_day_share"))
         excess = _numeric_value(comparison.get("超额收益"))
+        correlation = _numeric_value(comparison.get("相关性"))
         nature = _lifecycle_label(overview)
         turning_point = _turning_point_label(result.window)
-        score = _ranking_score(period_return, drawdown, up_share, excess, nature)
-        grade = _ranking_grade(period_return, drawdown, up_share, excess, nature, score)
+        index_phase = _index_phase_label(comparison.get("对比收益"))
+        score = _ranking_score(period_return, drawdown, up_share, excess, nature, index_phase, turning_point)
+        meme_tier = _meme_tier(nature, period_return, drawdown, excess, up_share, correlation, turning_point)
+        grade = _tier_grade(meme_tier)
+        difficulty = _trade_difficulty_label(drawdown, up_share, _numeric_value(overview.get("amplitude")))
         rows.append(
             {
                 "代码": result.symbol,
                 "股票": str((stock_names or {}).get(result.symbol, "") or "").strip(),
                 "对标指数": comparison.get("标的", "-") or "-",
-                "指数阶段": _index_phase_label(comparison.get("对比收益")),
+                "指数阶段": index_phase,
                 "强弱等级": grade,
                 "区间收益": period_return,
                 "最大回撤": drawdown,
@@ -295,8 +301,10 @@ def rank_review_results(
                 "相对超额": excess,
                 "关键转折点": turning_point,
                 "当前性质": nature,
-                "锐评结论": _ranking_critique(grade, nature, excess),
-                "明日验证": _ranking_tomorrow_check(turning_point, nature, grade),
+                "交易难度": difficulty,
+                "锐评档位": meme_tier,
+                "锐评结论": _ranking_critique(meme_tier, nature, excess, drawdown, turning_point),
+                "明日验证": _ranking_verification(meme_tier, turning_point, nature),
                 "排序分": score,
             }
         )
@@ -328,24 +336,21 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
   gap: 0.9rem;
 }}
 .review-script-card {{
-  border: 1px solid #e5e7eb;
-  border-left: 5px solid #64748b;
-  border-radius: 8px;
+  border: 1px solid #dce3e8;
+  border-left: 5px solid #cad2c5;
+  border-radius: 7px;
   background: #ffffff;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 6px 18px rgba(54, 54, 54, 0.06);
   padding: 0.95rem 1rem;
 }}
 .review-script-card.positive {{
-  border-left-color: #16a34a;
-  background: linear-gradient(90deg, rgba(22, 163, 74, 0.08), #ffffff 34%);
+  border-left-color: #ff4d4f;
 }}
 .review-script-card.negative {{
-  border-left-color: #dc2626;
-  background: linear-gradient(90deg, rgba(220, 38, 38, 0.08), #ffffff 34%);
+  border-left-color: #00b050;
 }}
 .review-script-card.neutral {{
-  border-left-color: #2563eb;
-  background: linear-gradient(90deg, rgba(37, 99, 235, 0.08), #ffffff 34%);
+  border-left-color: #cad2c5;
 }}
 .review-script-head {{
   display: flex;
@@ -356,7 +361,7 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
 }}
 .review-script-kicker {{
   display: block;
-  color: #64748b;
+  color: #667085;
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0;
@@ -366,14 +371,14 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
   font-size: 1.05rem;
   line-height: 1.25;
   font-weight: 800;
-  color: #111827;
+  color: #1f2937;
   margin: 0;
 }}
 .review-script-code {{
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #334155;
+  background: #f3f6f5;
+  color: #1f2937;
   font-size: 0.76rem;
   font-weight: 700;
   padding: 0.18rem 0.48rem;
@@ -385,41 +390,41 @@ def render_video_script_cards_html(profiles: list[dict[str, object]] | tuple[dic
   margin-bottom: 0.78rem;
 }}
 .review-script-metric {{
-  border: 1px solid #eef2f7;
+  border: 1px solid #edf1f4;
   border-radius: 6px;
-  background: #f8fafc;
+  background: #f6f8fa;
   padding: 0.48rem 0.55rem;
 }}
 .review-script-label {{
   display: block;
-  color: #64748b;
+  color: #667085;
   font-size: 0.72rem;
   line-height: 1.2;
   margin-bottom: 0.14rem;
 }}
 .review-script-value {{
   display: block;
-  color: #111827;
+  color: #1f2937;
   font-size: 0.92rem;
   font-weight: 800;
   line-height: 1.25;
 }}
 .review-script-value.good {{
-  color: #15803d;
+  color: #ff4d4f;
 }}
 .review-script-value.bad {{
-  color: #b91c1c;
+  color: #00b050;
 }}
 .review-script-value.warn {{
-  color: #b45309;
+  color: #475467;
 }}
 .review-script-section {{
-  border-top: 1px solid #eef2f7;
+  border-top: 1px solid #edf1f4;
   padding-top: 0.62rem;
   margin-top: 0.62rem;
 }}
 .review-script-section-title {{
-  color: #334155;
+  color: #1f2937;
   font-size: 0.78rem;
   font-weight: 800;
   margin-bottom: 0.22rem;
@@ -452,6 +457,11 @@ def render_review_text(
     overview = result.overview
     title = _review_display_label(result.symbol, stock_names)
     lifecycle = _lifecycle_label(overview)
+    difficulty = _trade_difficulty_label(
+        _numeric_value(overview.get("max_drawdown")),
+        _numeric_value(overview.get("up_day_share")),
+        _numeric_value(overview.get("amplitude")),
+    )
     lines = [
         (
             f"**研究复盘：讲证据**\n\n"
@@ -460,9 +470,11 @@ def render_review_text(
             f"最大浮盈 {_percent(overview['max_favorable'])}，上涨K线占比 {_percent(overview['up_day_share'])}。"
         ),
         (
-            f"**A股语境**：这段走势暂归为“{lifecycle}”。"
+            f"**趋势背景**：这段走势暂归为“{lifecycle}”。"
             f"{_lifecycle_conclusion(lifecycle)}"
-        )
+        ),
+        f"**相对强度**：{_single_relative_strength_text(comparisons)}",
+        f"**交易难度**：{difficulty}。{_trade_difficulty_explanation(difficulty)}",
     ]
     if result.main_segments.empty:
         lines.append("**波段结构**：所选区间没有达到阈值的主要上涨或回撤段，走势更接近震荡或小幅单边变化。")
@@ -504,23 +516,27 @@ def render_multi_review_text(
             f"排序第一是 {_ranking_row_title(best)}，最后是 {_ranking_row_title(worst)}。"
         ),
         f"**市场总环境**：{_market_environment_text(comparisons)}",
-        "**排序锐评**：",
+        "**排序总表**：不按代码顺序，按指数环境、相对强弱、关键转折点和A股语境排序。",
+        "**逐个排序锐评**：",
     ]
     for _, row in ranking.iterrows():
         lines.append(
             "\n".join(
                 [
-                    f"**第{int(row['排名'])}，{_ranking_row_title(row)}。**",
-                    f"它排在这里，是因为{_ranking_reason(row)}。",
-                    (
-                        f"数据上看，区间收益 {_percent(row['区间收益'])}，最大回撤 {_percent(row['最大回撤'])}，"
-                        f"相对超额 {_percent(row['相对超额'])}，属于{row['当前性质']}。"
-                    ),
-                    f"关键点在{row['关键转折点']}。明日验证：{row['明日验证']}",
-                    f"一句话：{row['锐评结论']}",
+                    f"**第{int(row['排名'])}，{row['锐评档位']}，{_ranking_row_title(row)}。**",
+                    _ranking_setup_sentence(row),
+                    _ranking_data_sentence(row),
+                    f"结局：{row['锐评结论']}",
                 ]
             )
         )
+    if not ranking.empty:
+        lines.append("**关键转折点复盘**：")
+        for _, row in ranking.iterrows():
+            lines.append(f"- {_ranking_row_title(row)}：{_ranking_turning_review(row)}")
+        lines.append("**明日验证（只给条件，不做预测）**：")
+        for _, row in ranking.iterrows():
+            lines.append(f"- {_ranking_row_title(row)}：{row['明日验证']}")
     if comparisons is not None and not comparisons.empty:
         if "代码" not in comparisons.columns:
             lines.extend(_comparison_text_lines(comparisons))
@@ -538,6 +554,8 @@ def render_multi_review_text(
                 )
             if len(relation_lines) > 1:
                 lines.extend(relation_lines)
+    if not ranking.empty:
+        lines.append(f"**收束总结**：{_ranking_summary_line(ranking)}")
     return "\n\n".join(lines)
 
 
@@ -547,17 +565,17 @@ def _empty_video_script_profile(symbol: str, benchmark_label: str) -> dict[str, 
         "YTD样本起点": pd.NaT,
         "YTD收益": float("nan"),
         "YTD结论": "数据不足",
-        "买点挑战": "数据不足",
-        "买点位置": float("nan"),
-        "买点说明": "所选区间没有可用K线，无法判断买点挑战性。",
-        "买入后最大收盘回撤": float("nan"),
+        "结构位置": "数据不足",
+        "结构分位": float("nan"),
+        "结构说明": "所选区间没有可用K线，无法判断结构位置。",
+        "区间最大收盘回撤": float("nan"),
         "单日最大日内回撤": float("nan"),
         "指数": benchmark_label,
         "指数大涨日样本": 0,
-        "指数大涨日标的均值": float("nan"),
+        "指数大涨日本品种均值": float("nan"),
         "指数大涨日指数均值": float("nan"),
         "指数大跌日样本": 0,
-        "指数大跌日标的均值": float("nan"),
+        "指数大跌日本品种均值": float("nan"),
         "指数大跌日指数均值": float("nan"),
         "指数弹性结论": "数据不足，无法判断指数弹性。",
     }
@@ -590,31 +608,31 @@ def _script_price_window(
     return frame[columns].sort_values("date").reset_index(drop=True)
 
 
-def _entry_challenge(ytd_window: pd.DataFrame, entry_date: pd.Timestamp) -> dict[str, object]:
+def _structure_position(ytd_window: pd.DataFrame, start_date: pd.Timestamp) -> dict[str, object]:
     if ytd_window.empty:
-        return {"label": "数据不足", "position": float("nan"), "text": "没有足够的买点前序数据。"}
+        return {"label": "数据不足", "position": float("nan"), "text": "没有足够的前序K线。"}
     frame = ytd_window.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.loc[frame["date"] <= pd.Timestamp(entry_date)].sort_values("date").tail(20)
+    frame = frame.loc[frame["date"] <= pd.Timestamp(start_date)].sort_values("date").tail(20)
     if frame.empty:
-        return {"label": "数据不足", "position": float("nan"), "text": "没有足够的买点前序数据。"}
-    entry = frame.iloc[-1]
-    entry_close = float(pd.to_numeric(pd.Series([entry["close"]]), errors="coerce").iloc[0])
-    entry_open = float(pd.to_numeric(pd.Series([entry.get("open", entry_close)]), errors="coerce").iloc[0])
+        return {"label": "数据不足", "position": float("nan"), "text": "没有足够的前序K线。"}
+    anchor = frame.iloc[-1]
+    anchor_close = float(pd.to_numeric(pd.Series([anchor["close"]]), errors="coerce").iloc[0])
+    anchor_open = float(pd.to_numeric(pd.Series([anchor.get("open", anchor_close)]), errors="coerce").iloc[0])
     highs = pd.to_numeric(frame.get("high", frame["close"]), errors="coerce")
     lows = pd.to_numeric(frame.get("low", frame["close"]), errors="coerce")
     closes = pd.to_numeric(frame["close"], errors="coerce")
     high_value = float(highs.max())
     low_value = float(lows.min())
-    position = (entry_close - low_value) / (high_value - low_value) if high_value > low_value else float("nan")
-    drawdown_from_high = entry_close / high_value - 1.0 if high_value else float("nan")
-    prior_return = entry_close / float(closes.iloc[0]) - 1.0 if len(closes) >= 2 and closes.iloc[0] else 0.0
-    candle_return = entry_close / entry_open - 1.0 if entry_open else 0.0
+    position = (anchor_close - low_value) / (high_value - low_value) if high_value > low_value else float("nan")
+    drawdown_from_high = anchor_close / high_value - 1.0 if high_value else float("nan")
+    prior_return = anchor_close / float(closes.iloc[0]) - 1.0 if len(closes) >= 2 and closes.iloc[0] else 0.0
+    candle_return = anchor_close / anchor_open - 1.0 if anchor_open else 0.0
 
     if math.isfinite(position) and position >= 0.85 and prior_return >= 0.12:
-        label = "追高区"
+        label = "高位强势"
     elif math.isfinite(drawdown_from_high) and drawdown_from_high <= -0.12:
-        label = "破位左侧" if prior_return <= -0.08 else "深回调左侧"
+        label = "破位修复" if prior_return <= -0.08 else "深回调修复"
     elif math.isfinite(drawdown_from_high) and -0.12 < drawdown_from_high <= -0.03:
         label = "浅回调承接"
     elif candle_return > 0 and abs(candle_return) <= 0.03:
@@ -623,9 +641,9 @@ def _entry_challenge(ytd_window: pd.DataFrame, entry_date: pd.Timestamp) -> dict
         label = "中性观察"
 
     text = (
-        f"买点位于近20根区间的 {_percent(position)} 分位，"
-        f"距近20根高点 {_percent(drawdown_from_high)}，"
-        f"买入日收盘相对开盘 {_percent(candle_return)}。"
+        f"起点处在近20根区间的 {_percent(position)} 分位，"
+        f"离近20根高点 {_percent(drawdown_from_high)}，"
+        f"当天收盘较开盘 {_percent(candle_return)}。"
     )
     return {"label": label, "position": position, "text": text}
 
@@ -649,10 +667,10 @@ def _index_elasticity(
     base = {
         "指数": benchmark_label,
         "指数大涨日样本": 0,
-        "指数大涨日标的均值": float("nan"),
+        "指数大涨日本品种均值": float("nan"),
         "指数大涨日指数均值": float("nan"),
         "指数大跌日样本": 0,
-        "指数大跌日标的均值": float("nan"),
+        "指数大跌日本品种均值": float("nan"),
         "指数大跌日指数均值": float("nan"),
         "指数弹性结论": "数据不足，无法判断指数弹性。",
     }
@@ -677,10 +695,10 @@ def _index_elasticity(
     base.update(
         {
             "指数大涨日样本": int(len(up)),
-            "指数大涨日标的均值": up_target,
+            "指数大涨日本品种均值": up_target,
             "指数大涨日指数均值": up_index,
             "指数大跌日样本": int(len(down)),
-            "指数大跌日标的均值": down_target,
+            "指数大跌日本品种均值": down_target,
             "指数大跌日指数均值": down_index,
             "指数弹性结论": _elasticity_label(up_target, down_target),
         }
@@ -705,28 +723,13 @@ def _ytd_label(value: float) -> str:
 
 
 def _video_script_profile_block(profile: dict[str, object]) -> str:
-    title = _video_script_title(profile)
-    setup = _video_setup_sentence(profile)
-    turning_point = str(profile.get("关键转折点", "") or "").strip()
-    turning_line = f"**关键点**：{turning_point}。" if turning_point else ""
+    tier = _video_meme_tier(profile)
     return "\n\n".join(
         [line for line in [
-            f"**{title}**",
-            f"**定位**：{setup}",
-            f"**入场**：{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}",
-            (
-                f"**压力**：入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
-                f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
-            ),
-            (
-                f"**指数弹性**：{profile.get('指数', '指数')}上涨日 {profile.get('指数大涨日样本', 0)} 天，"
-                f"这只票平均 {_percent(profile.get('指数大涨日标的均值'))}，指数平均 {_percent(profile.get('指数大涨日指数均值'))}；"
-                f"下跌日 {profile.get('指数大跌日样本', 0)} 天，"
-                f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
-                f"{profile.get('指数弹性结论', '')}"
-            ),
-            turning_line,
-            f"**明日验证**：{_video_tomorrow_check(profile)}",
+            f"**{_video_rank_title(profile, tier)}。**",
+            _video_setup_sentence(profile),
+            _video_data_line(profile),
+            f"结局：{_video_meme_line(profile, tier)}",
         ] if line]
     )
 
@@ -736,28 +739,14 @@ def _video_script_profile_card_html(profile: dict[str, object]) -> str:
     symbol = str(profile.get("代码", "") or "").strip()
     theme = _video_script_card_theme(profile.get("YTD收益"))
     ytd_class = _video_value_class(profile.get("YTD收益"), positive_is_good=True)
-    drawdown_class = _video_value_class(profile.get("买入后最大收盘回撤"), positive_is_good=False)
-    intraday_class = _video_value_class(profile.get("单日最大日内回撤"), positive_is_good=False)
+    drawdown_class = "warn"
     code_badge = ""
     if symbol and symbol != title:
         code_badge = f'<span class="review-script-code">{html_escape(symbol)}</span>'
 
     setup_text = _video_setup_sentence(profile)
-    entry_text = f"{profile.get('买点挑战', '数据不足')}。{_video_entry_text(profile.get('买点说明'))}"
-    pressure_text = (
-        f"入场后最大收盘回撤 {_percent(profile.get('买入后最大收盘回撤'))}，"
-        f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
-    )
-    elasticity_text = (
-        f"{profile.get('指数', '指数')}上涨日 {profile.get('指数大涨日样本', 0)} 天，"
-        f"这只票平均 {_percent(profile.get('指数大涨日标的均值'))}，指数平均 {_percent(profile.get('指数大涨日指数均值'))}；"
-        f"下跌日 {profile.get('指数大跌日样本', 0)} 天，"
-        f"这只票平均 {_percent(profile.get('指数大跌日标的均值'))}，指数平均 {_percent(profile.get('指数大跌日指数均值'))}。"
-        f"{profile.get('指数弹性结论', '')}"
-    )
-    turning_point = str(profile.get("关键转折点", "") or "").strip()
-    turning_section = _video_card_section_html("关键点", f"{turning_point}。") if turning_point else ""
-    tomorrow_text = _video_tomorrow_check(profile)
+    tier = _video_meme_tier(profile)
+    meme_line = _video_meme_line(profile, tier)
     return f"""
 <article class="review-script-card {theme}">
   <header class="review-script-head">
@@ -768,17 +757,14 @@ def _video_script_profile_card_html(profile: dict[str, object]) -> str:
     {code_badge}
   </header>
   <div class="review-script-metrics">
+    {_video_metric_html("锐评档位", tier)}
+    {_video_metric_html("强弱等级", str(profile.get("强弱等级", "") or "-"))}
     {_video_metric_html("今年表现", _percent(profile.get("YTD收益")), ytd_class)}
-    {_video_metric_html("入场难度", str(profile.get("买点挑战", "数据不足")))}
-    {_video_metric_html("收盘回撤", _percent(profile.get("买入后最大收盘回撤")), drawdown_class)}
-    {_video_metric_html("日内回撤", _percent(profile.get("单日最大日内回撤")), intraday_class)}
+    {_video_metric_html("收盘回撤", _percent(profile.get("区间最大收盘回撤")), drawdown_class)}
   </div>
-  {_video_card_section_html("定位", setup_text)}
-  {_video_card_section_html("入场", entry_text)}
-  {_video_card_section_html("压力", pressure_text)}
-  {_video_card_section_html("指数弹性", elasticity_text)}
-  {turning_section}
-  {_video_card_section_html("明日验证", tomorrow_text)}
+  {_video_card_section_html("定性", setup_text)}
+  {_video_card_section_html("数据", _video_data_line(profile))}
+  {_video_card_section_html("结局", meme_line)}
 </article>
 """.strip()
 
@@ -832,18 +818,35 @@ def _video_script_title(profile: dict[str, object]) -> str:
     return name or symbol
 
 
+def _video_rank_title(profile: dict[str, object], tier: str) -> str:
+    rank = _numeric_value(profile.get("排名"))
+    title = _video_script_title(profile)
+    if math.isfinite(rank):
+        return f"第{int(rank)}，{tier}，{title}"
+    return f"{tier}，{title}"
+
+
 def _video_setup_sentence(profile: dict[str, object]) -> str:
     rank = _numeric_value(profile.get("排名"))
-    grade = str(profile.get("强弱等级", "") or "").strip()
     nature = str(profile.get("当前性质", "") or "").strip()
-    critique = str(profile.get("锐评结论", "") or "").strip()
-    if math.isfinite(rank) and grade and nature:
-        prefix = f"第{int(rank)}，强弱等级{grade}，当前是{nature}。"
-        return f"{prefix}{critique}" if critique else prefix
+    tier = _video_meme_tier(profile)
+    if math.isfinite(rank) and nature:
+        if tier == "夯爆了":
+            return f"全场弹性最疯，涨起来猛，砸起来也猛，当前是{nature}。"
+        if tier == "人上人":
+            return f"主线核心感更强，资金真干，当前是{nature}。"
+        if tier == "立棍单打":
+            return f"不完全跟指数，自己立棍，当前是{nature}。"
+        if tier == "刷子":
+            return f"涨幅看着还行，但持有体验一般，当前是{nature}。"
+        if tier == "混子":
+            return f"跟着环境动，没有打出强地位，当前是{nature}。"
+        if tier == "NPC":
+            return f"名字有存在感，走势还没给态度，当前是{nature}。"
+        return f"这一波大概率被薅过一轮，当前是{nature}。"
 
     ytd = profile.get("YTD收益")
-    entry_label = str(profile.get("买点挑战", "数据不足") or "数据不足")
-    drawdown = _video_numeric(profile.get("买入后最大收盘回撤"))
+    drawdown = _video_numeric(profile.get("区间最大收盘回撤"))
     ytd_text = f"YTD {_percent(ytd)}，{_video_ytd_phrase(ytd)}"
     if _video_numeric(ytd) >= 0.20 and math.isfinite(drawdown) and drawdown > -0.12:
         position = "主线硬货"
@@ -854,32 +857,79 @@ def _video_setup_sentence(profile: dict[str, object]) -> str:
     elif _video_numeric(ytd) < 0:
         position = "弱势修复"
         comment = "不是没反弹，是现在还没走出地位。"
-    elif entry_label in {"追高区", "温和启动"}:
-        position = "趋势观察"
-        comment = "方向不差，但不要只凭热度追。"
     else:
         position = "轮动观察"
-        comment = "有机会，但还要看承接和放量。"
+        comment = "有存在感，但别强行封神。"
     return f"{ytd_text}这段更像{position}。{comment}"
 
 
-def _video_tomorrow_check(profile: dict[str, object]) -> str:
-    ranked_check = str(profile.get("明日验证", "") or "").strip()
-    if ranked_check:
-        return ranked_check
+def _video_data_line(profile: dict[str, object]) -> str:
+    if "区间收益" in profile or "相对超额" in profile:
+        return (
+            f"收益 {_percent(profile.get('区间收益'))}，"
+            f"回撤 {_percent(profile.get('区间最大收盘回撤'))}，"
+            f"超额 {_percent(profile.get('相对超额'))}。"
+        )
+    return (
+        f"YTD {_percent(profile.get('YTD收益'))}，"
+        f"最大收盘回撤 {_percent(profile.get('区间最大收盘回撤'))}，"
+        f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
+    )
 
-    entry_label = str(profile.get("买点挑战", "") or "")
+
+def _video_meme_tier(profile: dict[str, object]) -> str:
+    ranked = str(profile.get("锐评档位", "") or "").strip()
+    if ranked:
+        return ranked
     ytd = _video_numeric(profile.get("YTD收益"))
-    drawdown = _video_numeric(profile.get("买入后最大收盘回撤"))
-    if entry_label == "追高区":
-        return "重点看高开后能不能继续放量；如果高开低走，就是先手资金兑现。"
-    if entry_label == "浅回调承接":
-        return "重点看回踩是否缩量、是否守住近端低点；守得住像洗盘，守不住就是转弱。"
-    if math.isfinite(ytd) and ytd < 0:
-        return "重点看反弹有没有放量；没有放量，就别急着把弱修复当主升。"
-    if math.isfinite(drawdown) and drawdown <= -0.15:
-        return "重点看大跌日能不能收回来；能收回来是弹性，收不回来就是风险。"
-    return "重点看承接。强的缩量回踩不破，才说明资金还在；高开低走就要防兑现。"
+    drawdown = _video_numeric(profile.get("区间最大收盘回撤"))
+    if math.isfinite(ytd) and ytd >= 0.25:
+        return "夯爆了"
+    if math.isfinite(ytd) and ytd >= 0.12 and math.isfinite(drawdown) and drawdown > -0.16:
+        return "人上人"
+    if math.isfinite(ytd) and ytd >= 0.08:
+        return "刷子"
+    if math.isfinite(ytd) and ytd >= 0:
+        return "混子"
+    if math.isfinite(ytd) and ytd > -0.10:
+        return "NPC"
+    return "拉完了"
+
+
+def _video_trade_difficulty_label(profile: dict[str, object]) -> str:
+    ranked = str(profile.get("交易难度", "") or "").strip()
+    if ranked:
+        return ranked
+    return _trade_difficulty_label(
+        _video_numeric(profile.get("区间最大收盘回撤")),
+        float("nan"),
+        abs(_video_numeric(profile.get("单日最大日内回撤"))),
+    )
+
+
+def _video_trade_difficulty_sentence(profile: dict[str, object]) -> str:
+    label = _video_trade_difficulty_label(profile)
+    return (
+        f"{label}。最大收盘回撤 {_percent(profile.get('区间最大收盘回撤'))}，"
+        f"单日日内最大回撤 {_percent(profile.get('单日最大日内回撤'))}。"
+        f"{_trade_difficulty_explanation(label)}"
+    )
+
+
+def _video_meme_line(profile: dict[str, object], tier: str) -> str:
+    critique = str(profile.get("锐评结论", "") or "").strip()
+    if critique:
+        return critique
+    mapping = {
+        "夯爆了": "夯爆了，但别信仰，主线一回归它就容易让位。",
+        "人上人": "主线硬货，不是蹭热度的。",
+        "立棍单打": "有肉但不顺，容易甩人。",
+        "刷子": "看着能涨，但别把它当信仰。",
+        "混子": "弱修复，不是主战场。",
+        "NPC": "没放量突破之前，别硬吹。",
+        "拉完了": "当初爱过，现在算了。",
+    }
+    return mapping.get(tier, "有波动，但地位还要靠数据说话。")
 
 
 def _video_ytd_phrase(value: object) -> str:
@@ -891,17 +941,6 @@ def _video_ytd_phrase(value: object) -> str:
     if numeric < 0:
         return "今年还没有真正赚钱。"
     return "今年基本打平。"
-
-
-def _video_entry_text(text: object) -> str:
-    cleaned = str(text or "").strip()
-    if not cleaned:
-        return "前序K线不够，入场位置暂时不下结论。"
-    cleaned = cleaned.replace("买点位于", "买点在")
-    cleaned = cleaned.replace("近20根区间", "近20根走势")
-    cleaned = cleaned.replace("距近20根高点", "离近20根高点")
-    cleaned = cleaned.replace("买入日收盘相对开盘", "当天收盘较开盘")
-    return cleaned
 
 
 def _prepare_review_window(bars: pd.DataFrame, symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -1161,14 +1200,14 @@ def _strength_label(excess: float) -> str:
     if not math.isfinite(excess):
         return "数据不足，无法比较。"
     if excess >= 0.05:
-        return "目标明显强于对比标的。"
+        return "目标明显强于对比对象。"
     if excess >= 0.01:
-        return "目标略强于对比标的。"
+        return "目标略强于对比对象。"
     if excess <= -0.05:
-        return "目标明显弱于对比标的。"
+        return "目标明显弱于对比对象。"
     if excess <= -0.01:
-        return "目标略弱于对比标的。"
-    return "目标与对比标的基本同步。"
+        return "目标略弱于对比对象。"
+    return "目标与对比对象基本同步。"
 
 
 def _relationship_label(corr: float) -> str:
@@ -1232,34 +1271,35 @@ def _ranking_row_title(row: pd.Series | None) -> str:
     return f"{name}（{symbol}）" if name else symbol
 
 
-def _ranking_score(period_return: float, drawdown: float, up_share: float, excess: float, nature: str) -> float:
-    excess_score = _clamp((excess + 0.20) / 0.50, 0.0, 1.0) * 35.0 if math.isfinite(excess) else 12.0
-    drawdown_score = _clamp((drawdown + 0.35) / 0.35, 0.0, 1.0) * 25.0 if math.isfinite(drawdown) else 8.0
-    return_score = _clamp((period_return + 0.10) / 0.60, 0.0, 1.0) * 25.0 if math.isfinite(period_return) else 6.0
-    smooth_score = _clamp(up_share, 0.0, 1.0) * 15.0 if math.isfinite(up_share) else 5.0
-    nature_adjust = {
-        "主升": 8.0,
-        "温和启动": 4.0,
-        "弹性冲浪": 1.0,
-        "震荡修复": 0.0,
-        "弱势反抽": -5.0,
-        "走弱": -10.0,
-    }.get(nature, 0.0)
-    return float(excess_score + drawdown_score + return_score + smooth_score + nature_adjust)
+def _ranking_score(
+    period_return: float,
+    drawdown: float,
+    up_share: float,
+    excess: float,
+    nature: str,
+    index_phase: str,
+    turning_point: str,
+) -> float:
+    index_score = _index_phase_score(index_phase) * 25.0
+    excess_score = _clamp((excess + 0.18) / 0.45, 0.0, 1.0) * 18.0 if math.isfinite(excess) else 6.0
+    drawdown_score = _clamp((drawdown + 0.32) / 0.32, 0.0, 1.0) * 10.0 if math.isfinite(drawdown) else 3.0
+    smooth_score = _clamp(up_share, 0.0, 1.0) * 7.0 if math.isfinite(up_share) else 2.0
+    strength_score = excess_score + drawdown_score + smooth_score
+    turning_score = _turning_point_score(turning_point, period_return, drawdown) * 25.0
+    context_score = _a_share_context_score(nature, period_return, drawdown, excess) * 15.0
+    return float(index_score + strength_score + turning_score + context_score)
 
 
-def _ranking_grade(period_return: float, drawdown: float, up_share: float, excess: float, nature: str, score: float) -> str:
-    if nature == "走弱" or (math.isfinite(period_return) and period_return < -0.08):
-        return "D"
-    if math.isfinite(excess) and excess >= 0.15 and math.isfinite(drawdown) and drawdown > -0.12 and up_share >= 0.5:
-        return "S"
-    if score >= 70:
-        return "A"
-    if score >= 55:
-        return "B"
-    if score >= 40:
-        return "C"
-    return "D"
+def _tier_grade(tier: str) -> str:
+    return {
+        "夯爆了": "S",
+        "人上人": "A",
+        "立棍单打": "B",
+        "刷子": "C",
+        "混子": "D",
+        "NPC": "E",
+        "拉完了": "F",
+    }.get(tier, "E")
 
 
 def _ranking_reason(row: pd.Series) -> str:
@@ -1275,30 +1315,232 @@ def _ranking_reason(row: pd.Series) -> str:
     return "收益、回撤和上涨K占比的综合位置更靠前"
 
 
-def _ranking_critique(grade: str, nature: str, excess: float) -> str:
-    if grade == "S":
-        return "这个是真强，资金真干了，不是蹭行情。"
-    if grade == "A":
-        return "趋势还在，等回踩比追高舒服。"
-    if grade == "B":
-        return "有肉，但别信仰，节奏比信念更重要。"
-    if grade == "C":
-        return "便宜不等于强，低位不等于启动，现在只能先看修复。"
-    if nature == "弱势反抽" or (math.isfinite(excess) and excess < -0.05):
-        return "看着动了，其实还没地位。"
-    return "这一段大概率被薅得差不多了，先看风险。"
+def _ranking_relative_strength_line(row: pd.Series) -> str:
+    excess = _numeric_value(row.get("相对超额"))
+    grade = str(row.get("强弱等级", "") or "")
+    if math.isfinite(excess) and excess >= 0.15:
+        return f"相对超额 {_percent(excess)}，强弱等级{grade}，是真正跑出地位的一档。"
+    if math.isfinite(excess) and excess >= 0.03:
+        return f"相对超额 {_percent(excess)}，强弱等级{grade}，比对标对象更硬一些。"
+    if math.isfinite(excess) and excess <= -0.05:
+        return f"相对超额 {_percent(excess)}，强弱等级{grade}，涨跌都还跟不上环境。"
+    if math.isfinite(excess):
+        return f"相对超额 {_percent(excess)}，强弱等级{grade}，基本是跟随而不是独立主线。"
+    return f"缺少有效对标超额，强弱等级{grade}，先按自身走势判断。"
 
 
-def _ranking_tomorrow_check(turning_point: str, nature: str, grade: str) -> str:
+def _single_relative_strength_text(comparisons: pd.DataFrame | None) -> str:
+    if comparisons is None or comparisons.empty:
+        return "缺少对标数据，暂按自身收益、回撤和上涨K占比判断强弱。"
+    valid = comparisons.dropna(subset=["超额收益"]) if "超额收益" in comparisons.columns else pd.DataFrame()
+    if valid.empty:
+        return "对标样本不足，暂按自身走势判断强弱。"
+    strongest = valid.iloc[pd.to_numeric(valid["超额收益"], errors="coerce").abs().argmax()]
+    excess = _numeric_value(strongest.get("超额收益"))
+    label = strongest.get("标的", "对标对象")
+    relation = strongest.get("波动关系", "数据不足")
+    if math.isfinite(excess) and excess > 0:
+        return f"相对{label}超额 {_percent(excess)}，波动关系{relation}，说明它比环境更硬。"
+    if math.isfinite(excess) and excess < 0:
+        return f"相对{label}超额 {_percent(excess)}，波动关系{relation}，强度暂时落后。"
+    return f"相对{label}基本同步，波动关系{relation}，更多是跟随环境。"
+
+
+def _trade_difficulty_label(drawdown: float, up_share: float, amplitude: float) -> str:
+    if (math.isfinite(drawdown) and drawdown <= -0.25) or (math.isfinite(amplitude) and amplitude >= 0.55):
+        return "极高"
+    if (math.isfinite(drawdown) and drawdown <= -0.15) or (math.isfinite(up_share) and up_share < 0.42):
+        return "高"
+    if (math.isfinite(drawdown) and drawdown <= -0.08) or (math.isfinite(up_share) and up_share < 0.50):
+        return "中"
+    return "低"
+
+
+def _trade_difficulty_explanation(label: str) -> str:
+    mapping = {
+        "低": "趋势相对顺，交易上主要怕追太急。",
+        "中": "能拿，但会有正常晃动，仓位和节奏要控制。",
+        "高": "波动会明显考验持仓，容易赚钱也容易被洗出去。",
+        "极高": "这是高波动战场，情绪价值高，交易容错低。",
+    }
+    return mapping.get(label, "交易难度暂时无法稳定判断。")
+
+
+def _meme_tier(
+    nature: str,
+    period_return: float,
+    drawdown: float,
+    excess: float,
+    up_share: float,
+    correlation: float,
+    turning_point: str,
+) -> str:
+    if _is_finished(period_return, drawdown, excess, turning_point, nature):
+        return "拉完了"
+    if math.isfinite(period_return) and period_return >= 0.20 and math.isfinite(excess) and excess >= 0.05:
+        return "夯爆了"
+    if (
+        math.isfinite(excess)
+        and excess >= 0.12
+        and math.isfinite(drawdown)
+        and drawdown > -0.14
+        and math.isfinite(up_share)
+        and up_share >= 0.48
+    ):
+        return "人上人"
+    if math.isfinite(period_return) and period_return >= 0.08 and math.isfinite(correlation) and abs(correlation) <= 0.35:
+        return "立棍单打"
+    if math.isfinite(period_return) and period_return >= 0.08:
+        return "刷子"
+    if math.isfinite(excess) and abs(excess) <= 0.03 and nature not in {"走弱", "弱势反抽"}:
+        return "混子"
+    return "NPC"
+
+
+def _ranking_critique(tier: str, nature: str, excess: float, drawdown: float, turning_point: str) -> str:
+    if tier == "夯爆了":
+        return "夯爆了，但别信仰，涨得猛也砸得狠。"
+    if tier == "人上人":
+        return "主线硬货，不是蹭热度的。"
+    if tier == "立棍单打":
+        return "有肉但不顺，容易甩人。"
+    if tier == "刷子":
+        return "涨幅好看，但持有体验一般，别直接当主线。"
+    if tier == "混子":
+        return "跟着环境晃，没有明显超额。"
+    if tier == "NPC":
+        return "名字可以，走势没给态度。"
+    if "长上影" in turning_point or "高开低走" in turning_point:
+        return "这一波被薅干净了，谁接谁站岗。"
+    if nature == "弱势反抽" or (math.isfinite(excess) and excess < -0.05) or (math.isfinite(drawdown) and drawdown <= -0.25):
+        return "反弹归反弹，别硬讲主线。"
+    return "当初爱过，现在算了。"
+
+
+def _ranking_setup_sentence(row: pd.Series) -> str:
+    tier = str(row.get("锐评档位", "") or "")
+    nature = str(row.get("当前性质", "") or "")
+    phase = str(row.get("指数阶段", "") or "")
+    if tier == "夯爆了":
+        return f"全场最疯，{phase}里也能打出弹性，角色是{nature}。"
+    if tier == "人上人":
+        return f"资金真干了，{phase}里还能保持强度，角色是{nature}。"
+    if tier == "立棍单打":
+        return f"不完全跟指数，自己有一套节奏，角色是{nature}。"
+    if tier == "刷子":
+        return f"涨幅有存在感，但更像跟着环境刷出来，角色是{nature}。"
+    if tier == "混子":
+        return f"方向上不掉队，但也没打出真正地位，角色是{nature}。"
+    if tier == "NPC":
+        return f"有名字有波动，但资金态度还不清楚，角色是{nature}。"
+    return f"这一段更像后半程，{phase}里已经露出疲态。"
+
+
+def _ranking_data_sentence(row: pd.Series) -> str:
+    return (
+        f"收益 {_percent(row.get('区间收益'))}，回撤 {_percent(row.get('最大回撤'))}，"
+        f"超额 {_percent(row.get('相对超额'))}，上涨K占比 {_percent(row.get('上涨K占比'))}。"
+    )
+
+
+def _ranking_turning_review(row: pd.Series) -> str:
+    turning = str(row.get("关键转折点", "") or "数据不足")
+    tier = str(row.get("锐评档位", "") or "")
+    if "前高" in turning or "箱体上沿" in turning:
+        return "卡在前高/箱体上沿，要么突破成主升，要么这里就是提款点。"
+    if "5日/10日线" in turning:
+        return "还在短均附近，强趋势不能轻易破短均。"
+    if "20日线" in turning:
+        return "正在看20日线，破了就别硬说洗盘。"
+    if "长上影" in turning or "高开低走" in turning:
+        return "已经出现分歧信号，不是没人买，是先手开始兑现。"
+    if "破位" in turning:
+        return "已经偏破位，先看止跌，不要急着讲反转。"
+    if tier == "拉完了":
+        return "核心问题不是便宜，是资金还愿不愿意继续接。"
+    return "关键位置不够清晰，先看放量突破或承接。"
+
+
+def _ranking_verification(tier: str, turning_point: str, nature: str) -> str:
     if "前高" in turning_point or "箱体上沿" in turning_point:
-        return "放量突破算强，冲高回落就是先手兑现。"
-    if "5日/10日" in turning_point:
-        return "缩量回踩不破算强，跌破短均就要降一档。"
-    if "20日" in turning_point:
-        return "站稳20日线才算修复延续，放量跌回去就是反抽失败。"
-    if "破位" in turning_point or grade == "D" or nature == "走弱":
-        return "先看能不能止跌，不能止跌就别硬说洗盘。"
-    return "继续看承接和放量，强弱分界在最近的高低点。"
+        return "能放量站上前高/箱体上沿算强，冲高回落算弱。"
+    if "5日/10日线" in turning_point:
+        return "守住5日/10日线并继续放量算强，跌破短均算弱。"
+    if "20日线" in turning_point:
+        return "守住20日线并重新转强算强，跌破20日线算弱。"
+    if "长上影" in turning_point or "高开低走" in turning_point:
+        return "能快速反包分歧算强，继续缩量回落算弱。"
+    if "破位" in turning_point:
+        return "能收回破位区间算强，继续下探算弱。"
+    if tier in {"夯爆了", "人上人"} or nature == "主升":
+        return "继续高位承接算强，放量不涨算弱。"
+    return "能放量脱离震荡算强，继续横盘缩量算弱。"
+
+
+def _ranking_summary_line(ranking: pd.DataFrame) -> str:
+    tiers = [str(value) for value in ranking.get("锐评档位", pd.Series(dtype=object)).tolist()]
+    if not tiers:
+        return "这批对象先按数据排序，缺少足够锐评标签。"
+    top = tiers[0]
+    tail = tiers[-1]
+    return (
+        f"这批里面，{top}的先看强度和节奏，{tail}的别硬讲刚开始；"
+        "A股最怕的是把副线冲浪当信仰，把反抽当主升，把拉完了当刚启动。"
+    )
+
+
+def _index_phase_score(label: str) -> float:
+    return {
+        "指数主升": 1.0,
+        "指数高位分歧": 0.62,
+        "指数低位修复": 0.72,
+        "指数退潮": 0.25,
+        "指数横盘震荡": 0.52,
+        "数据不足": 0.4,
+    }.get(label, 0.45)
+
+
+def _turning_point_score(turning_point: str, period_return: float, drawdown: float) -> float:
+    if "5日/10日线" in turning_point:
+        return 0.9
+    if "前高" in turning_point or "箱体上沿" in turning_point:
+        return 0.78 if math.isfinite(period_return) and period_return > 0 else 0.55
+    if "20日线" in turning_point:
+        return 0.58
+    if "长上影" in turning_point or "高开低走" in turning_point:
+        return 0.25
+    if "破位" in turning_point:
+        return 0.18
+    if math.isfinite(drawdown) and drawdown <= -0.25:
+        return 0.25
+    return 0.45
+
+
+def _a_share_context_score(nature: str, period_return: float, drawdown: float, excess: float) -> float:
+    base = {
+        "主升": 1.0,
+        "弹性冲浪": 0.82,
+        "温和启动": 0.72,
+        "震荡修复": 0.48,
+        "弱势反抽": 0.28,
+        "走弱": 0.12,
+        "横盘观察": 0.4,
+    }.get(nature, 0.35)
+    if math.isfinite(excess) and excess >= 0.12:
+        base += 0.12
+    if math.isfinite(drawdown) and drawdown <= -0.25 and (not math.isfinite(period_return) or period_return <= 0.08):
+        base -= 0.18
+    return _clamp(base, 0.0, 1.0)
+
+
+def _is_finished(period_return: float, drawdown: float, excess: float, turning_point: str, nature: str) -> bool:
+    if nature == "走弱" and (not math.isfinite(excess) or excess <= 0):
+        return True
+    if math.isfinite(period_return) and period_return <= -0.12:
+        return True
+    if math.isfinite(drawdown) and drawdown <= -0.28 and (not math.isfinite(excess) or excess <= 0):
+        return True
+    return ("长上影" in turning_point or "高开低走" in turning_point) and (not math.isfinite(excess) or excess <= 0.03)
 
 
 def _turning_point_label(window: pd.DataFrame) -> str:
@@ -1335,12 +1577,12 @@ def _index_phase_label(value: object) -> str:
     if numeric >= 0.12:
         return "指数主升"
     if numeric >= 0.03:
-        return "指数修复"
+        return "指数低位修复"
     if numeric <= -0.08:
         return "指数退潮"
     if numeric <= -0.03:
-        return "高位分歧"
-    return "横盘震荡"
+        return "指数高位分歧"
+    return "指数横盘震荡"
 
 
 def _market_environment_text(comparisons: pd.DataFrame | None) -> str:
@@ -1350,7 +1592,8 @@ def _market_environment_text(comparisons: pd.DataFrame | None) -> str:
     if values.empty:
         return "对比数据不足，先按个体超额、回撤和关键位置排序。"
     average_return = float(values.mean())
-    return f"对标组合平均收益 {_percent(average_return)}，当前更像{_index_phase_label(average_return)}。"
+    phase = _index_phase_label(average_return)
+    return f"对标组合平均收益 {_percent(average_return)}，当前更像{phase}；排序先看环境，再看超额、回撤和关键转折点。"
 
 
 def _numeric_value(value: object) -> float:
