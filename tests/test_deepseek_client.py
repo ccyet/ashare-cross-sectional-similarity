@@ -92,6 +92,16 @@ def test_deepseek_client_raises_for_missing_key(monkeypatch: pytest.MonkeyPatch)
         client.chat([{"role": "user", "content": "hello"}])
 
 
+def test_deepseek_client_rejects_non_ascii_key_before_http_request() -> None:
+    def fake_transport(_request, _timeout: float):
+        raise AssertionError("invalid API key should not reach transport")
+
+    client = DeepSeekClient(DeepSeekConfig(api_key="测试key"), transport=fake_transport)
+
+    with pytest.raises(DeepSeekAPIError, match="API Key"):
+        client.chat([{"role": "user", "content": "hello"}])
+
+
 def test_deepseek_client_raises_for_missing_content() -> None:
     def fake_transport(_request, _timeout: float):
         return FakeResponse({"choices": [{"message": {}}]})

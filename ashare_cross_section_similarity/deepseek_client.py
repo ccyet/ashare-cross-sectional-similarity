@@ -20,6 +20,10 @@ class DeepSeekMissingAPIKeyError(DeepSeekAPIError):
     pass
 
 
+class DeepSeekInvalidAPIKeyError(DeepSeekAPIError):
+    pass
+
+
 @dataclass(frozen=True)
 class DeepSeekConfig:
     api_key: str | None = None
@@ -33,6 +37,8 @@ class DeepSeekConfig:
         key = (self.api_key or os.environ.get("DEEPSEEK_API_KEY", "")).strip()
         if not key:
             raise DeepSeekMissingAPIKeyError("缺少 DEEPSEEK_API_KEY，请设置环境变量或在页面临时输入 API Key。")
+        if not key.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in key):
+            raise DeepSeekInvalidAPIKeyError("DeepSeek API Key 只能包含半角英文、数字和符号，请检查是否误填中文或空白字符。")
         return key
 
 
