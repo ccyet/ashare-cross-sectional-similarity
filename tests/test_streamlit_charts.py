@@ -29,6 +29,7 @@ from streamlit_app import (
     _download_symbols_with_progress,
     _file_picker_entries,
     _format_cross_section_stats,
+    _format_cross_section_traversal_results,
     _format_data_check_status,
     _format_multi_review_overview,
     _format_review_rankings,
@@ -67,6 +68,7 @@ from streamlit_app import (
     _review_output_source_options,
     _review_kline_chart,
     _review_stock_name_map,
+    _run_cross_section_traversal,
     _review_target_symbols,
     _run_download_job_step,
     _set_download_job_status,
@@ -468,6 +470,66 @@ def test_cross_section_result_metrics_are_one_row_pair() -> None:
 def test_cross_section_search_limit_uses_full_universe_not_display_count() -> None:
     assert _cross_section_search_limit(["000001.SZ", "000002.SZ", "000003.SZ"], 1) == 3
     assert _cross_section_search_limit(["000001.SZ"], 5) == 5
+
+
+def test_cross_section_traversal_runs_each_target_with_date_tolerance() -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 11, 12, 13]),
+            _bars("000001.SZ", [10, 11, 12, 13, 15]),
+            _bars("600519.SH", [30, 29, 28, 27]),
+        ],
+        ignore_index=True,
+    )
+    bars.loc[bars["stock_code"] == "000001.SZ", "date"] = pd.date_range("2023-12-31", periods=5, freq="D")
+
+    results, skipped = _run_cross_section_traversal(
+        bars,
+        target_symbols=("300750.SZ", "600519.SH"),
+        universe_symbols=("300750.SZ", "000001.SZ", "600519.SH"),
+        start="2024-01-01",
+        end="2024-01-04",
+        top_n=1,
+        min_coverage=0.8,
+        path_weight=0.7,
+        date_tolerance_bars=1,
+        algorithm="baseline_price_feature",
+    )
+
+    assert results["target_symbol"].tolist() == ["300750.SZ", "600519.SH"]
+    assert results["匹配排名"].tolist() == [1, 1]
+    first = results.iloc[0]
+    assert first["symbol"] == "000001.SZ"
+    assert first["日期偏移"] == -1
+    assert skipped.empty
+
+
+def test_format_cross_section_traversal_results_includes_target_and_match_names() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "target_symbol": "300750.SZ",
+                "symbol": "000001.SZ",
+                "匹配排名": 1,
+                "区间开始": pd.Timestamp("2024-01-01"),
+                "区间结束": pd.Timestamp("2024-01-04"),
+                "日期偏移": 0,
+                "综合相似度": 0.91,
+                "路径相似度": 0.92,
+                "区间收益": 0.12,
+            }
+        ]
+    )
+
+    formatted = _format_cross_section_traversal_results(
+        frame,
+        stock_names={"300750.SZ": "宁德时代", "000001.SZ": "平安银行"},
+    )
+
+    assert formatted.columns[:5].tolist() == ["目标代码", "目标股票", "匹配排名", "匹配代码", "匹配股票"]
+    assert formatted.loc[0, "目标股票"] == "宁德时代"
+    assert formatted.loc[0, "匹配股票"] == "平安银行"
+    assert formatted.loc[0, "区间收益"] == "12.00%"
 
 
 def test_display_results_limits_only_visible_rows() -> None:

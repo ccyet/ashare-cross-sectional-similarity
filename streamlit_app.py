@@ -765,28 +765,44 @@ def _render_cross_section_tab(
     download_engine: str,
 ) -> None:
     st.subheader("同一时间横截面相似")
-    st.caption("选定某个标的一段区间走势，在同一段时间里从指定范围内寻找其他相似标的。")
+    st.caption("可做单目标横截面相似搜索，也可在指定窗口期内批量遍历搜索范围。")
+    cross_mode = st.radio(
+        "横截面模式",
+        ["单目标搜索", "窗口遍历"],
+        horizontal=True,
+        key="cross_mode",
+        help="窗口遍历会在同一指定区间内逐个把搜索范围标的作为目标运行横截面搜索，日期容错规则保持不变。",
+    )
+    is_traversal = cross_mode == "窗口遍历"
     col1, col2, col3 = st.columns(3)
-    target_symbol = col1.text_input("目标代码", value="300750.SZ", key="cross_target_symbol")
+    if is_traversal:
+        col1.caption("遍历目标")
+        col1.info("默认遍历下方搜索范围内的标的。")
+        target_symbol = ""
+    else:
+        target_symbol = col1.text_input("目标代码", value="300750.SZ", key="cross_target_symbol")
     normalized_target = normalize_symbol(target_symbol)
-    if st.session_state.get("cross_quick_message_symbol") != normalized_target:
+    if not is_traversal and st.session_state.get("cross_quick_message_symbol") != normalized_target:
         st.session_state.pop("cross_quick_message", None)
         st.session_state["cross_quick_message_symbol"] = normalized_target
     start_input = _date_input_args("cross_start_date", date(2024, 1, 1))
     end_input = _date_input_args("cross_end_date", date(2024, 3, 31))
     start_date = col2.date_input("区间开始", **start_input)
     end_date = col3.date_input("区间结束", **end_input)
-    quick_cols = st.columns(6)
-    quick_cols[0].caption("快捷区间")
-    for button_col, window_size in zip(quick_cols[1:], [5, 10, 20, 60, 120]):
-        button_col.button(
-            f"近{window_size}根",
-            key=f"cross_quick_{window_size}",
-            on_click=_set_cross_quick_window,
-            args=(data_root, timeframe, adjust, target_symbol, window_size),
-        )
-    if st.session_state.get("cross_quick_message"):
-        st.info(st.session_state["cross_quick_message"])
+    if not is_traversal:
+        quick_cols = st.columns(6)
+        quick_cols[0].caption("快捷区间")
+        for button_col, window_size in zip(quick_cols[1:], [5, 10, 20, 60, 120]):
+            button_col.button(
+                f"近{window_size}根",
+                key=f"cross_quick_{window_size}",
+                on_click=_set_cross_quick_window,
+                args=(data_root, timeframe, adjust, target_symbol, window_size),
+            )
+        if st.session_state.get("cross_quick_message"):
+            st.info(st.session_state["cross_quick_message"])
+    else:
+        st.info("窗口遍历使用手动指定的起止日期；日期容错只平移候选窗口，不扩大目标窗口。")
     start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
     end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
     if error := _date_range_error(start, end):
@@ -836,14 +852,54 @@ def _render_cross_section_tab(
     except Exception as exc:  # noqa: BLE001
         st.error(f"搜索范围解析失败：{exc}")
         return
-    symbols = [target_symbol, *universe]
+    traversal_targets: list[str] = []
+    if is_traversal:
+        traversal_col1, traversal_col2 = st.columns([3, 1])
+        raw_traversal_targets = traversal_col1.text_area(
+            "遍历目标代码",
+            value="",
+            key="cross_traversal_targets",
+            height=100,
+            help="留空时遍历搜索范围内全部标的；逗号、空格或换行分隔。",
+        )
+        traversal_limit = int(
+            traversal_col2.number_input(
+                "遍历目标上限",
+                min_value=0,
+                max_value=5000,
+                value=100,
+                step=50,
+                key="cross_traversal_limit",
+                help="0 表示不限制；为避免误跑全市场，默认先跑前 100 个。",
+            )
+        )
+        explicit_targets = unique_symbols(_split_symbol_text(raw_traversal_targets))
+        traversal_targets = explicit_targets or list(universe)
+        if traversal_limit > 0:
+            traversal_targets = traversal_targets[:traversal_limit]
+        st.caption(f"本次将遍历 {len(traversal_targets):,} 个目标；候选范围 {len(universe):,} 个。")
+
+    symbols = unique_symbols([*(traversal_targets if is_traversal else [target_symbol]), *universe])
     symbols_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(symbols))
     tolerance_bars = int(date_tolerance_bars)
     coverage_start = _date_tolerance_load_start(start, tolerance_bars)
     coverage_end = _cross_section_load_end(end, tolerance_bars)
     st.markdown("**1. 数据检查**")
     st.caption("点击后检查目标和搜索范围在目标区间、日期容错和后验观察范围内是否已有本地行情；缺数据时可直接在本页下载。")
-    check_key = (tuple(symbols), data_root, timeframe, adjust, coverage_start, coverage_end, start, end, tolerance_bars, symbols_fingerprint)
+    check_key = (
+        cross_mode,
+        tuple(symbols),
+        tuple(traversal_targets),
+        data_root,
+        timeframe,
+        adjust,
+        coverage_start,
+        coverage_end,
+        start,
+        end,
+        tolerance_bars,
+        symbols_fingerprint,
+    )
     if st.button("检查本地数据覆盖", key="cross_check"):
         try:
             _cached_data_check.clear()
@@ -862,16 +918,18 @@ def _render_cross_section_tab(
             return
     check = st.session_state.get("cross_data_check")
     if check is not None and st.session_state.get("cross_data_check_key") == check_key:
-        normalized_targets = unique_symbols([target_symbol])
+        normalized_targets = traversal_targets if is_traversal else unique_symbols([target_symbol])
         normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
-        target_check = check.loc[check["symbol"] == normalized_target]
+        target_check = check.loc[check["symbol"] == normalized_target] if normalized_target else pd.DataFrame()
         cols = st.columns(5)
-        cols[0].metric("搜索范围", f"{len(universe):,}")
+        cols[0].metric("搜索范围", f"{len(universe):,}" if not is_traversal else f"{len(traversal_targets):,} / {len(universe):,}")
         cols[1].metric("完整覆盖", f"{int((check['status'] == 'available').sum()):,}")
         cols[2].metric("覆盖不足", f"{int((check['status'] == 'partial_window').sum()):,}")
         cols[3].metric("缺文件", f"{int((check['status'] == 'missing_file').sum()):,}")
         cols[4].metric("区间无数据", f"{int((check['status'] == 'missing_window').sum()):,}")
-        if not target_check.empty:
+        if is_traversal:
+            st.info(f"窗口遍历目标 {len(traversal_targets):,} 个；数据检查范围 {len(symbols):,} 个。")
+        elif not target_check.empty:
             target_row = target_check.iloc[0]
             st.info(
                 f"目标标的 {normalized_target}：{target_row['status']}，"
@@ -879,7 +937,7 @@ def _render_cross_section_tab(
                 f"请求 {_date_text(target_row.get('requested_start'))} 至 {_date_text(target_row.get('requested_end'))}；"
                 f"本地 {_date_text(target_row.get('local_start'))} 至 {_date_text(target_row.get('local_end'))}"
             )
-        else:
+        elif normalized_target:
             st.warning(f"目标标的 {normalized_target} 不在本次检查结果中，请确认目标代码输入。")
         st.dataframe(_centered(_format_data_check_status(_pin_symbol_row(check, normalized_target, limit=200))), use_container_width=True, hide_index=True)
     else:
@@ -887,7 +945,7 @@ def _render_cross_section_tab(
 
     st.markdown("**2. 数据抓取 / 更新**")
     st.caption("先检查覆盖，只补缺文件、覆盖不足、区间无数据或读取失败的标的；按侧栏下载引擎执行。")
-    normalized_targets = unique_symbols([target_symbol])
+    normalized_targets = traversal_targets if is_traversal else unique_symbols([target_symbol])
     normalized_target = normalized_targets[0] if normalized_targets else str(target_symbol).strip().upper()
     if st.button("检查并下载缺失行情", key="cross_download"):
         check_for_download = check if check is not None and st.session_state.get("cross_data_check_key") == check_key else None
@@ -939,8 +997,9 @@ def _render_cross_section_tab(
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
 
     st.markdown("**3. 运行横截面搜索**")
-    if not st.button("运行横截面搜索", type="primary", key="cross_run"):
-        st.info("检查数据后，缺失则先下载；数据可用后点击运行横截面搜索。")
+    run_label = "运行横截面遍历" if is_traversal else "运行横截面搜索"
+    if not st.button(run_label, type="primary", key="cross_run"):
+        st.info(f"检查数据后，缺失则先下载；数据可用后点击{run_label}。")
         return
 
     try:
@@ -953,22 +1012,76 @@ def _render_cross_section_tab(
             end=coverage_end,
             data_fingerprint=symbols_fingerprint,
         )
-        result = search_cross_section(
-            bars,
-            CrossSectionSearchConfig(
-                target_symbol=target_symbol,
+        if is_traversal:
+            traversal_results, traversal_skipped = _run_cross_section_traversal(
+                bars,
+                target_symbols=tuple(traversal_targets),
                 universe_symbols=tuple(universe),
                 start=start,
                 end=end,
-                top_n=_cross_section_search_limit(universe, int(top_n)),
+                top_n=int(top_n),
                 min_coverage=float(min_coverage),
                 path_weight=float(path_weight),
                 date_tolerance_bars=tolerance_bars,
                 algorithm=str(algorithm),
-            ),
-        )
+            )
+        else:
+            result = search_cross_section(
+                bars,
+                CrossSectionSearchConfig(
+                    target_symbol=target_symbol,
+                    universe_symbols=tuple(universe),
+                    start=start,
+                    end=end,
+                    top_n=_cross_section_search_limit(universe, int(top_n)),
+                    min_coverage=float(min_coverage),
+                    path_weight=float(path_weight),
+                    date_tolerance_bars=tolerance_bars,
+                    algorithm=str(algorithm),
+                ),
+            )
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
+        return
+
+    if is_traversal:
+        st.markdown("**4. 遍历结果**")
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("遍历目标", f"{len(traversal_targets):,}")
+        metric_cols[1].metric("候选范围", f"{len(universe):,}")
+        metric_cols[2].metric("有效匹配", f"{len(traversal_results):,}")
+        metric_cols[3].metric("日期容错", f"±{tolerance_bars} 根")
+        st.caption(f"相似算法：{algorithm_label(str(algorithm))}")
+        if traversal_results.empty:
+            st.warning("没有找到可用遍历结果。请检查本地数据覆盖、搜索范围和区间设置。")
+            if not traversal_skipped.empty:
+                with st.expander("查看跳过目标"):
+                    st.dataframe(_centered(traversal_skipped), use_container_width=True, hide_index=True)
+            return
+        name_symbols = unique_symbols(
+            [
+                *traversal_results["target_symbol"].astype(str).tolist(),
+                *traversal_results["symbol"].astype(str).tolist(),
+            ]
+        )
+        stock_names = _review_stock_name_map(data_root, tuple(name_symbols))
+        st.dataframe(
+            _centered(_format_cross_section_traversal_results(traversal_results, stock_names=stock_names)),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.markdown("**5. 遍历结果计量**")
+        for column, (label, value) in zip(st.columns(4), _cross_section_overview_metrics(traversal_results)):
+            column.metric(label, value)
+        if not traversal_skipped.empty:
+            with st.expander("查看跳过目标 / 样本"):
+                st.dataframe(_centered(traversal_skipped), use_container_width=True, hide_index=True)
+        st.download_button(
+            "下载横截面遍历 CSV",
+            data=traversal_results.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cross_section_traversal.csv",
+            mime="text/csv",
+        )
         return
 
     st.markdown("**4. 搜索结果**")
@@ -4282,6 +4395,106 @@ def _cross_section_result_metrics(result: CrossSectionSearchResult) -> list[tupl
 
 def _cross_section_search_limit(universe_symbols: list[str] | tuple[str, ...], display_n: int) -> int:
     return max(int(display_n), len(unique_symbols(universe_symbols)))
+
+
+def _run_cross_section_traversal(
+    bars: pd.DataFrame,
+    *,
+    target_symbols: tuple[str, ...] | list[str],
+    universe_symbols: tuple[str, ...] | list[str],
+    start: str,
+    end: str,
+    top_n: int,
+    min_coverage: float,
+    path_weight: float,
+    date_tolerance_bars: int,
+    algorithm: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows: list[dict[str, object]] = []
+    skipped_rows: list[dict[str, object]] = []
+    universe = tuple(unique_symbols(universe_symbols))
+    for target_symbol in unique_symbols(target_symbols):
+        try:
+            result = search_cross_section(
+                bars,
+                CrossSectionSearchConfig(
+                    target_symbol=target_symbol,
+                    universe_symbols=universe,
+                    start=start,
+                    end=end,
+                    top_n=max(1, int(top_n)),
+                    min_coverage=float(min_coverage),
+                    path_weight=float(path_weight),
+                    date_tolerance_bars=int(date_tolerance_bars),
+                    algorithm=str(algorithm),
+                ),
+            )
+        except ValueError as exc:
+            skipped_rows.append({"target_symbol": target_symbol, "symbol": "", "原因": str(exc)})
+            continue
+        for rank, (_, row) in enumerate(result.results.iterrows(), start=1):
+            item = row.to_dict()
+            item.update(
+                {
+                    "target_symbol": result.target_symbol,
+                    "匹配排名": rank,
+                    "目标区间开始": result.start,
+                    "目标区间结束": result.end,
+                    "目标K线数量": result.window_size,
+                }
+            )
+            rows.append(item)
+        if not result.skipped.empty:
+            for _, row in result.skipped.iterrows():
+                skipped_rows.append({"target_symbol": result.target_symbol, **row.to_dict()})
+    result_frame = pd.DataFrame(rows)
+    if not result_frame.empty:
+        leading = ["target_symbol", "匹配排名", "symbol", "目标区间开始", "目标区间结束", "目标K线数量"]
+        result_frame = result_frame[[*leading, *[column for column in result_frame.columns if column not in leading]]]
+    skipped_frame = pd.DataFrame(skipped_rows, columns=["target_symbol", "symbol", "原因"])
+    return result_frame, skipped_frame
+
+
+def _format_cross_section_traversal_results(
+    frame: pd.DataFrame,
+    stock_names: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    result = frame.copy()
+    if result.empty:
+        return pd.DataFrame(columns=["目标代码", "目标股票", "匹配排名", "匹配代码", "匹配股票"])
+    names = {normalize_symbol(symbol): name for symbol, name in (stock_names or {}).items()}
+    result.insert(
+        result.columns.get_loc("target_symbol") + 1,
+        "目标股票",
+        result["target_symbol"].map(lambda symbol: names.get(normalize_symbol(symbol), "")),
+    )
+    result.insert(
+        result.columns.get_loc("symbol") + 1,
+        "匹配股票",
+        result["symbol"].map(lambda symbol: names.get(normalize_symbol(symbol), "")),
+    )
+    rename_map = {
+        "target_symbol": "目标代码",
+        "symbol": "匹配代码",
+        "目标区间开始": "目标区间开始",
+        "目标区间结束": "目标区间结束",
+        "区间开始": "匹配区间开始",
+        "区间结束": "匹配区间结束",
+    }
+    percent_columns = [*PERCENT_COLUMNS]
+    for column in result.columns:
+        if column.startswith("t_plus_") and column.endswith("_return"):
+            horizon = column.removeprefix("t_plus_").removesuffix("_return")
+            rename_map[column] = f"后{horizon}根收益"
+            percent_columns.append(column)
+    result = _format_percent_columns(result, percent_columns)
+    result = _format_decimal_columns(result, DECIMAL_COLUMNS)
+    result = result.rename(columns=rename_map)
+    for column in ["目标区间开始", "目标区间结束", "匹配区间开始", "匹配区间结束"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    leading = ["目标代码", "目标股票", "匹配排名", "匹配代码", "匹配股票"]
+    return result[[*leading, *[column for column in result.columns if column not in leading]]]
 
 
 def _display_results(frame: pd.DataFrame, display_n: int) -> pd.DataFrame:
