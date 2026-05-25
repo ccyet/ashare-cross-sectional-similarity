@@ -63,6 +63,7 @@ class CrossSectionWindowTraversalConfig:
     top_n: int = 100
     min_coverage: float = 1.0
     path_weight: float = 0.7
+    exclusion_bars: int = 0
     forward_windows: tuple[int, ...] = FORWARD_RETURN_WINDOWS
     algorithm: str = BASELINE_ALGORITHM
 
@@ -200,6 +201,8 @@ def search_cross_section_window_traversal(
         raise ValueError("min_coverage 必须在 0 到 1 之间。")
     if not 0 <= config.path_weight <= 1:
         raise ValueError("path_weight 必须在 0 到 1 之间。")
+    if config.exclusion_bars < 0:
+        raise ValueError("exclusion_bars 不能为负数。")
     if any(horizon <= 0 for horizon in config.forward_windows):
         raise ValueError("forward_windows 必须为正整数。")
     algorithm = ensure_algorithm_available(config.algorithm, mode="cross_section")
@@ -228,14 +231,14 @@ def search_cross_section_window_traversal(
     target_metric = build_algorithm_target(target_window, algorithm)
     target_features = _fast_window_features(target_window)
 
-    rows: list[dict[str, object]] = []
+    frames: list[pd.DataFrame] = []
     skipped: list[dict[str, str]] = []
     for symbol in unique_symbols(config.universe_symbols):
         symbol_bars = bars_by_symbol.get(symbol)
         if symbol_bars is None or symbol_bars.empty:
             skipped.append({"symbol": symbol, "原因": "没有行情数据"})
             continue
-        symbol_rows = _traversal_candidate_rows(
+        symbol_frame = _traversal_candidate_frame(
             symbol_bars,
             symbol=symbol,
             traversal_start=traversal_start,
@@ -246,18 +249,27 @@ def search_cross_section_window_traversal(
             forward_windows=config.forward_windows,
             algorithm=algorithm,
         )
-        if not symbol_rows:
+        if symbol_frame.empty:
             skipped.append({"symbol": symbol, "原因": f"遍历区间内没有足够 {target_length} 根K线的候选窗口"})
             continue
-        rows.extend(symbol_rows)
+        frames.append(symbol_frame)
 
-    result_frame = pd.DataFrame(rows)
+    result_frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not result_frame.empty:
         result_frame = _score_results(result_frame, config.path_weight)
         result_frame = result_frame.sort_values(
             ["综合相似度", "路径相似度"],
             ascending=False,
-        ).head(config.top_n)
+        )
+        if config.exclusion_bars > 0:
+            result_frame = _filter_nearby_traversal_windows(
+                result_frame,
+                top_n=config.top_n,
+                exclusion_bars=config.exclusion_bars,
+            )
+        else:
+            result_frame = result_frame.head(config.top_n)
+        result_frame = result_frame.drop(columns=["_candidate_start", "_candidate_end"], errors="ignore")
         result_frame = result_frame.reset_index(drop=True)
     skipped_frame = pd.DataFrame(skipped, columns=["symbol", "原因"])
     return CrossSectionWindowTraversalResult(
@@ -272,7 +284,7 @@ def search_cross_section_window_traversal(
     )
 
 
-def _traversal_candidate_rows(
+def _traversal_candidate_frame(
     symbol_bars: pd.DataFrame,
     *,
     symbol: str,
@@ -283,51 +295,92 @@ def _traversal_candidate_rows(
     target_features: dict[str, float],
     forward_windows: tuple[int, ...],
     algorithm: str,
-) -> list[dict[str, object]]:
+) -> pd.DataFrame:
     if len(symbol_bars) < target_length:
-        return []
+        return pd.DataFrame()
     date_values = symbol_bars["date"].to_numpy(dtype="datetime64[ns]", copy=False)
     start_positions = np.flatnonzero(
         (date_values >= traversal_start.to_datetime64())
         & (date_values <= traversal_end.to_datetime64())
     )
     if len(start_positions) == 0:
-        return []
+        return pd.DataFrame()
     start_positions = start_positions[start_positions + target_length <= len(symbol_bars)]
     if len(start_positions) == 0:
-        return []
+        return pd.DataFrame()
     end_dates = date_values[start_positions + target_length - 1]
     start_positions = start_positions[end_dates <= traversal_end.to_datetime64()]
     if len(start_positions) == 0:
-        return []
+        return pd.DataFrame()
 
     close = symbol_bars["close"].to_numpy(dtype=float, copy=False)
+    amount = symbol_bars["amount"].to_numpy(dtype=float, copy=False)
+    volume = symbol_bars["volume"].to_numpy(dtype=float, copy=False)
+    liquidity = np.where(np.isfinite(amount), amount, volume)
     close_windows = np.lib.stride_tricks.sliding_window_view(close, target_length)[start_positions]
+    path_matrix = _normalized_close_paths(close_windows)
     distance_parts = distance_for_close_matrix(close_windows, target_metric)
-    rows: list[dict[str, object]] = []
     first_position = int(start_positions[0])
-    for index, start_position in enumerate(start_positions):
-        start_index = int(start_position)
-        candidate = symbol_bars.iloc[start_index : start_index + target_length].reset_index(drop=True)
-        features = _fast_window_features(candidate)
-        row: dict[str, object] = {
+    ends = start_positions + target_length - 1
+    features = _window_feature_arrays(
+        close=close,
+        liquidity=liquidity,
+        starts=start_positions,
+        window_size=target_length,
+        path_matrix=path_matrix,
+    )
+    frame = pd.DataFrame(
+        {
+            "_candidate_start": start_positions.astype(int),
+            "_candidate_end": ends.astype(int),
             "算法": algorithm,
             "symbol": symbol,
-            "区间开始": candidate["date"].min(),
-            "区间结束": candidate["date"].max(),
-            "K线数量": int(len(candidate)),
-            "遍历偏移": int(start_index - first_position),
+            "区间开始": symbol_bars["date"].iloc[start_positions].to_numpy(),
+            "区间结束": symbol_bars["date"].iloc[ends].to_numpy(),
+            "K线数量": target_length,
+            "遍历偏移": (start_positions - first_position).astype(int),
             "覆盖率": 1.0,
-            "路径距离": float(distance_parts["路径距离"][index]),
-            "价格路径距离": float(distance_parts["价格路径距离"][index]),
-            "收益路径距离": float(distance_parts["收益路径距离"][index]),
+            "路径距离": distance_parts["路径距离"],
+            "价格路径距离": distance_parts["价格路径距离"],
+            "收益路径距离": distance_parts["收益路径距离"],
         }
-        for column in FEATURE_COLUMNS:
-            row[column] = features[column]
-            row[f"feature_diff::{column}"] = abs(features[column] - target_features[column])
-        row.update(_forward_returns(symbol_bars, candidate["date"].max(), forward_windows))
-        rows.append(row)
-    return rows
+    )
+    for column in FEATURE_COLUMNS:
+        frame[column] = features[column]
+        frame[f"feature_diff::{column}"] = np.abs(features[column] - target_features[column])
+    for column, values in _forward_return_arrays(close, start_positions, target_length, forward_windows).items():
+        frame[column] = values
+    return frame
+
+
+def _filter_nearby_traversal_windows(
+    frame: pd.DataFrame,
+    *,
+    top_n: int,
+    exclusion_bars: int,
+) -> pd.DataFrame:
+    selected: list[pd.Series] = []
+    selected_windows_by_symbol: dict[str, list[tuple[int, int]]] = {}
+    for _, row in frame.iterrows():
+        symbol = normalize_symbol(row["symbol"])
+        start = int(row["_candidate_start"])
+        end = int(row["_candidate_end"])
+        windows = selected_windows_by_symbol.setdefault(symbol, [])
+        if any(_window_gap_bars(start, end, selected_start, selected_end) < exclusion_bars for selected_start, selected_end in windows):
+            continue
+        selected.append(row)
+        windows.append((start, end))
+        if len(selected) >= top_n:
+            break
+    return pd.DataFrame(selected) if selected else frame.iloc[:0]
+
+
+def _window_gap_bars(left_start: int, left_end: int, right_start: int, right_end: int) -> int:
+    if left_start <= right_end and right_start <= left_end:
+        return 0
+    if left_end < right_start:
+        return int(right_start - left_end - 1)
+    return int(left_start - right_end - 1)
 
 
 def _best_candidate_window(
@@ -467,6 +520,129 @@ def _normalized_close_paths(close_windows: np.ndarray) -> np.ndarray:
     first = close_windows[:, [0]]
     valid = np.isfinite(first) & (first != 0)
     return np.divide(close_windows, first, out=np.zeros_like(close_windows, dtype=float), where=valid) * 100.0
+
+
+def _window_feature_arrays(
+    *,
+    close: np.ndarray,
+    liquidity: np.ndarray,
+    starts: np.ndarray,
+    window_size: int,
+    path_matrix: np.ndarray,
+) -> dict[str, np.ndarray]:
+    returns = np.divide(
+        close[1:],
+        close[:-1],
+        out=np.full(len(close) - 1, np.nan, dtype=float),
+        where=(close[:-1] != 0) & np.isfinite(close[:-1]),
+    ) - 1.0
+    return_windows = np.lib.stride_tricks.sliding_window_view(returns, window_size - 1)[starts]
+    liquidity_windows = np.lib.stride_tricks.sliding_window_view(liquidity, window_size)[starts]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        interval_return = np.divide(
+            path_matrix[:, -1],
+            path_matrix[:, 0],
+            out=np.zeros(len(starts), dtype=float),
+            where=path_matrix[:, 0] != 0,
+        ) - 1.0
+    interval_return = np.where(np.isfinite(interval_return), interval_return, 0.0)
+    volatility = _rowwise_nanstd(return_windows)
+    running_max = np.maximum.accumulate(path_matrix, axis=1)
+    drawdowns = np.divide(path_matrix, running_max, out=np.full_like(path_matrix, np.nan), where=running_max != 0) - 1.0
+    max_drawdowns = _rowwise_nanmin(drawdowns)
+    x_centered = np.arange(window_size, dtype=float) - (window_size - 1) / 2
+    slope_denominator = float(np.sum(x_centered**2))
+    slopes = ((path_matrix - np.nanmean(path_matrix, axis=1, keepdims=True)) @ x_centered) / slope_denominator
+    total_liquidity = np.nansum(liquidity_windows, axis=1)
+    has_liquidity = np.isfinite(liquidity_windows).any(axis=1)
+    down_liquidity = np.nansum(np.where(return_windows < 0, liquidity_windows[:, 1:], 0.0), axis=1)
+    down_share = np.divide(
+        down_liquidity,
+        total_liquidity,
+        out=np.zeros(len(starts), dtype=float),
+        where=has_liquidity & (total_liquidity != 0),
+    )
+    corr = _rowwise_corr(return_windows, liquidity_windows[:, 1:])
+    liquidity_mean = _rowwise_nanmean(liquidity_windows)
+    liquidity_scale = np.where(np.isfinite(liquidity_mean), np.log1p(liquidity_mean), 0.0)
+    return {
+        "区间收益": interval_return,
+        "波动率": volatility,
+        "最大回撤": max_drawdowns,
+        "趋势斜率": np.where(np.isfinite(slopes), slopes, 0.0),
+        "下跌放量占比": np.where(np.isfinite(down_share), down_share, 0.0),
+        "量价相关": corr,
+        "成交规模": liquidity_scale,
+    }
+
+
+def _forward_return_arrays(
+    close: np.ndarray,
+    starts: np.ndarray,
+    window_size: int,
+    forward_windows: tuple[int, ...],
+) -> dict[str, np.ndarray]:
+    outcomes: dict[str, np.ndarray] = {}
+    ends = starts + window_size - 1
+    base_close = close[ends]
+    for horizon in forward_windows:
+        returns = np.full(len(starts), np.nan, dtype=float)
+        valid = (ends + horizon < len(close)) & (base_close != 0) & np.isfinite(base_close)
+        if valid.any():
+            returns[valid] = close[ends[valid] + horizon] / base_close[valid] - 1.0
+        outcomes[f"t_plus_{horizon}_return"] = returns
+    return outcomes
+
+
+def _rowwise_nanmean(values: np.ndarray) -> np.ndarray:
+    valid = np.isfinite(values)
+    counts = valid.sum(axis=1)
+    sums = np.where(valid, values, 0.0).sum(axis=1)
+    return np.divide(sums, counts, out=np.full(values.shape[0], np.nan, dtype=float), where=counts > 0)
+
+
+def _rowwise_nanstd(values: np.ndarray) -> np.ndarray:
+    means = _rowwise_nanmean(values)
+    valid = np.isfinite(values)
+    counts = valid.sum(axis=1)
+    centered = np.where(valid, values - means[:, None], 0.0)
+    variance = np.divide(
+        (centered**2).sum(axis=1),
+        counts,
+        out=np.zeros(values.shape[0], dtype=float),
+        where=counts > 0,
+    )
+    return np.sqrt(variance)
+
+
+def _rowwise_nanmin(values: np.ndarray) -> np.ndarray:
+    valid = np.isfinite(values)
+    masked = np.where(valid, values, np.inf)
+    minimum = masked.min(axis=1)
+    return np.where(valid.any(axis=1), minimum, 0.0)
+
+
+def _rowwise_corr(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    valid = np.isfinite(left) & np.isfinite(right)
+    counts = valid.sum(axis=1)
+    left_mean = np.divide(
+        np.where(valid, left, 0.0).sum(axis=1),
+        counts,
+        out=np.zeros(left.shape[0], dtype=float),
+        where=counts > 0,
+    )
+    right_mean = np.divide(
+        np.where(valid, right, 0.0).sum(axis=1),
+        counts,
+        out=np.zeros(right.shape[0], dtype=float),
+        where=counts > 0,
+    )
+    left_centered = np.where(valid, left - left_mean[:, None], 0.0)
+    right_centered = np.where(valid, right - right_mean[:, None], 0.0)
+    numerator = (left_centered * right_centered).sum(axis=1)
+    denominator = np.sqrt((left_centered**2).sum(axis=1) * (right_centered**2).sum(axis=1))
+    corr = np.divide(numerator, denominator, out=np.zeros(left.shape[0], dtype=float), where=(counts >= 2) & (denominator != 0))
+    return np.where(np.isfinite(corr), corr, 0.0)
 
 
 def _z_normalize_rows(values: np.ndarray) -> np.ndarray:

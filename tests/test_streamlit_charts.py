@@ -18,6 +18,7 @@ from streamlit_app import (
     _cross_section_result_metrics,
     _cross_section_search_limit,
     _cross_section_price_chart,
+    _cross_section_traversal_kline_series,
     _display_results,
     _cross_section_quick_window_feedback,
     _cross_section_quick_window,
@@ -531,6 +532,46 @@ def test_format_cross_section_traversal_results_includes_target_and_match_names(
     assert formatted.loc[0, "目标股票"] == "宁德时代"
     assert formatted.loc[0, "匹配股票"] == "平安银行"
     assert formatted.loc[0, "区间收益"] == "12.00%"
+
+
+def test_cross_section_traversal_kline_series_includes_target_and_ranked_matches() -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 12, 11, 13, 14], start="2026-05-17"),
+            _bars("000001.SZ", [7, 8, 10, 12, 11, 13, 14], start="2021-01-01"),
+        ],
+        ignore_index=True,
+    )
+    results, _skipped = _run_cross_section_traversal(
+        bars,
+        target_symbol="300750.SZ",
+        universe_symbols=("000001.SZ",),
+        target_start="2026-05-17",
+        target_end="2026-05-20",
+        traversal_start="2021-01-01",
+        traversal_end="2021-01-07",
+        top_n=1,
+        min_coverage=1.0,
+        path_weight=0.7,
+        algorithm="baseline_price_feature",
+    )
+
+    series = _cross_section_traversal_kline_series(
+        bars,
+        results,
+        target_symbol="300750.SZ",
+        target_start="2026-05-17",
+        target_end="2026-05-20",
+        top_n=1,
+        forward_bars=1,
+        stock_names={"300750.SZ": "宁德时代", "000001.SZ": "平安银行"},
+    )
+
+    assert len(series) == 2
+    assert series[0]["title"] == "宁德时代（300750.SZ，目标）"
+    assert str(series[1]["title"]).startswith("样本1 平安银行（000001.SZ）")
+    assert series[1]["windowEndTime"] == "2021-01-06"
+    assert series[1]["forwardSize"] == 1
 
 
 def test_display_results_limits_only_visible_rows() -> None:

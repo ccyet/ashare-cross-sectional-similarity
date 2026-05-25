@@ -824,7 +824,11 @@ def _render_cross_section_tab(
             st.session_state.pop("cross_data_check_key", None)
             return
         st.info("窗口遍历会固定目标走势窗口，只在遍历区间内生成同长度候选窗口；目标窗口不会被扩大。")
-    col4, col5, col6, col10, col11 = st.columns(5)
+    if is_traversal:
+        col4, col5, col6, col10, col11, col12 = st.columns(6)
+    else:
+        col4, col5, col6, col10, col11 = st.columns(5)
+        col12 = None
     top_n = col4.number_input("展示数量", min_value=5, max_value=100, value=20, step=5, key="cross_top_n")
     date_tolerance_help = (
         "避免精确日期带来的误判；系统不扩大目标走势，只允许候选窗口在前后 N 个交易日内平移匹配。"
@@ -842,6 +846,19 @@ def _render_cross_section_tab(
     )
     min_coverage = col6.slider("最小覆盖率", min_value=0.5, max_value=1.0, value=0.8, step=0.05, key="cross_min_coverage")
     path_weight = col10.slider("走势权重", min_value=0.0, max_value=1.0, value=0.7, step=0.05, key="cross_path_weight")
+    traversal_exclusion_bars = 0
+    if col12 is not None:
+        traversal_exclusion_bars = int(
+            col12.number_input(
+                "排除近邻K线",
+                min_value=0,
+                max_value=500,
+                value=20,
+                step=5,
+                key="cross_traversal_exclusion_bars",
+                help="同一标的的相邻命中窗口过近时，只保留相似度更高的样本，减少重复窗口。",
+            )
+        )
     algorithm = col11.selectbox(
         "相似算法",
         ALGORITHM_CHOICES,
@@ -1022,6 +1039,7 @@ def _render_cross_section_tab(
                 top_n=int(top_n),
                 min_coverage=float(min_coverage),
                 path_weight=float(path_weight),
+                exclusion_bars=traversal_exclusion_bars,
                 algorithm=str(algorithm),
             )
         else:
@@ -1072,6 +1090,21 @@ def _render_cross_section_tab(
         st.markdown("**5. 遍历结果计量**")
         for column, (label, value) in zip(st.columns(4), _cross_section_overview_metrics(traversal_results)):
             column.metric(label, value)
+        st.markdown("**6. 遍历 K 线核验**")
+        kline_series = _cross_section_traversal_kline_series(
+            bars,
+            traversal_results,
+            target_symbol=target_symbol,
+            target_start=start,
+            target_end=end,
+            top_n=int(top_n),
+            stock_names=stock_names,
+        )
+        components.html(
+            _lightweight_kline_chart_html(kline_series),
+            height=_kline_chart_component_height(kline_series),
+            scrolling=False,
+        )
         if not traversal_skipped.empty:
             with st.expander("查看跳过样本"):
                 st.dataframe(_centered(traversal_skipped), use_container_width=True, hide_index=True)
@@ -4409,6 +4442,7 @@ def _run_cross_section_traversal(
     min_coverage: float,
     path_weight: float,
     algorithm: str,
+    exclusion_bars: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     result = search_cross_section_window_traversal(
         bars,
@@ -4422,6 +4456,7 @@ def _run_cross_section_traversal(
             top_n=max(1, int(top_n)),
             min_coverage=float(min_coverage),
             path_weight=float(path_weight),
+            exclusion_bars=max(0, int(exclusion_bars)),
             algorithm=str(algorithm),
         ),
     )
@@ -5139,6 +5174,88 @@ def _lightweight_kline_series(
             }
         )
     return series
+
+
+def _cross_section_traversal_kline_series(
+    bars: pd.DataFrame,
+    results: pd.DataFrame,
+    *,
+    target_symbol: str,
+    target_start: str | pd.Timestamp,
+    target_end: str | pd.Timestamp,
+    top_n: int = 6,
+    forward_bars: int = 10,
+    stock_names: dict[str, str] | None = None,
+) -> list[dict[str, object]]:
+    target = normalize_symbol(target_symbol)
+    series: list[dict[str, object]] = []
+    target_item = _kline_series_item(
+        bars,
+        symbol=target,
+        start=pd.Timestamp(target_start),
+        end=inclusive_end_timestamp(target_end),
+        title=_stock_chart_label(target, stock_names, is_target=True),
+        forward_bars=forward_bars,
+    )
+    if target_item is not None:
+        series.append(target_item)
+    if results.empty:
+        return series
+    for index, (_, row) in enumerate(results.head(max(1, int(top_n))).iterrows(), start=1):
+        symbol = normalize_symbol(str(row.get("symbol", "")))
+        if not symbol:
+            continue
+        start = row.get("区间开始")
+        end = row.get("区间结束")
+        if pd.isna(start) or pd.isna(end):
+            continue
+        label = _stock_chart_label(symbol, stock_names)
+        title = f"样本{index} {label}（{_date_text(start)} 至 {_date_text(end)}）"
+        item = _kline_series_item(
+            bars,
+            symbol=symbol,
+            start=pd.Timestamp(start),
+            end=inclusive_end_timestamp(end),
+            title=title,
+            forward_bars=forward_bars,
+        )
+        if item is not None:
+            series.append(item)
+    return series
+
+
+def _kline_series_item(
+    bars: pd.DataFrame,
+    *,
+    symbol: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    title: str,
+    forward_bars: int,
+) -> dict[str, object] | None:
+    symbol_bars = bars.loc[(bars["stock_code"].map(normalize_symbol) == normalize_symbol(symbol)) & (bars["date"] >= start)].sort_values("date")
+    if symbol_bars.empty:
+        return None
+    window = symbol_bars.loc[symbol_bars["date"] <= end]
+    if window.empty:
+        return None
+    chart_window = symbol_bars.head(len(window) + max(0, int(forward_bars)))
+    return {
+        "title": title,
+        "windowEndTime": pd.Timestamp(window["date"].iloc[-1]).strftime("%Y-%m-%d"),
+        "windowSize": int(len(window)),
+        "forwardSize": int(max(0, len(chart_window) - len(window))),
+        "data": [
+            {
+                "time": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            }
+            for _, row in chart_window.iterrows()
+        ],
+    }
 
 
 def _cross_section_symbol_window(result: CrossSectionSearchResult, symbol: str) -> tuple[pd.Timestamp, pd.Timestamp]:

@@ -254,6 +254,78 @@ def test_window_traversal_matches_target_window_inside_historical_range() -> Non
     assert row["t_plus_1_return"] == pytest.approx(14 / 13 - 1)
 
 
+def test_window_traversal_excludes_nearby_candidate_windows() -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 11, 12, 13], start="2026-05-17"),
+            _bars("000001.SZ", list(range(10, 26)), start="2021-01-01"),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section_window_traversal(
+        bars,
+        CrossSectionWindowTraversalConfig(
+            target_symbol="300750.SZ",
+            universe_symbols=("000001.SZ",),
+            target_start="2026-05-17",
+            target_end="2026-05-20",
+            traversal_start="2021-01-01",
+            traversal_end="2021-01-16",
+            top_n=3,
+            min_coverage=1.0,
+            exclusion_bars=2,
+        ),
+    )
+
+    starts = sorted(pd.to_datetime(result.results["区间开始"]).tolist())
+    assert len(starts) == 3
+    assert all((right - left).days > 2 for left, right in zip(starts, starts[1:]))
+
+
+def test_window_traversal_scores_candidate_windows_with_vectorized_features(monkeypatch) -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 12, 11, 13], start="2026-05-17"),
+            *[
+                _bars(
+                    f"{index:06d}.SZ",
+                    (np.linspace(8 + index, 30 + index, 80) + np.sin(np.arange(80))).tolist(),
+                    start="2021-01-01",
+                )
+                for index in range(1, 5)
+            ],
+        ],
+        ignore_index=True,
+    )
+    call_count = 0
+    original = similarity_module._fast_window_features
+
+    def counted_fast_window_features(window: pd.DataFrame) -> dict[str, float]:
+        nonlocal call_count
+        call_count += 1
+        return original(window)
+
+    monkeypatch.setattr(similarity_module, "_fast_window_features", counted_fast_window_features)
+
+    result = search_cross_section_window_traversal(
+        bars,
+        CrossSectionWindowTraversalConfig(
+            target_symbol="300750.SZ",
+            universe_symbols=tuple(f"{index:06d}.SZ" for index in range(1, 5)),
+            target_start="2026-05-17",
+            target_end="2026-05-20",
+            traversal_start="2021-01-01",
+            traversal_end="2021-03-21",
+            top_n=5,
+            min_coverage=1.0,
+        ),
+    )
+
+    assert len(result.results) == 5
+    assert call_count == 1
+
+
 def test_fast_cross_section_features_match_public_window_features() -> None:
     bars = _bars("000001.SZ", [10, 11, 9, 12, 13], amounts=[1000, 1200, 1800, 1300, 1400])
 
