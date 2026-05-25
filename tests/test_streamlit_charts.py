@@ -94,6 +94,9 @@ def test_app_theme_css_uses_workbench_palette() -> None:
     assert "--ashare-text: #0f172a" in css
     assert "#2563eb" in css
     assert "#14b8a6" in css
+    assert 'button[data-testid="baseButton-primary"]' in css
+    assert "background: var(--ashare-blue) !important;" in css
+    assert "color: #ffffff !important;" in css
     assert '[data-testid="stSidebar"]' in css
     assert '.stTabs [data-baseweb="tab-list"]' in css
     assert "line-height: 1.65" in css

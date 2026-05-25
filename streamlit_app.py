@@ -288,16 +288,26 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14) !important;
 }
 
-.stButton > button[kind="primary"] {
-  background: var(--ashare-blue);
-  border-color: var(--ashare-blue);
-  color: #ffffff;
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="baseButton-primary"],
+button[data-testid="baseButton-primary"] {
+  background: var(--ashare-blue) !important;
+  border-color: var(--ashare-blue) !important;
+  color: #ffffff !important;
 }
 
-.stButton > button[kind="primary"]:hover {
-  background: #1d4ed8;
-  border-color: #1d4ed8;
-  color: #ffffff;
+.stButton > button[kind="primary"] *,
+.stButton > button[data-testid="baseButton-primary"] *,
+button[data-testid="baseButton-primary"] * {
+  color: #ffffff !important;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="baseButton-primary"]:hover,
+button[data-testid="baseButton-primary"]:hover {
+  background: #1d4ed8 !important;
+  border-color: #1d4ed8 !important;
+  color: #ffffff !important;
 }
 
 input,
