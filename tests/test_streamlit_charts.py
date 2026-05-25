@@ -30,6 +30,7 @@ from streamlit_app import (
     _file_picker_entries,
     _format_cross_section_stats,
     _format_data_check_status,
+    _format_review_rankings,
     _format_results,
     _full_daily_download_universe,
     _history_bucket_summary,
@@ -62,6 +63,7 @@ from streamlit_app import (
     _review_ai_provider_options,
     _review_ai_result_is_current,
     _review_ai_signature,
+    _review_default_recap_html,
     _review_output_source_options,
     _run_download_job_step,
     _set_download_job_status,
@@ -260,6 +262,76 @@ def test_review_ai_result_is_current_requires_matching_signature() -> None:
     assert _review_ai_result_is_current(state, result_key="review_ai_result", signature=signature)
     assert not _review_ai_result_is_current(state, result_key="review_ai_result", signature="stale")
     assert not _review_ai_result_is_current({"review_ai_result_signature": signature}, result_key="review_ai_result", signature=signature)
+
+
+def test_format_review_rankings_hides_direction_and_tomorrow_columns() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "排名": 1,
+                "代码": "688603.SH",
+                "股票": "天承科技",
+                "所属方向": "行业:半导体",
+                "对标指数": "000300.SH",
+                "指数阶段": "指数修复",
+                "强弱等级": "夯爆了",
+                "区间收益": 0.8816,
+                "最大回撤": -0.3214,
+                "上涨K占比": 0.52,
+                "相对超额": 0.8178,
+                "关键转折点": "5日/10日线承接",
+                "当前性质": "弹性冲浪",
+                "锐评结论": "强但别信仰",
+                "明日验证": "缩量回踩不破短均",
+            }
+        ]
+    )
+
+    formatted = _format_review_rankings(frame)
+
+    assert "所属方向" not in formatted.columns
+    assert "明日验证" not in formatted.columns
+    assert "行业:半导体" not in formatted.to_string()
+    assert "缩量回踩不破短均" not in formatted.to_string()
+
+
+def test_review_default_recap_html_uses_cards_without_removed_columns() -> None:
+    ranking = pd.DataFrame(
+        [
+            {
+                "排名": 1,
+                "代码": "688603.SH",
+                "股票": "天承科技",
+                "所属方向": "行业:半导体",
+                "对标指数": "000300.SH",
+                "指数阶段": "指数修复",
+                "强弱等级": "夯爆了",
+                "区间收益": 0.8816,
+                "最大回撤": -0.3214,
+                "相对超额": 0.8178,
+                "关键转折点": "5日/10日线承接",
+                "当前性质": "弹性冲浪",
+                "锐评结论": "强但别信仰",
+                "明日验证": "缩量回踩不破短均",
+            }
+        ]
+    )
+
+    html = _review_default_recap_html(
+        ranking,
+        market_text="对标组合平均收益 16.78%，当前更像指数主升。",
+        result_count=1,
+        average_return=0.2388,
+    )
+
+    assert 'data-testid="default-review-recap"' in html
+    assert 'class="review-rank-card grade-s"' in html
+    assert 'class="review-metric-label">区间收益</span>' in html
+    assert "研究端排序复盘" in html
+    assert "所属方向" not in html
+    assert "明日验证" not in html
+    assert "行业:半导体" not in html
+    assert "缩量回踩不破短均" not in html
 
 
 def test_review_output_source_options_are_default_or_ai() -> None:

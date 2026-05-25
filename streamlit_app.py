@@ -50,8 +50,6 @@ from ashare_cross_section_similarity.review import (
     build_equal_weight_series,
     build_video_script_profile,
     rank_review_results,
-    render_multi_review_text,
-    render_review_text,
     render_video_script_cards_html,
 )
 from ashare_cross_section_similarity.review_ai import (
@@ -385,6 +383,234 @@ code {
 .review-ai-sections,
 .review-script-wrap {
   color: var(--ashare-text);
+}
+
+.review-default-recap {
+  display: grid;
+  gap: 1rem;
+  color: var(--ashare-text);
+}
+
+.review-recap-hero,
+.review-recap-section,
+.review-rank-card {
+  background: var(--ashare-surface);
+  border: 1px solid var(--ashare-line);
+  border-radius: var(--ashare-radius);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+}
+
+.review-recap-hero {
+  padding: 1rem 1.1rem;
+  border-left: 5px solid var(--ashare-blue);
+}
+
+.review-recap-title {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 760;
+}
+
+.review-recap-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 999px;
+  background: #e8f0ff;
+  color: var(--ashare-blue);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.review-recap-hero p,
+.review-recap-section p {
+  margin: 0.35rem 0 0;
+  color: var(--ashare-text);
+  line-height: 1.7;
+}
+
+.review-ranking-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 0.95rem;
+}
+
+.review-rank-card {
+  --rank-accent: #64748b;
+  --rank-bg: #ffffff;
+  --rank-badge-bg: #f1f5f9;
+  --rank-badge-text: #334155;
+  padding: 0.95rem 1rem;
+  border-left: 5px solid var(--rank-accent);
+  background: var(--rank-bg);
+}
+
+.review-rank-card.grade-s {
+  --rank-accent: #7c3aed;
+  --rank-bg: #f7f5ff;
+  --rank-badge-bg: #ede9fe;
+  --rank-badge-text: #5b21b6;
+}
+
+.review-rank-card.grade-a {
+  --rank-accent: #16a34a;
+  --rank-bg: #f3fbf6;
+  --rank-badge-bg: #dcfce7;
+  --rank-badge-text: #166534;
+}
+
+.review-rank-card.grade-b {
+  --rank-accent: var(--ashare-blue);
+  --rank-bg: #f3f7ff;
+  --rank-badge-bg: #dbeafe;
+  --rank-badge-text: #1d4ed8;
+}
+
+.review-rank-card.grade-c {
+  --rank-accent: var(--ashare-amber);
+  --rank-bg: #fffbeb;
+  --rank-badge-bg: #fef3c7;
+  --rank-badge-text: #92400e;
+}
+
+.review-rank-card.grade-d,
+.review-rank-card.grade-e {
+  --rank-accent: #64748b;
+  --rank-bg: #f8fafc;
+  --rank-badge-bg: #e2e8f0;
+  --rank-badge-text: #334155;
+}
+
+.review-rank-card.grade-f {
+  --rank-accent: var(--ashare-red);
+  --rank-bg: #fff5f5;
+  --rank-badge-bg: #fee2e2;
+  --rank-badge-text: #991b1b;
+}
+
+.review-rank-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.review-rank-name {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1.02rem;
+  font-weight: 760;
+  color: var(--ashare-text);
+}
+
+.review-rank-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 999px;
+  background: var(--rank-badge-bg);
+  color: var(--rank-badge-text);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.review-rank-code {
+  margin-top: 0.15rem;
+  color: var(--ashare-muted);
+  font-size: 0.82rem;
+  font-weight: 620;
+}
+
+.review-rank-badge {
+  border-radius: 999px;
+  background: var(--rank-badge-bg);
+  color: var(--rank-badge-text);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.review-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0.8rem 0;
+}
+
+.review-metric {
+  border-radius: 7px;
+  background: rgba(248, 250, 252, 0.82);
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  padding: 0.55rem 0.6rem;
+}
+
+.review-metric-value {
+  display: block;
+  color: var(--ashare-text);
+  font-size: 1rem;
+  font-weight: 780;
+}
+
+.review-metric-label {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--ashare-muted);
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.review-rank-line {
+  display: grid;
+  grid-template-columns: 4.6rem 1fr;
+  gap: 0.55rem;
+  margin-top: 0.45rem;
+  line-height: 1.55;
+}
+
+.review-rank-line-label {
+  color: var(--ashare-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.review-rank-line-value {
+  color: var(--ashare-text);
+  font-size: 0.9rem;
+}
+
+.review-recap-section {
+  padding: 0.9rem 1rem;
+}
+
+.review-recap-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+}
+
+.review-recap-item {
+  margin: 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--ashare-line-strong);
+  color: var(--ashare-text);
+  line-height: 1.65;
+}
+
+@media (max-width: 900px) {
+  .review-ranking-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
 """
@@ -1744,6 +1970,146 @@ def _clear_review_ai_result(session_state: MutableMapping[str, object], result_k
     session_state.pop(_review_ai_signature_key(result_key), None)
 
 
+def _review_default_recap_html(
+    ranking: pd.DataFrame,
+    *,
+    market_text: str,
+    result_count: int,
+    average_return: float | None,
+) -> str:
+    if ranking.empty:
+        return (
+            '<div class="review-default-recap" data-testid="default-review-recap">'
+            '<section class="review-recap-hero">'
+            '<h3 class="review-recap-title"><span class="review-recap-index">1</span>研究端排序复盘</h3>'
+            "<p>没有可排序对象。</p>"
+            "</section></div>"
+        )
+
+    best = ranking.iloc[0]
+    worst = ranking.iloc[-1]
+    average_text = _percent_text(average_return) if average_return is not None else "-"
+    cards = "\n".join(_review_rank_card_html(row) for _, row in ranking.iterrows())
+    critic_items = "\n".join(
+        f'<p class="review-recap-item"><strong>{escape(_review_display_title(row))}</strong>：'
+        f'{escape(_review_display_text(row, "锐评结论"))}</p>'
+        for _, row in ranking.iterrows()
+    )
+    turning_items = "\n".join(
+        f'<p class="review-recap-item"><strong>{escape(_review_display_title(row))}</strong>：'
+        f'当前卡在{escape(_review_display_text(row, "关键转折点"))}，'
+        f'性质是{escape(_review_display_text(row, "当前性质"))}。</p>'
+        for _, row in ranking.iterrows()
+    )
+    close_text = (
+        f"谁是真强，看 {escape(_review_display_title(best))} 的超额和承接；"
+        "谁只是补涨，看刷子、路边里仍有正收益的对象；"
+        f"谁已经拉完或需要回避，看 {escape(_review_display_title(worst))} 的破位、回撤和负超额。"
+    )
+    return f"""
+<div class="review-default-recap" data-testid="default-review-recap">
+  <section class="review-recap-hero">
+    <h3 class="review-recap-title"><span class="review-recap-index">1</span>研究端排序复盘</h3>
+    <p><strong>市场总环境：</strong>{escape(market_text)}</p>
+    <p>本次共复盘 {int(result_count)} 个对象，平均区间收益 {average_text}。排序第一是 {escape(_review_display_title(best))}，最后是 {escape(_review_display_title(worst))}。</p>
+  </section>
+  <section>
+    <h3 class="review-recap-title"><span class="review-recap-index">2</span>排序总表</h3>
+    <div class="review-ranking-grid" data-testid="default-review-ranking-cards">
+      {cards}
+    </div>
+  </section>
+  <section class="review-recap-section">
+    <h3 class="review-recap-title"><span class="review-recap-index">3</span>逐个锐评</h3>
+    <div class="review-recap-list">{critic_items}</div>
+  </section>
+  <section class="review-recap-section">
+    <h3 class="review-recap-title"><span class="review-recap-index">4</span>关键转折点复盘</h3>
+    <div class="review-recap-list">{turning_items}</div>
+  </section>
+  <section class="review-recap-section">
+    <h3 class="review-recap-title"><span class="review-recap-index">5</span>收束</h3>
+    <p>{close_text}</p>
+  </section>
+</div>
+"""
+
+
+def _review_rank_card_html(row: pd.Series) -> str:
+    grade = _review_display_text(row, "强弱等级")
+    grade_class = _review_ai_script_grade_class(grade)
+    rank = _review_display_text(row, "排名")
+    title = _review_display_title(row)
+    code = _review_display_text(row, "代码")
+    metrics = "\n".join(
+        [
+            _review_metric_html("区间收益", _percent_text(row.get("区间收益"))),
+            _review_metric_html("最大回撤", _percent_text(row.get("最大回撤"))),
+            _review_metric_html("相对超额", _percent_text(row.get("相对超额"))),
+        ]
+    )
+    benchmark = _review_display_text(row, "对标指数")
+    index_phase = _review_display_text(row, "指数阶段")
+    turning_point = _review_display_text(row, "关键转折点")
+    nature = _review_display_text(row, "当前性质")
+    critique = _review_display_text(row, "锐评结论")
+    return f"""
+<article class="review-rank-card {grade_class}">
+  <div class="review-rank-head">
+    <div>
+      <div class="review-rank-name"><span class="review-rank-number">{escape(rank)}</span>{escape(title)}</div>
+      <div class="review-rank-code">{escape(code)}</div>
+    </div>
+    <span class="review-rank-badge">{escape(grade)}</span>
+  </div>
+  <div class="review-metric-grid">{metrics}</div>
+  <div class="review-rank-line"><span class="review-rank-line-label">对标指数</span><span class="review-rank-line-value">{escape(benchmark)} / {escape(index_phase)}</span></div>
+  <div class="review-rank-line"><span class="review-rank-line-label">关键转折</span><span class="review-rank-line-value">{escape(turning_point)}</span></div>
+  <div class="review-rank-line"><span class="review-rank-line-label">当前性质</span><span class="review-rank-line-value">{escape(nature)}</span></div>
+  <div class="review-rank-line"><span class="review-rank-line-label">锐评结论</span><span class="review-rank-line-value">{escape(critique)}</span></div>
+</article>
+"""
+
+
+def _review_metric_html(label: str, value: str) -> str:
+    return (
+        '<div class="review-metric">'
+        f'<span class="review-metric-value">{escape(value)}</span>'
+        f'<span class="review-metric-label">{escape(label)}</span>'
+        "</div>"
+    )
+
+
+def _review_display_title(row: pd.Series) -> str:
+    stock = _review_display_text(row, "股票")
+    code = _review_display_text(row, "代码")
+    return f"{stock}（{code}）" if stock and stock != "-" else code
+
+
+def _review_display_text(row: pd.Series, column: str) -> str:
+    value = row.get(column, "-")
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    return text if text else "-"
+
+
+def _review_default_market_text(comparison_frame: pd.DataFrame | None) -> str:
+    if comparison_frame is None or comparison_frame.empty or "对比收益" not in comparison_frame.columns:
+        return "未提供对标组合，本次复盘仅比较区间内对象强弱。"
+    returns = pd.to_numeric(comparison_frame["对比收益"], errors="coerce").dropna()
+    if returns.empty:
+        return "对标组合收益不可用，本次复盘以对象自身区间表现为主。"
+    mean_return = float(returns.mean())
+    if mean_return >= 0.08:
+        phase = "指数主升"
+    elif mean_return >= 0.0:
+        phase = "指数修复"
+    else:
+        phase = "指数偏弱"
+    return f"对标组合平均收益 {_percent_text(mean_return)}，当前更像{phase}。"
+
+
 def _review_generation_signature(payload: Mapping[str, object]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2207,7 +2573,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         )
     else:
         st.markdown("**3. 复盘与锐评**")
-        st.markdown(render_review_text(result, comparison_frame, stock_names=stock_names))
+        st.html(
+            _review_default_recap_html(
+                single_ranking_frame,
+                market_text=_review_default_market_text(single_comparison_frame),
+                result_count=1,
+                average_return=result.overview.get("return"),
+            )
+        )
         st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
         st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
     for warning in all_warnings:
@@ -2476,7 +2849,19 @@ def _render_multi_review_output(
         )
     else:
         st.markdown("**3. 复盘与锐评**")
-        st.markdown(render_multi_review_text(ranked_results, comparison_frame, stock_names=stock_names))
+        average_return = (
+            pd.Series([result.overview.get("return") for result in ranked_results], dtype="float64")
+            .dropna()
+            .mean()
+        )
+        st.html(
+            _review_default_recap_html(
+                ranking_frame,
+                market_text=_review_default_market_text(comparison_frame),
+                result_count=len(ranked_results),
+                average_return=float(average_return) if pd.notna(average_return) else None,
+            )
+        )
         st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
         st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
     for warning in dict.fromkeys(all_warnings):
@@ -3109,7 +3494,6 @@ def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
         "排名",
         "代码",
         "股票",
-        "所属方向",
         "对标指数",
         "指数阶段",
         "强弱等级",
@@ -3120,7 +3504,6 @@ def _format_review_rankings(frame: pd.DataFrame) -> pd.DataFrame:
         "关键转折点",
         "当前性质",
         "锐评结论",
-        "明日验证",
     ]
     if frame.empty:
         return pd.DataFrame(columns=columns)
