@@ -13,7 +13,13 @@ from urllib.request import urlopen
 
 import pandas as pd
 
-from ashare_cross_section_similarity.data import available_symbols, import_price_frame, load_local_bars, read_price_data_file
+from ashare_cross_section_similarity.data import (
+    available_symbols,
+    import_price_frame,
+    load_local_bars,
+    load_symbol_name_map,
+    read_price_data_file,
+)
 from ashare_cross_section_similarity.data_manager import migrate_kline_data, plan_kline_migration
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
@@ -607,6 +613,7 @@ class DesktopSearchService:
         names = {
             **_stock_names_from_etf_index(_fallback_review_etf_index(), normalized),
             **_stock_names_from_akshare(normalized),
+            **load_symbol_name_map(self.config.data_root, normalized),
         }
         if bars is not None:
             names.update(_stock_names_from_bars(bars, normalized))

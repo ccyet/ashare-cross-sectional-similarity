@@ -25,6 +25,7 @@ from ashare_cross_section_similarity.desktop.service import (
     import_symbol_file,
     parse_symbol_list,
 )
+from ashare_cross_section_similarity.data import update_symbol_name_map
 
 
 def _write_bars(root: Path, symbol: str, closes: list[float]) -> None:
@@ -170,6 +171,16 @@ def test_desktop_service_resolves_stock_names_for_all_desktop_modules(
         "000001.SZ": "平安银行",
         "510300.SH": "沪深300ETF",
     }
+
+
+def test_desktop_service_resolves_local_sector_index_names(tmp_path: Path) -> None:
+    data_root = tmp_path / "market" / "daily"
+    update_symbol_name_map(data_root, {"880081.SH": "通达信趋势"}, source="tdx_sector_index")
+    service = DesktopSearchService(DesktopAppConfig(data_root=data_root))
+
+    names = service.resolve_stock_names(("880081.SH",))
+
+    assert names == {"880081.SH": "通达信趋势"}
 
 
 def test_desktop_service_selects_latest_quick_window(tmp_path: Path) -> None:

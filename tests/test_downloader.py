@@ -11,6 +11,7 @@ from ashare_cross_section_similarity.downloader import (
     data_check,
     update_local_bars,
 )
+from ashare_cross_section_similarity.data import load_symbol_name_map
 
 
 def test_build_update_command_uses_original_trend_backtest_script(tmp_path: Path) -> None:
@@ -213,6 +214,37 @@ def test_update_local_bars_can_fetch_and_write_with_tdx_engine(tmp_path: Path) -
     ]
     saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "000001.SZ.parquet")
     assert saved["close"].tolist() == [1, 2]
+
+
+def test_update_local_bars_persists_downloaded_symbol_names(tmp_path: Path) -> None:
+    data_root = tmp_path / "market" / "daily"
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["880081.SH", "880081.SH"],
+            "stock_name": ["通达信趋势", "通达信趋势"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch("ashare_cross_section_similarity.downloader.fetch_tdx_bars", return_value=bars):
+        update_local_bars(
+            symbols=("880081.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=data_root,
+            provider="/Applications/Tdx/PYPlugins/user",
+            download_engine="tdx",
+        )
+
+    assert load_symbol_name_map(data_root, ("880081.SH",)) == {"880081.SH": "通达信趋势"}
 
 
 def test_tdx_engine_fetches_symbol_batch_once(tmp_path: Path) -> None:

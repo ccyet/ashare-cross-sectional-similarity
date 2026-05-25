@@ -2177,7 +2177,7 @@ class MainWindow(QMainWindow):
         frame = review_segments_frame(reviews, stock_names=stock_names)
         self.review_table.setModel(DataFrameModel(frame))
         self.review_table.resizeColumnsToContents()
-        review_kline_series = review_candlestick_series(reviews)
+        review_kline_series = review_candlestick_series(reviews, stock_names=stock_names)
         self.review_chart.set_series(review_kline_series)
         self.review_relative_chart.set_series(review_relative_line_series(reviews, comparison_frames))
         self.review_overview_table.setModel(DataFrameModel(review_overview_frame(reviews, stock_names=stock_names)))

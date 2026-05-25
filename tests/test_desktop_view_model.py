@@ -310,6 +310,17 @@ def test_review_candlestick_series_preserves_ohlc_rows() -> None:
     assert series[0].rows[0].close == 10
 
 
+def test_review_candlestick_series_uses_stock_name_labels() -> None:
+    result = analyze_price_review(
+        _bars("880081.SH", [10, 11, 12, 13]),
+        ReviewConfig(symbol="880081.SH", start="2024-01-01", end="2024-01-04"),
+    )
+
+    series = review_candlestick_series([result], stock_names={"880081.SH": "通达信趋势"})
+
+    assert series[0].label.startswith("通达信趋势（880081.SH）")
+
+
 def test_review_candlestick_series_highlights_main_segments_by_direction() -> None:
     result = analyze_price_review(
         _bars("300750.SZ", [10, 11, 12, 13, 12, 11, 10, 11, 12, 13]),

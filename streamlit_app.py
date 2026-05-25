@@ -23,9 +23,12 @@ from ashare_cross_section_similarity.cli import _resolve_universe
 from ashare_cross_section_similarity.data import (
     import_price_frame,
     inclusive_end_timestamp,
+    load_symbol_name_map,
     load_local_bars,
     read_price_data_file,
     resolve_timeframe_root,
+    symbol_name_fingerprint,
+    update_symbol_name_map,
 )
 from ashare_cross_section_similarity.llm_client import (
     DEFAULT_LLM_PROVIDER,
@@ -978,8 +981,9 @@ def _render_cross_section_tab(
 
     display_results = _display_results(result.results, int(top_n))
     name_count = max(int(top_n), 6)
-    stock_names = _cached_stock_name_map(
-        tuple(unique_symbols([result.target_symbol, *result.results["symbol"].head(name_count).astype(str).tolist()]))
+    stock_names = _review_stock_name_map(
+        data_root,
+        tuple(unique_symbols([result.target_symbol, *result.results["symbol"].head(name_count).astype(str).tolist()])),
     )
     st.caption(f"当前展示前 {len(display_results):,} / {len(result.results):,} 条；下方统计和 CSV 基于全部有效结果。")
     st.dataframe(_centered(_format_results(display_results, stock_names)), use_container_width=True, hide_index=True)
@@ -1944,7 +1948,7 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             st.warning(hint)
         return
 
-    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **review_extra_names}
+    stock_names = _review_stock_name_map(data_root, tuple(direct_symbols), extra_stock_names=review_extra_names)
     comparison_frames, comparison_rows, warnings = _review_comparison_data(
         result.window,
         direct_bars,
@@ -2174,7 +2178,7 @@ def _render_multi_review_output(
         st.error(f"本地行情读取失败：{exc}")
         return
 
-    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **(extra_stock_names or {})}
+    stock_names = _review_stock_name_map(data_root, tuple(direct_symbols), extra_stock_names=extra_stock_names)
     results: list[ReviewResult] = []
     all_warnings: list[str] = []
     for symbol in target_symbols:
@@ -3098,7 +3102,7 @@ def _review_kline_chart(result: ReviewResult, stock_names: dict[str, str] | None
             annotation_position="top left",
         )
     fig.update_layout(
-        title="目标K线与主要波段",
+        title=f"{label}K线与主要波段",
         xaxis_title="日期",
         yaxis_title="价格",
         xaxis_rangeslider_visible=False,
@@ -3322,6 +3326,7 @@ def _render_tdx_sector_index_update(*, trend_repo: str, data_root: str, adjust: 
                         filter_text=filter_text,
                         extra_symbols=extra_symbols,
                     )
+                    saved_names = update_symbol_name_map(data_root, sector_index, source="tdx_sector_index")
                     download_symbols, checked = _prepare_full_daily_download_symbols(
                         symbols=all_symbols,
                         data_root=Path(data_root),
@@ -3333,6 +3338,7 @@ def _render_tdx_sector_index_update(*, trend_repo: str, data_root: str, adjust: 
                 st.session_state["tdx_sector_index_summary"] = {
                     "total": len(all_symbols),
                     "tdx_total": len(sector_index),
+                    "name_total": int(len(saved_names)),
                     "download": len(download_symbols),
                     "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
                     "filter_text": filter_text.strip(),
@@ -3363,6 +3369,7 @@ def _render_tdx_sector_index_update(*, trend_repo: str, data_root: str, adjust: 
             filter_label = str(summary.get("filter_text") or "全部")
             st.info(
                 f"TDX 板块指数 {int(summary.get('tdx_total', 0)):,} 个；"
+                f"已记录名称 {int(summary.get('name_total', 0)):,} 个；"
                 f"本次筛选 {int(summary.get('total', 0)):,} 个；"
                 f"待下载 {int(summary.get('download', 0)):,} 个；"
                 f"筛选 {filter_label}；区间 {summary.get('start')} 至 {summary.get('end')}。"
@@ -3577,6 +3584,31 @@ def _cached_stock_name_map(symbols: tuple[str, ...]) -> dict[str, str]:
     except Exception:  # noqa: BLE001
         return {}
     return _stock_name_map_from_table(table, normalized)
+
+
+def _review_stock_name_map(
+    data_root: str | Path,
+    symbols: tuple[str, ...] | list[str],
+    *,
+    extra_stock_names: dict[str, str] | None = None,
+) -> dict[str, str]:
+    normalized = tuple(unique_symbols(symbols))
+    if not normalized:
+        return {}
+    akshare_names = _cached_stock_name_map(normalized)
+    local_names = _cached_local_symbol_name_map(str(Path(data_root).expanduser()), normalized, symbol_name_fingerprint(data_root))
+    extra_names = {normalize_symbol(symbol): name for symbol, name in (extra_stock_names or {}).items() if str(name).strip()}
+    return {**akshare_names, **local_names, **extra_names}
+
+
+@st.cache_data(show_spinner=False)
+def _cached_local_symbol_name_map(
+    data_root: str,
+    symbols: tuple[str, ...],
+    metadata_fingerprint: tuple[str, int, int],
+) -> dict[str, str]:
+    _ = metadata_fingerprint
+    return load_symbol_name_map(data_root, symbols)
 
 
 def _load_target_bars_for_quick_window(

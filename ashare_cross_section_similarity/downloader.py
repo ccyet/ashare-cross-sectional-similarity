@@ -9,8 +9,10 @@ import pandas as pd
 
 from ashare_cross_section_similarity.data import (
     CANONICAL_COLUMNS,
+    extract_symbol_name_map,
     inclusive_end_timestamp,
     resolve_timeframe_root,
+    update_symbol_name_map,
 )
 from ashare_cross_section_similarity.akshare_source import fetch_akshare_bars
 from ashare_cross_section_similarity.openbb_source import fetch_openbb_bars
@@ -180,6 +182,7 @@ def _update_local_bars_with_openbb(
             if frame.empty:
                 rows.append(_download_row(symbol, "failed", 0, 0, "OpenBB 未返回行情数据"))
                 continue
+            _persist_downloaded_symbol_names(data_root, frame, (symbol,), source=f"openbb:{provider}")
             saved = _write_symbol_bars(root / f"{symbol}.parquet", frame)
             rows.append(
                 _download_row(
@@ -220,6 +223,7 @@ def _update_local_bars_with_akshare(
             if frame.empty:
                 rows.append(_download_row(symbol, "failed", 0, 0, "AkShare 未返回行情数据"))
                 continue
+            _persist_downloaded_symbol_names(data_root, frame, (symbol,), source="akshare")
             saved = _write_symbol_bars(root / f"{symbol}.parquet", frame)
             rows.append(
                 _download_row(
@@ -260,6 +264,7 @@ def _update_local_bars_with_tdx(
     except Exception as exc:  # noqa: BLE001
         return pd.DataFrame([_download_row(symbol, "failed", 0, 0, str(exc)) for symbol in symbols])
 
+    _persist_downloaded_symbol_names(data_root, fetched, tuple(symbols), source="tdx")
     for symbol in symbols:
         try:
             frame = fetched.loc[fetched["stock_code"] == symbol, CANONICAL_COLUMNS]
@@ -307,6 +312,18 @@ def _normalize_download_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result[column] = pd.to_numeric(result[column], errors="coerce")
     result = result.dropna(subset=["date", "stock_code", "open", "high", "low", "close"])
     return result[CANONICAL_COLUMNS]
+
+
+def _persist_downloaded_symbol_names(
+    data_root: str | Path,
+    frame: pd.DataFrame,
+    symbols: tuple[str, ...] | list[str],
+    *,
+    source: str,
+) -> None:
+    names = extract_symbol_name_map(frame, symbols)
+    if names:
+        update_symbol_name_map(data_root, names, source=source)
 
 
 def data_check(

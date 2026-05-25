@@ -320,13 +320,17 @@ def review_line_series(result: ReviewResult) -> list[LineSeries]:
     return [series] if series.values else []
 
 
-def review_candlestick_series(results: list[ReviewResult] | tuple[ReviewResult, ...]) -> list[CandlestickSeries]:
+def review_candlestick_series(
+    results: list[ReviewResult] | tuple[ReviewResult, ...],
+    *,
+    stock_names: dict[str, str] | None = None,
+) -> list[CandlestickSeries]:
     return [
         series
         for result in results
         if (
             series := _candlestick_series(
-                result.symbol,
+                _stock_label(result.symbol, stock_names),
                 result.window,
                 highlights=_review_segment_highlights(result.main_segments),
             )

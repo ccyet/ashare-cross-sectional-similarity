@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_cross_section_similarity.data import import_price_frame, load_local_bars, resolve_timeframe_root
+from ashare_cross_section_similarity.data import (
+    import_price_frame,
+    load_local_bars,
+    load_symbol_name_map,
+    resolve_timeframe_root,
+    update_symbol_name_map,
+)
 
 
 def test_resolve_timeframe_root_maps_daily_root_to_intraday_root(tmp_path: Path) -> None:
@@ -206,6 +212,45 @@ def test_import_price_frame_writes_multi_symbol_parquet(tmp_path: Path) -> None:
 
     assert loaded["stock_code"].tolist() == ["000001.SZ", "000001.SZ", "600519.SH"]
     assert loaded["close"].tolist() == [11.0, 12.0, 20.5]
+
+
+def test_import_price_frame_persists_uploaded_symbol_names(tmp_path: Path) -> None:
+    data_root = tmp_path / "market" / "daily"
+
+    import_price_frame(
+        data_root=data_root,
+        timeframe="1d",
+        adjust="qfq",
+        frame=pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-01"],
+                "symbol": ["880081.SH", "600519.SH"],
+                "name": ["通达信趋势", "贵州茅台"],
+                "open": [10, 20],
+                "high": [11, 21],
+                "low": [9, 19],
+                "close": [10.5, 20.5],
+            }
+        ),
+        source_name="upload.csv",
+    )
+
+    assert load_symbol_name_map(data_root, ("880081.SH", "600519.SH")) == {
+        "880081.SH": "通达信趋势",
+        "600519.SH": "贵州茅台",
+    }
+
+
+def test_update_symbol_name_map_merges_sector_index_names(tmp_path: Path) -> None:
+    data_root = tmp_path / "market" / "daily"
+
+    update_symbol_name_map(data_root, {"880081.SH": "通达信趋势"}, source="tdx_sector_index")
+    update_symbol_name_map(data_root, {"880082.SH": "板块趋势"}, source="tdx_sector_index")
+
+    assert load_symbol_name_map(data_root, ("880081.SH", "880082.SH")) == {
+        "880081.SH": "通达信趋势",
+        "880082.SH": "板块趋势",
+    }
 
 
 def test_import_price_frame_uses_fallback_symbol_for_single_symbol_file(tmp_path: Path) -> None:

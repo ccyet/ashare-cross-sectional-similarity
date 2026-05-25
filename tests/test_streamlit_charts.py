@@ -6,6 +6,7 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from ashare_cross_section_similarity.history import HistorySearchResult
+from ashare_cross_section_similarity.review import ReviewConfig, analyze_price_review, rank_review_results
 from ashare_cross_section_similarity.review_ai import ReviewAIResult, ReviewAIScriptCard
 from ashare_cross_section_similarity.similarity import CrossSectionSearchResult
 from streamlit_app import (
@@ -29,6 +30,8 @@ from streamlit_app import (
     _file_picker_entries,
     _format_cross_section_stats,
     _format_data_check_status,
+    _format_multi_review_overview,
+    _format_review_rankings,
     _format_results,
     _full_daily_download_universe,
     _history_bucket_summary,
@@ -62,6 +65,8 @@ from streamlit_app import (
     _review_ai_result_is_current,
     _review_ai_signature,
     _review_output_source_options,
+    _review_kline_chart,
+    _review_stock_name_map,
     _review_target_symbols,
     _run_download_job_step,
     _set_download_job_status,
@@ -195,6 +200,39 @@ def test_tdx_sector_index_download_universe_filters_names_and_normalizes_bare_co
     )
 
     assert symbols == ["880081.SH", "880082.SH", "880201.SH", "880099.SH"]
+
+
+def test_review_stock_name_map_uses_local_sector_index_metadata(tmp_path: Path, monkeypatch) -> None:
+    from ashare_cross_section_similarity.data import update_symbol_name_map
+
+    data_root = tmp_path / "market" / "daily"
+    update_symbol_name_map(data_root, {"880081.SH": "通达信趋势"}, source="tdx_sector_index")
+    monkeypatch.setattr("streamlit_app._cached_stock_name_map", lambda symbols: {})
+
+    names = _review_stock_name_map(str(data_root), ("880081.SH",), extra_stock_names={})
+
+    assert names == {"880081.SH": "通达信趋势"}
+
+
+def test_review_kline_and_overview_use_local_sector_index_name(tmp_path: Path, monkeypatch) -> None:
+    from ashare_cross_section_similarity.data import update_symbol_name_map
+
+    data_root = tmp_path / "market" / "daily"
+    update_symbol_name_map(data_root, {"880081.SH": "通达信趋势"}, source="tdx_sector_index")
+    monkeypatch.setattr("streamlit_app._cached_stock_name_map", lambda symbols: {})
+    result = analyze_price_review(
+        _bars("880081.SH", [10, 11, 12, 13]),
+        ReviewConfig(symbol="880081.SH", start="2024-01-01", end="2024-01-04"),
+    )
+
+    names = _review_stock_name_map(str(data_root), ("880081.SH",), extra_stock_names={})
+    overview = _format_multi_review_overview([result], names)
+    rankings = _format_review_rankings(rank_review_results([result], pd.DataFrame(), stock_names=names))
+    fig = _review_kline_chart(result, names)
+
+    assert overview.loc[0, "股票"] == "通达信趋势"
+    assert rankings.loc[0, "股票"] == "通达信趋势"
+    assert fig.layout.title.text == "通达信趋势（880081.SH，目标）K线与主要波段"
 
 
 def test_review_ai_body_html_renders_markdown_table() -> None:
