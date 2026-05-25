@@ -6,11 +6,22 @@ import pytest
 
 import ashare_cross_section_similarity.similarity as similarity_module
 from ashare_cross_section_similarity.features import FEATURE_COLUMNS, window_features
-from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
+from ashare_cross_section_similarity.similarity import (
+    CrossSectionSearchConfig,
+    CrossSectionWindowTraversalConfig,
+    search_cross_section,
+    search_cross_section_window_traversal,
+)
 
 
-def _bars(symbol: str, closes: list[float], amounts: list[float] | None = None) -> pd.DataFrame:
-    dates = pd.date_range("2024-01-01", periods=len(closes), freq="D")
+def _bars(
+    symbol: str,
+    closes: list[float],
+    amounts: list[float] | None = None,
+    *,
+    start: str = "2024-01-01",
+) -> pd.DataFrame:
+    dates = pd.date_range(start, periods=len(closes), freq="D")
     amounts = amounts or [1000.0 + index * 10 for index in range(len(closes))]
     return pd.DataFrame(
         {
@@ -207,6 +218,40 @@ def test_search_date_tolerance_scores_offsets_without_per_offset_z_normalize(mon
 
     assert len(result.results) == 3
     assert call_count <= 2
+
+
+def test_window_traversal_matches_target_window_inside_historical_range() -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 12, 11, 13], start="2026-05-17"),
+            _bars("000001.SZ", [7, 8, 10, 12, 11, 13, 14], start="2021-01-01"),
+            _bars("600519.SH", [30, 29, 28, 27, 26, 25, 24], start="2021-01-01"),
+        ],
+        ignore_index=True,
+    )
+
+    result = search_cross_section_window_traversal(
+        bars,
+        CrossSectionWindowTraversalConfig(
+            target_symbol="300750.SZ",
+            universe_symbols=("000001.SZ", "600519.SH"),
+            target_start="2026-05-17",
+            target_end="2026-05-20",
+            traversal_start="2021-01-01",
+            traversal_end="2021-01-07",
+            top_n=2,
+            min_coverage=1.0,
+            forward_windows=(1,),
+        ),
+    )
+
+    row = result.results.iloc[0]
+    assert result.window_size == 4
+    assert row["symbol"] == "000001.SZ"
+    assert row["区间开始"] == pd.Timestamp("2021-01-03")
+    assert row["区间结束"] == pd.Timestamp("2021-01-06")
+    assert row["遍历偏移"] == 2
+    assert row["t_plus_1_return"] == pytest.approx(14 / 13 - 1)
 
 
 def test_fast_cross_section_features_match_public_window_features() -> None:

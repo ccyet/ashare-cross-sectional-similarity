@@ -53,6 +53,33 @@ class CrossSectionSearchResult:
 
 
 @dataclass(frozen=True)
+class CrossSectionWindowTraversalConfig:
+    target_symbol: str
+    universe_symbols: tuple[str, ...]
+    target_start: str | pd.Timestamp
+    target_end: str | pd.Timestamp
+    traversal_start: str | pd.Timestamp
+    traversal_end: str | pd.Timestamp
+    top_n: int = 100
+    min_coverage: float = 1.0
+    path_weight: float = 0.7
+    forward_windows: tuple[int, ...] = FORWARD_RETURN_WINDOWS
+    algorithm: str = BASELINE_ALGORITHM
+
+
+@dataclass(frozen=True)
+class CrossSectionWindowTraversalResult:
+    target_symbol: str
+    target_start: pd.Timestamp
+    target_end: pd.Timestamp
+    traversal_start: pd.Timestamp
+    traversal_end: pd.Timestamp
+    window_size: int
+    results: pd.DataFrame
+    skipped: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class _CandidateWindow:
     frame: pd.DataFrame
     date_offset: int
@@ -161,6 +188,146 @@ def search_cross_section(
         results=result_frame,
         skipped=skipped_frame,
     )
+
+
+def search_cross_section_window_traversal(
+    bars: pd.DataFrame,
+    config: CrossSectionWindowTraversalConfig,
+) -> CrossSectionWindowTraversalResult:
+    if config.top_n < 1:
+        raise ValueError("top_n 至少需要 1。")
+    if not 0 < config.min_coverage <= 1:
+        raise ValueError("min_coverage 必须在 0 到 1 之间。")
+    if not 0 <= config.path_weight <= 1:
+        raise ValueError("path_weight 必须在 0 到 1 之间。")
+    if any(horizon <= 0 for horizon in config.forward_windows):
+        raise ValueError("forward_windows 必须为正整数。")
+    algorithm = ensure_algorithm_available(config.algorithm, mode="cross_section")
+    prepared = _prepare_bars(bars)
+    target_symbol = normalize_symbol(config.target_symbol)
+    target_start = pd.Timestamp(config.target_start)
+    target_end = inclusive_end_timestamp(config.target_end)
+    traversal_start = pd.Timestamp(config.traversal_start)
+    traversal_end = inclusive_end_timestamp(config.traversal_end)
+    if target_start > target_end:
+        raise ValueError("目标区间开始不能晚于结束。")
+    if traversal_start > traversal_end:
+        raise ValueError("遍历区间开始不能晚于结束。")
+
+    bars_by_symbol = _bars_by_symbol(prepared)
+    target_bars = bars_by_symbol.get(target_symbol)
+    if target_bars is None or target_bars.empty:
+        raise ValueError(f"目标标的 {target_symbol} 没有行情数据。")
+    target_window = target_bars.loc[target_bars["date"].between(target_start, target_end)].reset_index(drop=True)
+    if target_window.empty:
+        raise ValueError(f"目标标的 {target_symbol} 在目标区间没有行情数据。")
+    target_length = len(target_window)
+    minimum_rows = max(2, math.ceil(target_length * config.min_coverage))
+    if target_length < minimum_rows:
+        raise ValueError(f"目标窗口 K 线不足：{target_length} / {minimum_rows}。")
+    target_metric = build_algorithm_target(target_window, algorithm)
+    target_features = _fast_window_features(target_window)
+
+    rows: list[dict[str, object]] = []
+    skipped: list[dict[str, str]] = []
+    for symbol in unique_symbols(config.universe_symbols):
+        symbol_bars = bars_by_symbol.get(symbol)
+        if symbol_bars is None or symbol_bars.empty:
+            skipped.append({"symbol": symbol, "原因": "没有行情数据"})
+            continue
+        symbol_rows = _traversal_candidate_rows(
+            symbol_bars,
+            symbol=symbol,
+            traversal_start=traversal_start,
+            traversal_end=traversal_end,
+            target_length=target_length,
+            target_metric=target_metric,
+            target_features=target_features,
+            forward_windows=config.forward_windows,
+            algorithm=algorithm,
+        )
+        if not symbol_rows:
+            skipped.append({"symbol": symbol, "原因": f"遍历区间内没有足够 {target_length} 根K线的候选窗口"})
+            continue
+        rows.extend(symbol_rows)
+
+    result_frame = pd.DataFrame(rows)
+    if not result_frame.empty:
+        result_frame = _score_results(result_frame, config.path_weight)
+        result_frame = result_frame.sort_values(
+            ["综合相似度", "路径相似度"],
+            ascending=False,
+        ).head(config.top_n)
+        result_frame = result_frame.reset_index(drop=True)
+    skipped_frame = pd.DataFrame(skipped, columns=["symbol", "原因"])
+    return CrossSectionWindowTraversalResult(
+        target_symbol=target_symbol,
+        target_start=target_start,
+        target_end=target_end,
+        traversal_start=traversal_start,
+        traversal_end=traversal_end,
+        window_size=target_length,
+        results=result_frame,
+        skipped=skipped_frame,
+    )
+
+
+def _traversal_candidate_rows(
+    symbol_bars: pd.DataFrame,
+    *,
+    symbol: str,
+    traversal_start: pd.Timestamp,
+    traversal_end: pd.Timestamp,
+    target_length: int,
+    target_metric: AlgorithmTarget,
+    target_features: dict[str, float],
+    forward_windows: tuple[int, ...],
+    algorithm: str,
+) -> list[dict[str, object]]:
+    if len(symbol_bars) < target_length:
+        return []
+    date_values = symbol_bars["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    start_positions = np.flatnonzero(
+        (date_values >= traversal_start.to_datetime64())
+        & (date_values <= traversal_end.to_datetime64())
+    )
+    if len(start_positions) == 0:
+        return []
+    start_positions = start_positions[start_positions + target_length <= len(symbol_bars)]
+    if len(start_positions) == 0:
+        return []
+    end_dates = date_values[start_positions + target_length - 1]
+    start_positions = start_positions[end_dates <= traversal_end.to_datetime64()]
+    if len(start_positions) == 0:
+        return []
+
+    close = symbol_bars["close"].to_numpy(dtype=float, copy=False)
+    close_windows = np.lib.stride_tricks.sliding_window_view(close, target_length)[start_positions]
+    distance_parts = distance_for_close_matrix(close_windows, target_metric)
+    rows: list[dict[str, object]] = []
+    first_position = int(start_positions[0])
+    for index, start_position in enumerate(start_positions):
+        start_index = int(start_position)
+        candidate = symbol_bars.iloc[start_index : start_index + target_length].reset_index(drop=True)
+        features = _fast_window_features(candidate)
+        row: dict[str, object] = {
+            "算法": algorithm,
+            "symbol": symbol,
+            "区间开始": candidate["date"].min(),
+            "区间结束": candidate["date"].max(),
+            "K线数量": int(len(candidate)),
+            "遍历偏移": int(start_index - first_position),
+            "覆盖率": 1.0,
+            "路径距离": float(distance_parts["路径距离"][index]),
+            "价格路径距离": float(distance_parts["价格路径距离"][index]),
+            "收益路径距离": float(distance_parts["收益路径距离"][index]),
+        }
+        for column in FEATURE_COLUMNS:
+            row[column] = features[column]
+            row[f"feature_diff::{column}"] = abs(features[column] - target_features[column])
+        row.update(_forward_returns(symbol_bars, candidate["date"].max(), forward_windows))
+        rows.append(row)
+    return rows
 
 
 def _best_candidate_window(

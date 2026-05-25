@@ -79,10 +79,10 @@ from streamlit_app import (
 )
 
 
-def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:
+def _bars(symbol: str, closes: list[float], *, start: str = "2024-01-01") -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "date": pd.date_range("2024-01-01", periods=len(closes), freq="D"),
+            "date": pd.date_range(start, periods=len(closes), freq="D"),
             "stock_code": [symbol] * len(closes),
             "open": closes,
             "high": closes,
@@ -472,35 +472,36 @@ def test_cross_section_search_limit_uses_full_universe_not_display_count() -> No
     assert _cross_section_search_limit(["000001.SZ"], 5) == 5
 
 
-def test_cross_section_traversal_runs_each_target_with_date_tolerance() -> None:
+def test_cross_section_traversal_slides_target_window_through_candidate_range() -> None:
     bars = pd.concat(
         [
-            _bars("300750.SZ", [10, 11, 12, 13]),
-            _bars("000001.SZ", [10, 11, 12, 13, 15]),
-            _bars("600519.SH", [30, 29, 28, 27]),
+            _bars("300750.SZ", [10, 12, 11, 13], start="2026-05-17"),
+            _bars("000001.SZ", [7, 8, 10, 12, 11, 13, 14], start="2021-01-01"),
+            _bars("600519.SH", [30, 29, 28, 27, 26, 25, 24], start="2021-01-01"),
         ],
         ignore_index=True,
     )
-    bars.loc[bars["stock_code"] == "000001.SZ", "date"] = pd.date_range("2023-12-31", periods=5, freq="D")
 
     results, skipped = _run_cross_section_traversal(
         bars,
-        target_symbols=("300750.SZ", "600519.SH"),
-        universe_symbols=("300750.SZ", "000001.SZ", "600519.SH"),
-        start="2024-01-01",
-        end="2024-01-04",
-        top_n=1,
-        min_coverage=0.8,
+        target_symbol="300750.SZ",
+        universe_symbols=("000001.SZ", "600519.SH"),
+        target_start="2026-05-17",
+        target_end="2026-05-20",
+        traversal_start="2021-01-01",
+        traversal_end="2021-01-07",
+        top_n=2,
+        min_coverage=1.0,
         path_weight=0.7,
-        date_tolerance_bars=1,
         algorithm="baseline_price_feature",
     )
 
-    assert results["target_symbol"].tolist() == ["300750.SZ", "600519.SH"]
-    assert results["匹配排名"].tolist() == [1, 1]
     first = results.iloc[0]
+    assert results["target_symbol"].tolist()[:1] == ["300750.SZ"]
     assert first["symbol"] == "000001.SZ"
-    assert first["日期偏移"] == -1
+    assert first["区间开始"] == pd.Timestamp("2021-01-03")
+    assert first["区间结束"] == pd.Timestamp("2021-01-06")
+    assert first["遍历偏移"] == 2
     assert skipped.empty
 
 
@@ -513,7 +514,7 @@ def test_format_cross_section_traversal_results_includes_target_and_match_names(
                 "匹配排名": 1,
                 "区间开始": pd.Timestamp("2024-01-01"),
                 "区间结束": pd.Timestamp("2024-01-04"),
-                "日期偏移": 0,
+                "遍历偏移": 0,
                 "综合相似度": 0.91,
                 "路径相似度": 0.92,
                 "区间收益": 0.12,
