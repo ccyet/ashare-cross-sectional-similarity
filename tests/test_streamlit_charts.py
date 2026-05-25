@@ -17,6 +17,7 @@ from streamlit_app import (
     _cross_section_overview_metrics,
     _cross_section_result_metrics,
     _cross_section_search_limit,
+    _cross_section_traversal_metrics,
     _cross_section_price_chart,
     _display_results,
     _cross_section_quick_window_feedback,
@@ -29,7 +30,9 @@ from streamlit_app import (
     _download_symbols_with_progress,
     _file_picker_entries,
     _format_cross_section_stats,
+    _format_cross_section_traversal_results,
     _format_data_check_status,
+    _format_etf_index_preview,
     _format_review_rankings,
     _format_results,
     _full_daily_download_universe,
@@ -64,6 +67,11 @@ from streamlit_app import (
     _review_ai_result_is_current,
     _review_ai_signature,
     _review_default_recap_html,
+    _review_generation_progress_text,
+    _review_generation_steps,
+    _review_generation_summary,
+    _review_kline_layout_config,
+    _review_kline_layout_options,
     _review_output_source_options,
     _run_download_job_step,
     _set_download_job_status,
@@ -103,6 +111,8 @@ def test_app_theme_css_uses_workbench_palette() -> None:
     assert '.stTabs [data-baseweb="tab-list"]' in css
     assert "line-height: 1.65" in css
     assert "min-height: 2.5rem" in css
+    assert '[data-baseweb="select"] input[role="combobox"]' in css
+    assert "background: transparent !important;" in css
     assert "linear-gradient" not in css
 
 
@@ -334,6 +344,107 @@ def test_review_default_recap_html_uses_cards_without_removed_columns() -> None:
     assert "缩量回踩不破短均" not in html
 
 
+def test_default_review_output_does_not_render_duplicate_script_profile_table() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "st.dataframe(_centered(_format_video_script_profiles" not in source
+
+
+def test_review_output_does_not_render_segment_or_comparison_detail_tables() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "4. 波段与对比明细" not in source
+    assert "4. 对比与波段明细" not in source
+    assert "st.dataframe(_centered(_format_review_segments" not in source
+    assert "st.dataframe(_centered(_format_multi_review_segments" not in source
+    assert "st.dataframe(_centered(_format_review_comparisons" not in source
+    assert "st.dataframe(_centered(_format_multi_review_comparisons" not in source
+
+
+def test_review_kline_layout_options_cover_quick_grids() -> None:
+    assert _review_kline_layout_options() == ["2×2", "3×3", "4×4"]
+    assert _review_kline_layout_config("2×2") == (2, 380)
+    assert _review_kline_layout_config("3×3") == (3, 320)
+    assert _review_kline_layout_config("4×4") == (4, 280)
+    assert _review_kline_layout_config("missing") == (3, 320)
+
+
+def test_multi_review_kline_section_uses_selected_layout() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "图表布局" in source
+    assert "_review_kline_layout_options()" in source
+    assert "_review_kline_layout_config" in source
+    assert "_review_result_grid_rows(ranked_results, columns=layout_columns)" in source
+    assert "fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=chart_height)" in source
+
+
+def test_review_page_shows_reloaded_etf_list_preview() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "if etf_reload_token > 0:" in source
+    assert "_render_review_etf_index_preview(etf_index)" in source
+
+
+def test_format_etf_index_preview_makes_loaded_names_visible() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["159915.SZ", "510300.SH"],
+            "name": ["创业板ETF", "沪深300ETF"],
+            "amount": [125_000_000, 350_000_000],
+            "category": ["创业板", "沪深300"],
+        }
+    )
+
+    preview = _format_etf_index_preview(frame)
+
+    assert preview["代码"].tolist() == ["510300.SH", "159915.SZ"]
+    assert preview["名称"].tolist() == ["沪深300ETF", "创业板ETF"]
+    assert preview["主题"].tolist() == ["沪深300", "创业板"]
+    assert preview["成交额(亿)"].tolist() == [3.5, 1.25]
+
+
+def test_review_generation_steps_make_progress_visible_for_ai_multi_review() -> None:
+    steps = _review_generation_steps(is_multi_review=True, is_ai_review=True, target_count=3)
+
+    assert steps == [
+        "准备生成",
+        "读取本地行情",
+        "读取股票名称",
+        "识别走势波段（3个标的）",
+        "计算指数/板块对比",
+        "生成排序与视频脚本",
+        "调用 AI 复盘",
+        "完成",
+    ]
+
+
+def test_review_generation_summary_and_text_support_pause_status() -> None:
+    job = {"status": "paused", "completed": 2, "total": 6, "step": "计算指数/板块对比"}
+
+    summary = _review_generation_summary(job)
+
+    assert summary == {
+        "status_label": "已暂停",
+        "completed": 2,
+        "total": 6,
+        "ratio": 2 / 6,
+        "step": "计算指数/板块对比",
+    }
+    assert _review_generation_progress_text(job) == "2/6 已暂停：计算指数/板块对比"
+
+
+def test_review_page_exposes_progress_and_pause_controls() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert 'review_job_key = "review_generation_job"' in source
+    assert "_render_review_generation_progress(" in source
+    assert "_update_review_generation_progress_display(" in source
+    assert "暂停生成" in source
+    assert "继续生成" in source
+    assert "当前步骤结束后暂停" in source
+
+
 def test_review_output_source_options_are_default_or_ai() -> None:
     assert _review_output_source_options() == ["默认复盘", "AI 复盘"]
 
@@ -516,12 +627,12 @@ def test_history_quick_window_feedback_uses_latest_local_bar() -> None:
 def test_history_forward_summary_measures_return_drawdown_and_favorable() -> None:
     frame = pd.DataFrame(
         {
-            "窗口开始": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
-            "窗口结束": pd.to_datetime(["2024-01-05", "2024-02-05", "2024-03-05"]),
-            "综合相似度": [0.9, 0.8, 0.7],
-            "t_plus_5_return": [0.10, -0.05, 0.20],
-            "t_plus_5_max_drawdown": [-0.03, -0.12, -0.02],
-            "t_plus_5_max_favorable": [0.12, 0.01, 0.25],
+            "窗口开始": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"]),
+            "窗口结束": pd.to_datetime(["2024-01-05", "2024-02-05", "2024-03-05", "2024-04-05"]),
+            "综合相似度": [0.9, 0.8, 0.7, 0.6],
+            "t_plus_5_return": [0.10, -0.05, 0.20, None],
+            "t_plus_5_max_drawdown": [-0.03, -0.12, -0.02, -0.99],
+            "t_plus_5_max_favorable": [0.12, 0.01, 0.25, 9.99],
         }
     )
 
@@ -530,6 +641,7 @@ def test_history_forward_summary_measures_return_drawdown_and_favorable() -> Non
     row = summary.loc[summary["观察窗口"] == "后5根"].iloc[0]
     assert row["样本数"] == 3
     assert row["平均收益"] == pd.Series([0.10, -0.05, 0.20]).mean()
+    assert row["中位收益"] == pd.Series([0.10, -0.05, 0.20]).median()
     assert row["胜率"] == 2 / 3
     assert row["平均最大回撤"] == pd.Series([-0.03, -0.12, -0.02]).mean()
     assert row["平均最大浮盈"] == pd.Series([0.12, 0.01, 0.25]).mean()
@@ -1031,6 +1143,61 @@ def test_cross_section_overview_metrics_uses_forward_returns() -> None:
         ("后10根胜率", "66.67%"),
         ("Top6后10根均值", "8.33%"),
     ]
+
+
+def test_cross_section_traversal_metrics_describe_window_scan() -> None:
+    frame = pd.DataFrame(
+        {
+            "窗口序号": [1, 1, 2],
+            "symbol": ["000001.SZ", "000002.SZ", "000001.SZ"],
+            "综合相似度": [0.9, 0.8, 0.7],
+        }
+    )
+
+    metrics = _cross_section_traversal_metrics(frame, window_count=3)
+
+    assert metrics == [
+        ("遍历窗口", "3"),
+        ("命中记录", "3"),
+        ("命中标的", "2"),
+        ("平均相似度", "80.00%"),
+    ]
+
+
+def test_format_cross_section_traversal_results_formats_target_windows_and_names() -> None:
+    frame = pd.DataFrame(
+        {
+            "窗口序号": [1],
+            "目标窗口开始": [pd.Timestamp("2024-01-01")],
+            "目标窗口结束": [pd.Timestamp("2024-01-05")],
+            "symbol": ["000001.SZ"],
+            "区间开始": [pd.Timestamp("2024-01-02")],
+            "区间结束": [pd.Timestamp("2024-01-06")],
+            "综合相似度": [0.8765],
+            "路径距离": [0.1234],
+            "日期偏移": [1],
+            "t_plus_10_return": [0.1234],
+        }
+    )
+
+    formatted = _format_cross_section_traversal_results(frame, {"000001.SZ": "平安银行"})
+
+    assert formatted["目标窗口开始"].iloc[0] == "2024-01-01"
+    assert formatted["目标窗口结束"].iloc[0] == "2024-01-05"
+    assert formatted["代码"].iloc[0] == "000001.SZ"
+    assert formatted["股票"].iloc[0] == "平安银行"
+    assert formatted["综合相似度"].iloc[0] == "87.65%"
+    assert formatted["后10根收益"].iloc[0] == "12.34%"
+
+
+def test_cross_section_page_exposes_traversal_mode_and_keeps_date_tolerance() -> None:
+    source = Path("streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "搜索方式" in source
+    assert "窗口期遍历" in source
+    assert "遍历窗口K线数" in source
+    assert "traverse_cross_section(" in source
+    assert "date_tolerance_bars=tolerance_bars" in source
 
 
 def test_format_cross_section_stats_keeps_correlation_as_decimal() -> None:

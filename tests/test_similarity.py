@@ -6,7 +6,12 @@ import pytest
 
 import ashare_cross_section_similarity.similarity as similarity_module
 from ashare_cross_section_similarity.features import FEATURE_COLUMNS, window_features
-from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
+from ashare_cross_section_similarity.similarity import (
+    CrossSectionSearchConfig,
+    CrossSectionTraversalConfig,
+    search_cross_section,
+    traverse_cross_section,
+)
 
 
 def _bars(symbol: str, closes: list[float], amounts: list[float] | None = None) -> pd.DataFrame:
@@ -168,6 +173,57 @@ def test_search_date_tolerance_picks_shifted_candidate_window() -> None:
     assert row["日期偏移"] == 3
     assert row["覆盖率"] == 1.0
     assert row["t_plus_3_return"] == pytest.approx(44 / 11 - 1)
+
+
+def test_traverse_cross_section_runs_rolling_target_windows_with_tolerance() -> None:
+    bars = pd.concat(
+        [
+            _bars("000001.SZ", [10, 11, 12, 11, 13, 14]),
+            _bars("000002.SZ", [1, 1, 10, 11, 12, 11, 13, 14]),
+            _bars("000003.SZ", [30, 29, 28, 27, 26, 25]),
+        ],
+        ignore_index=True,
+    )
+
+    result = traverse_cross_section(
+        bars,
+        CrossSectionTraversalConfig(
+            target_symbol="000001.SZ",
+            universe_symbols=("000002.SZ", "000003.SZ"),
+            start="2024-01-01",
+            end="2024-01-06",
+            window_bars=3,
+            step_bars=2,
+            top_n_per_window=1,
+            min_coverage=1.0,
+            date_tolerance_bars=2,
+        ),
+    )
+
+    assert result.window_bars == 3
+    assert result.step_bars == 2
+    assert result.windows["窗口序号"].tolist() == [1, 2]
+    assert result.results["窗口序号"].tolist() == [1, 2]
+    assert result.results["symbol"].tolist() == ["000002.SZ", "000002.SZ"]
+    assert result.results["日期偏移"].tolist() == [2, 2]
+    assert result.results["目标窗口开始"].tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-03")]
+    assert result.results["目标窗口结束"].tolist() == [pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-05")]
+
+
+def test_traverse_cross_section_validates_window_settings() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12])
+
+    with pytest.raises(ValueError, match="遍历窗口K线数"):
+        traverse_cross_section(
+            bars,
+            CrossSectionTraversalConfig(
+                target_symbol="000001.SZ",
+                universe_symbols=("000002.SZ",),
+                start="2024-01-01",
+                end="2024-01-03",
+                window_bars=1,
+            ),
+        )
 
 
 def test_search_date_tolerance_scores_offsets_without_per_offset_z_normalize(monkeypatch) -> None:

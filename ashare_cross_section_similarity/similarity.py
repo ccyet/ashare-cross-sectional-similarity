@@ -53,6 +53,35 @@ class CrossSectionSearchResult:
 
 
 @dataclass(frozen=True)
+class CrossSectionTraversalConfig:
+    target_symbol: str
+    universe_symbols: tuple[str, ...]
+    start: str | pd.Timestamp
+    end: str | pd.Timestamp
+    window_bars: int
+    step_bars: int = 1
+    top_n_per_window: int = 5
+    max_windows: int = 60
+    min_coverage: float = 0.8
+    path_weight: float = 0.7
+    forward_windows: tuple[int, ...] = FORWARD_RETURN_WINDOWS
+    date_tolerance_bars: int = 0
+    algorithm: str = BASELINE_ALGORITHM
+
+
+@dataclass(frozen=True)
+class CrossSectionTraversalResult:
+    target_symbol: str
+    start: pd.Timestamp
+    end: pd.Timestamp
+    window_bars: int
+    step_bars: int
+    windows: pd.DataFrame
+    results: pd.DataFrame
+    skipped: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class _CandidateWindow:
     frame: pd.DataFrame
     date_offset: int
@@ -161,6 +190,88 @@ def search_cross_section(
         results=result_frame,
         skipped=skipped_frame,
     )
+
+
+def traverse_cross_section(
+    bars: pd.DataFrame,
+    config: CrossSectionTraversalConfig,
+) -> CrossSectionTraversalResult:
+    if config.window_bars < 2:
+        raise ValueError("遍历窗口K线数至少需要 2。")
+    if config.step_bars < 1:
+        raise ValueError("遍历步长至少需要 1。")
+    if config.top_n_per_window < 1:
+        raise ValueError("每窗保留数量至少需要 1。")
+    if config.max_windows < 1:
+        raise ValueError("最多遍历窗口至少需要 1。")
+    prepared = _prepare_bars(bars)
+    target_symbol = normalize_symbol(config.target_symbol)
+    start = pd.Timestamp(config.start)
+    end = inclusive_end_timestamp(config.end)
+    target_bars = _bars_by_symbol(prepared).get(target_symbol, _empty_bars())
+    target_range = target_bars.loc[target_bars["date"].between(start, end)].reset_index(drop=True)
+    if len(target_range) < config.window_bars:
+        raise ValueError(f"目标标的 {target_symbol} 在遍历区间内不足 {config.window_bars} 根K线。")
+
+    window_rows: list[dict[str, object]] = []
+    result_frames: list[pd.DataFrame] = []
+    skipped_frames: list[pd.DataFrame] = []
+    window_starts = range(0, len(target_range) - config.window_bars + 1, config.step_bars)
+    for window_index, start_position in enumerate(window_starts, start=1):
+        if window_index > config.max_windows:
+            break
+        target_window = target_range.iloc[start_position : start_position + config.window_bars]
+        window_start = pd.Timestamp(target_window["date"].iloc[0])
+        window_end = pd.Timestamp(target_window["date"].iloc[-1])
+        window_rows.append(
+            {
+                "窗口序号": window_index,
+                "目标窗口开始": window_start,
+                "目标窗口结束": window_end,
+                "K线数量": int(len(target_window)),
+            }
+        )
+        result = search_cross_section(
+            prepared,
+            CrossSectionSearchConfig(
+                target_symbol=target_symbol,
+                universe_symbols=config.universe_symbols,
+                start=window_start,
+                end=window_end,
+                top_n=config.top_n_per_window,
+                min_coverage=config.min_coverage,
+                path_weight=config.path_weight,
+                forward_windows=config.forward_windows,
+                date_tolerance_bars=config.date_tolerance_bars,
+                algorithm=config.algorithm,
+            ),
+        )
+        result_frames.append(_tag_traversal_frame(result.results, window_index, window_start, window_end))
+        skipped_frames.append(_tag_traversal_frame(result.skipped, window_index, window_start, window_end))
+
+    return CrossSectionTraversalResult(
+        target_symbol=target_symbol,
+        start=start,
+        end=end,
+        window_bars=int(config.window_bars),
+        step_bars=int(config.step_bars),
+        windows=pd.DataFrame(window_rows, columns=["窗口序号", "目标窗口开始", "目标窗口结束", "K线数量"]),
+        results=pd.concat(result_frames, ignore_index=True) if result_frames else pd.DataFrame(),
+        skipped=pd.concat(skipped_frames, ignore_index=True) if skipped_frames else pd.DataFrame(),
+    )
+
+
+def _tag_traversal_frame(
+    frame: pd.DataFrame,
+    window_index: int,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+) -> pd.DataFrame:
+    tagged = frame.copy()
+    tagged.insert(0, "目标窗口结束", window_end)
+    tagged.insert(0, "目标窗口开始", window_start)
+    tagged.insert(0, "窗口序号", int(window_index))
+    return tagged
 
 
 def _best_candidate_window(

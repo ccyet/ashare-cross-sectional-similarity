@@ -63,7 +63,10 @@ from ashare_cross_section_similarity.review_ai import (
 from ashare_cross_section_similarity.similarity import (
     CrossSectionSearchConfig,
     CrossSectionSearchResult,
+    CrossSectionTraversalConfig,
+    CrossSectionTraversalResult,
     search_cross_section,
+    traverse_cross_section,
 )
 from ashare_cross_section_similarity.similarity_algorithms import (
     ALGORITHM_CHOICES,
@@ -92,12 +95,22 @@ DOWNLOAD_JOB_STATUS_LABELS = {
     "paused": "已暂停",
     "completed": "下载完成",
 }
+REVIEW_JOB_STATUS_LABELS = {
+    "running": "生成中",
+    "paused": "已暂停",
+    "completed": "生成完成",
+}
 ETF_SOURCE_RETRY_ATTEMPTS = 2
 ETF_SOURCE_RETRY_DELAY_SECONDS = 0.6
 ETF_SOURCE_REQUEST_DELAY_SECONDS = 0.2
 ETF_SOURCE_TIMEOUT_SECONDS = 8
 SINA_ETF_PAGE_SIZE = 100
 TENCENT_ETF_QUOTE_BATCH_SIZE = 80
+REVIEW_KLINE_LAYOUTS = {
+    "2×2": (2, 380),
+    "3×3": (3, 320),
+    "4×4": (4, 280),
+}
 ETF_ISSUER_SUFFIXES = (
     "华夏",
     "易方达",
@@ -321,6 +334,13 @@ textarea,
 [data-baseweb="select"] > div,
 [data-baseweb="input"] > div {
   min-height: 2.5rem;
+}
+
+[data-baseweb="select"] input[role="combobox"],
+[data-baseweb="select"] input[role="combobox"]:focus {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
 }
 
 textarea {
@@ -1194,6 +1214,14 @@ def _render_cross_section_tab(
 ) -> None:
     st.subheader("同一时间横截面相似")
     st.caption("选定某个标的一段区间走势，在同一段时间里从指定范围内寻找其他相似标的。")
+    search_mode = st.radio(
+        "搜索方式",
+        ["单窗口搜索", "窗口期遍历"],
+        horizontal=True,
+        key="cross_search_mode",
+        help="单窗口搜索沿用当前起止日期；窗口期遍历会在所选区间内按固定K线长度滚动搜索。",
+    )
+    is_traversal = search_mode == "窗口期遍历"
     col1, col2, col3 = st.columns(3)
     target_symbol = col1.text_input("目标代码", value="300750.SZ", key="cross_target_symbol")
     normalized_target = normalize_symbol(target_symbol)
@@ -1242,6 +1270,56 @@ def _render_cross_section_tab(
         format_func=_algorithm_option_label,
         key="cross_algorithm",
     )
+    traversal_window_bars = 20
+    traversal_step_bars = 5
+    traversal_top_n = 5
+    traversal_max_windows = 60
+    if is_traversal:
+        traversal_cols = st.columns(4)
+        traversal_window_bars = int(
+            traversal_cols[0].number_input(
+                "遍历窗口K线数",
+                min_value=2,
+                max_value=240,
+                value=20,
+                step=1,
+                key="cross_traversal_window_bars",
+                help="每次横截面比较使用的目标窗口长度。",
+            )
+        )
+        traversal_step_bars = int(
+            traversal_cols[1].number_input(
+                "遍历步长K线数",
+                min_value=1,
+                max_value=60,
+                value=5,
+                step=1,
+                key="cross_traversal_step_bars",
+                help="每次向后滚动多少根K线生成下一个目标窗口。",
+            )
+        )
+        traversal_top_n = int(
+            traversal_cols[2].number_input(
+                "每窗保留",
+                min_value=1,
+                max_value=50,
+                value=5,
+                step=1,
+                key="cross_traversal_top_n",
+                help="每个目标窗口保留的横截面相似结果数量。",
+            )
+        )
+        traversal_max_windows = int(
+            traversal_cols[3].number_input(
+                "最多窗口",
+                min_value=1,
+                max_value=300,
+                value=60,
+                step=5,
+                key="cross_traversal_max_windows",
+                help="限制一次遍历的窗口数量，避免大范围搜索长时间阻塞。",
+            )
+        )
     universe_symbols = st.text_area("搜索范围代码", value="", help="逗号分隔；留空时尝试读取本地目录下全部 parquet。")
     col7, col8, col9 = st.columns(3)
     with col7:
@@ -1367,8 +1445,12 @@ def _render_cross_section_tab(
                 st.warning(f"目标标的 {normalized_target} 下载后仍未覆盖本地行情，请切换下载引擎或检查数据源是否支持该代码。")
 
     st.markdown("**3. 运行横截面搜索**")
-    if not st.button("运行横截面搜索", type="primary", key="cross_run"):
-        st.info("检查数据后，缺失则先下载；数据可用后点击运行横截面搜索。")
+    run_label = "运行窗口期遍历" if is_traversal else "运行横截面搜索"
+    if not st.button(run_label, type="primary", key="cross_run"):
+        if is_traversal:
+            st.info("设置遍历区间、窗口长度和搜索范围后，点击运行窗口期遍历。日期容错会继续生效。")
+        else:
+            st.info("检查数据后，缺失则先下载；数据可用后点击运行横截面搜索。")
         return
 
     try:
@@ -1381,6 +1463,31 @@ def _render_cross_section_tab(
             end=coverage_end,
             data_fingerprint=symbols_fingerprint,
         )
+        if is_traversal:
+            traversal = traverse_cross_section(
+                bars,
+                CrossSectionTraversalConfig(
+                    target_symbol=target_symbol,
+                    universe_symbols=tuple(universe),
+                    start=start,
+                    end=end,
+                    window_bars=int(traversal_window_bars),
+                    step_bars=int(traversal_step_bars),
+                    top_n_per_window=int(traversal_top_n),
+                    max_windows=int(traversal_max_windows),
+                    min_coverage=float(min_coverage),
+                    path_weight=float(path_weight),
+                    date_tolerance_bars=tolerance_bars,
+                    algorithm=str(algorithm),
+                ),
+            )
+            _render_cross_section_traversal_result(
+                traversal,
+                display_n=int(top_n),
+                algorithm=str(algorithm),
+                tolerance_bars=tolerance_bars,
+            )
+            return
         result = search_cross_section(
             bars,
             CrossSectionSearchConfig(
@@ -1459,6 +1566,37 @@ def _review_ai_display_sections(result: ReviewAIResult) -> list[tuple[str, str]]
 
 def _review_output_source_options() -> list[str]:
     return ["默认复盘", "AI 复盘"]
+
+
+def _review_kline_layout_options() -> list[str]:
+    return list(REVIEW_KLINE_LAYOUTS)
+
+
+def _review_kline_layout_config(label: str | None) -> tuple[int, int]:
+    return REVIEW_KLINE_LAYOUTS.get(str(label), REVIEW_KLINE_LAYOUTS["3×3"])
+
+
+def _review_kline_layout_selector(*, key: str) -> str:
+    options = _review_kline_layout_options()
+    selector = getattr(st, "segmented_control", None)
+    if callable(selector):
+        selected = selector(
+            "图表布局",
+            options,
+            default="3×3",
+            key=key,
+            help="快速切换每行图表数量；2×2 更宽松，4×4 更密集。",
+        )
+    else:
+        selected = st.radio(
+            "图表布局",
+            options,
+            index=options.index("3×3"),
+            key=key,
+            horizontal=True,
+            help="快速切换每行图表数量；2×2 更宽松，4×4 更密集。",
+        )
+    return str(selected or "3×3")
 
 
 def _render_review_ai_result(result: ReviewAIResult) -> None:
@@ -2226,6 +2364,121 @@ def _render_review_ai_panel(
         st.info("选择 AI 复盘后，点击生成走势复盘会调用所选模型输出单一来源的复盘和视频脚本。")
 
 
+def _review_generation_steps(*, is_multi_review: bool, is_ai_review: bool, target_count: int) -> list[str]:
+    count = max(1, int(target_count))
+    analyze_step = f"识别走势波段（{count}个标的）" if is_multi_review else "识别走势波段"
+    steps = [
+        "准备生成",
+        "读取本地行情",
+        "读取股票名称",
+        analyze_step,
+        "计算指数/板块对比",
+        "生成排序与视频脚本",
+    ]
+    if is_ai_review:
+        steps.append("调用 AI 复盘")
+    steps.append("完成")
+    return steps
+
+
+def _create_review_generation_job(signature: str, steps: list[str]) -> dict[str, object]:
+    normalized_steps = [str(step) for step in steps if str(step).strip()]
+    total = max(1, len(normalized_steps))
+    first_step = normalized_steps[0] if normalized_steps else "准备生成"
+    return {
+        "signature": signature,
+        "status": "running",
+        "steps": normalized_steps,
+        "completed": 0,
+        "total": total,
+        "step": first_step,
+    }
+
+
+def _review_generation_summary(job: Mapping[str, object]) -> dict[str, object]:
+    total = max(1, int(job.get("total", 1) or 1))
+    completed = max(0, min(int(job.get("completed", 0) or 0), total))
+    status = str(job.get("status", "running") or "running")
+    step = str(job.get("step", "") or "")
+    return {
+        "status_label": REVIEW_JOB_STATUS_LABELS.get(status, status),
+        "completed": completed,
+        "total": total,
+        "ratio": completed / total if total else 1.0,
+        "step": step,
+    }
+
+
+def _review_generation_progress_text(job: Mapping[str, object]) -> str:
+    summary = _review_generation_summary(job)
+    return f"{summary['completed']}/{summary['total']} {summary['status_label']}：{summary['step']}"
+
+
+def _set_review_generation_step(
+    job: MutableMapping[str, object],
+    *,
+    completed: int,
+    step: str,
+    status: str = "running",
+) -> None:
+    total = max(1, int(job.get("total", 1) or 1))
+    job["completed"] = max(0, min(int(completed), total))
+    job["step"] = str(step)
+    job["status"] = status
+
+
+def _render_review_generation_progress(
+    job_key: str,
+    job: MutableMapping[str, object],
+) -> tuple[object, object]:
+    summary = _review_generation_summary(job)
+    status = str(job.get("status", "running"))
+    if int(summary["completed"]) >= int(summary["total"]) and status != "completed":
+        job["status"] = "completed"
+        summary = _review_generation_summary(job)
+        status = "completed"
+    can_pause = status == "running" and int(summary["completed"]) < int(summary["total"])
+    control_cols = st.columns([1.35, 1.25, 3.4])
+    if status == "paused":
+        if control_cols[0].button("继续生成", key=f"{job_key}_resume", use_container_width=True):
+            job["status"] = "running"
+            st.rerun()
+    else:
+        if control_cols[0].button(
+            "暂停生成",
+            key=f"{job_key}_pause",
+            disabled=not can_pause,
+            help="当前步骤结束后暂停；外部接口请求已发出后需等待返回。",
+            use_container_width=True,
+        ):
+            if can_pause:
+                job["status"] = "paused"
+                st.rerun()
+    if control_cols[1].button("清除进度", key=f"{job_key}_clear", use_container_width=True):
+        st.session_state.pop(job_key, None)
+        st.rerun()
+    control_cols[2].caption("当前步骤结束后暂停；外部接口请求已发出后需等待返回。")
+    progress_bar = st.progress(float(summary["ratio"]), text=_review_generation_progress_text(job))
+    progress_caption = st.empty()
+    progress_caption.caption(f"当前步骤：{summary['step']}")
+    return progress_bar, progress_caption
+
+
+def _update_review_generation_progress_display(
+    job: MutableMapping[str, object],
+    progress_bar: object,
+    progress_caption: object,
+    *,
+    completed: int,
+    step: str,
+    status: str = "running",
+) -> None:
+    _set_review_generation_step(job, completed=completed, step=step, status=status)
+    summary = _review_generation_summary(job)
+    progress_bar.progress(float(summary["ratio"]), text=_review_generation_progress_text(job))
+    progress_caption.caption(f"当前步骤：{summary['step']}")
+
+
 def _review_ai_frame_records(frame: pd.DataFrame) -> list[dict[str, object]]:
     if frame is None or frame.empty:
         return []
@@ -2336,11 +2589,18 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     index_enabled = st.checkbox("结合指数分析", value=True, key="review_with_index")
     etf_reload_token_key = "review_akshare_etf_reload_token"
     st.session_state.setdefault(etf_reload_token_key, 0)
-    etf_meta_col1, etf_meta_col2 = st.columns([1, 3])
-    if etf_meta_col1.button("重新加载 ETF 名单", key="review_reload_akshare_etf_list"):
+    etf_meta_col1, etf_meta_col2 = st.columns([1.4, 2.6])
+    if etf_meta_col1.button("重新加载 ETF 名单", key="review_reload_akshare_etf_list", use_container_width=True):
         st.session_state[etf_reload_token_key] = int(st.session_state.get(etf_reload_token_key, 0)) + 1
     etf_meta_col2.caption("ETF 名称和候选列表优先来自新浪 / 腾讯；K线读取、下载口径不变。")
     etf_reload_token = int(st.session_state.get(etf_reload_token_key, 0))
+    etf_index = pd.DataFrame()
+    etf_message = ""
+    if etf_reload_token > 0:
+        etf_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+        if etf_message:
+            st.info(etf_message)
+        _render_review_etf_index_preview(etf_index)
     index_symbols: list[str] = []
     if index_enabled:
         index_col1, index_col2 = st.columns([2, 1])
@@ -2358,7 +2618,6 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     selected_popular_etfs: list[str] = []
     auto_proxy_symbols: list[str] = []
     auto_proxy_names: dict[str, str] = {}
-    etf_index = pd.DataFrame()
     industry_name = ""
     concept_name = ""
     sector_min_coverage = 0.5
@@ -2375,8 +2634,9 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             step=0.05,
             key="review_sector_min_coverage",
         )
-        etf_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
-        if etf_message:
+        if etf_index.empty:
+            etf_index, etf_message = _review_etf_index_with_fallback(etf_reload_token)
+        if etf_message and etf_reload_token <= 0:
             st.info(etf_message)
         popular_etfs = _top_etf_options(etf_index, limit=10)
         if not popular_etfs.empty:
@@ -2429,9 +2689,16 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         }
     )
     review_active_key = "review_active_signature"
+    review_job_key = "review_generation_job"
+    review_steps = _review_generation_steps(
+        is_multi_review=is_multi_review,
+        is_ai_review=is_ai_review,
+        target_count=len(target_symbols),
+    )
     review_run_clicked = st.button("生成走势复盘", type="primary", key="review_run")
     if review_run_clicked:
         st.session_state[review_active_key] = review_signature
+        st.session_state[review_job_key] = _create_review_generation_job(review_signature, review_steps)
         _clear_review_ai_result(st.session_state, "review_ai_result")
         _clear_review_ai_result(st.session_state, "multi_review_ai_result")
 
@@ -2444,6 +2711,23 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         return
     if target_error:
         st.warning(target_error)
+    review_job = st.session_state.get(review_job_key)
+    if not isinstance(review_job, dict) or review_job.get("signature") != review_signature:
+        review_job = _create_review_generation_job(review_signature, review_steps)
+        st.session_state[review_job_key] = review_job
+    progress_bar, progress_caption = _render_review_generation_progress(review_job_key, review_job)
+    if str(review_job.get("status", "")) == "paused":
+        st.info("走势复盘已暂停。点击继续生成后会重新进入生成流程，已缓存的数据读取会复用。")
+        return
+    track_progress = str(review_job.get("status", "")) != "completed" or review_run_clicked
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=0,
+            step=review_steps[0],
+        )
     review_name_symbols = unique_symbols([*target_symbols, *index_symbols, *combined_proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
     review_extra_names = dict(auto_proxy_names)
     if _has_etf_like_symbol(review_name_symbols) or sector_enabled:
@@ -2472,6 +2756,9 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             ai_config=review_ai_config,
             is_ai_review=is_ai_review,
             ai_run_requested=review_run_clicked,
+            progress_job=review_job if track_progress else None,
+            progress_bar=progress_bar if track_progress else None,
+            progress_caption=progress_caption if track_progress else None,
         )
         return
 
@@ -2492,6 +2779,22 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     except Exception as exc:  # noqa: BLE001
         st.error(f"本地行情读取失败：{exc}")
         return
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=1,
+            step="读取本地行情",
+        )
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=2,
+            step="读取股票名称",
+        )
+    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **review_extra_names}
 
     target_window = direct_bars.loc[direct_bars["stock_code"] == normalized_target]
     result = analyze_price_review(
@@ -2504,8 +2807,25 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             min_segment_bars=int(min_segment_bars),
         ),
     )
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=3,
+            step="识别走势波段",
+        )
 
     if result.window.empty:
+        if track_progress:
+            _update_review_generation_progress_display(
+                review_job,
+                progress_bar,
+                progress_caption,
+                completed=int(review_job.get("total", len(review_steps))),
+                step="完成",
+                status="completed",
+            )
         st.markdown("**1. 区间概览**")
         empty_comparison = pd.DataFrame()
         for column, (label, value) in zip(st.columns(6), _review_metric_items(result, empty_comparison, index_symbols)):
@@ -2515,7 +2835,6 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             st.warning(hint)
         return
 
-    stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **review_extra_names}
     comparison_frames, comparison_rows, warnings = _review_comparison_data(
         result.window,
         direct_bars,
@@ -2529,6 +2848,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
         sector_min_coverage=float(sector_min_coverage),
         stock_names=stock_names,
     )
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=4,
+            step="计算指数/板块对比",
+        )
     comparison_frame = pd.DataFrame(comparison_rows)
     script_profile = _review_video_script_profile(
         result,
@@ -2543,6 +2870,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
     single_ranking_records = single_ranking_frame.set_index("代码").to_dict("index") if not single_ranking_frame.empty else {}
     script_profile = _attach_review_ranking(script_profile, single_ranking_records)
     all_warnings = [*result.warnings, *warnings]
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=5,
+            step="生成排序与视频脚本",
+        )
 
     st.markdown("**1. 区间概览**")
     metric_values = _review_metric_items(result, comparison_frame, index_symbols)
@@ -2558,6 +2893,14 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
 
     if is_ai_review:
         st.markdown("**3. AI 复盘 / 分析 / 锐评**")
+        if track_progress:
+            _update_review_generation_progress_display(
+                review_job,
+                progress_bar,
+                progress_caption,
+                completed=6,
+                step="调用 AI 复盘",
+            )
         evidence = build_review_ai_evidence(
             result,
             single_comparison_frame,
@@ -2582,18 +2925,17 @@ def _render_review_tab(*, data_root: str, timeframe: str, adjust: str, provider:
             )
         )
         st.markdown(render_video_script_cards_html([script_profile]), unsafe_allow_html=True)
-        st.dataframe(_centered(_format_video_script_profiles([script_profile])), use_container_width=True, hide_index=True)
+    if track_progress:
+        _update_review_generation_progress_display(
+            review_job,
+            progress_bar,
+            progress_caption,
+            completed=int(review_job.get("total", len(review_steps))),
+            step="完成",
+            status="completed",
+        )
     for warning in all_warnings:
         st.warning(warning)
-
-    st.markdown("**4. 波段与对比明细**")
-    detail_col1, detail_col2 = st.columns(2)
-    with detail_col1:
-        st.caption("主要波段")
-        st.dataframe(_centered(_format_review_segments(result.main_segments)), use_container_width=True, hide_index=True)
-    with detail_col2:
-        st.caption("指数 / 板块对比")
-        st.dataframe(_centered(_format_review_comparisons(comparison_frame)), use_container_width=True, hide_index=True)
 
 def _review_shared_comparison_frames(
     direct_bars: pd.DataFrame,
@@ -2734,7 +3076,22 @@ def _render_multi_review_output(
     is_ai_review: bool,
     ai_run_requested: bool,
     extra_stock_names: dict[str, str] | None = None,
+    progress_job: MutableMapping[str, object] | None = None,
+    progress_bar: object | None = None,
+    progress_caption: object | None = None,
 ) -> None:
+    def update_progress(completed: int, step: str, status: str = "running") -> None:
+        if progress_job is None or progress_bar is None or progress_caption is None:
+            return
+        _update_review_generation_progress_display(
+            progress_job,
+            progress_bar,
+            progress_caption,
+            completed=completed,
+            step=step,
+            status=status,
+        )
+
     direct_symbols = unique_symbols([*target_symbols, *index_symbols, *proxy_symbols, SCRIPT_BENCHMARK_SYMBOL])
     data_start = _review_script_data_start(start, end)
     direct_fingerprint = _local_data_fingerprint(data_root, timeframe, adjust, tuple(direct_symbols))
@@ -2751,11 +3108,14 @@ def _render_multi_review_output(
     except Exception as exc:  # noqa: BLE001
         st.error(f"本地行情读取失败：{exc}")
         return
+    update_progress(1, "读取本地行情")
 
+    update_progress(2, "读取股票名称")
     stock_names = {**_cached_stock_name_map(tuple(direct_symbols)), **(extra_stock_names or {})}
     results: list[ReviewResult] = []
     all_warnings: list[str] = []
-    for symbol in target_symbols:
+    for index, symbol in enumerate(target_symbols, start=1):
+        update_progress(3, f"识别走势波段：{index}/{len(target_symbols)} {symbol}")
         target_window = direct_bars.loc[direct_bars["stock_code"] == symbol]
         result = analyze_price_review(
             target_window,
@@ -2776,6 +3136,7 @@ def _render_multi_review_output(
 
     valid_results = [result for result in results if not result.window.empty]
     if not valid_results:
+        update_progress(int(progress_job.get("total", 1)) if progress_job else 1, "完成", "completed")
         st.warning("所有目标标的在所选区间都没有本地行情。请检查代码、周期、复权目录或先下载数据。")
         for warning in all_warnings:
             st.warning(warning)
@@ -2796,6 +3157,7 @@ def _render_multi_review_output(
         stock_names=stock_names,
     )
     all_warnings.extend(comparison_warnings)
+    update_progress(4, "计算指数/板块对比")
     comparison_rows = _review_multi_comparison_rows(valid_results, comparison_frames, stock_names)
     comparison_frame = pd.DataFrame(comparison_rows)
     ranking_frame = rank_review_results(valid_results, comparison_frame, stock_names=stock_names)
@@ -2816,6 +3178,7 @@ def _render_multi_review_output(
     ]
     ranking_records = ranking_frame.set_index("代码").to_dict("index") if not ranking_frame.empty else {}
     script_profiles = [_attach_review_ranking(profile, ranking_records) for profile in script_profiles]
+    update_progress(5, "生成排序与视频脚本")
     st.markdown("**1. 多股票区间概览**")
     st.caption("排序总表")
     st.dataframe(_centered(_format_review_rankings(ranking_frame)), use_container_width=True, hide_index=True)
@@ -2823,16 +3186,20 @@ def _render_multi_review_output(
     st.dataframe(_centered(_format_multi_review_overview(results, stock_names)), use_container_width=True, hide_index=True)
 
     st.markdown("**2. 多股票 K 线复盘**")
-    for row in _review_result_grid_rows(ranked_results):
-        columns = st.columns(3)
+    layout_label = _review_kline_layout_selector(key="multi_review_kline_layout")
+    layout_columns, chart_height = _review_kline_layout_config(layout_label)
+    st.caption(f"当前布局：{layout_label}，每行 {layout_columns} 张图。")
+    for row in _review_result_grid_rows(ranked_results, columns=layout_columns):
+        columns = st.columns(layout_columns)
         for column, result in zip(columns, row):
             with column:
                 fig = _review_kline_chart(result, stock_names)
-                fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=320)
+                fig.update_layout(title=_stock_chart_label(result.symbol, stock_names, is_target=False), height=chart_height)
                 st.plotly_chart(fig, use_container_width=True)
 
     if is_ai_review:
         st.markdown("**3. AI 复盘 / 分析 / 锐评**")
+        update_progress(6, "调用 AI 复盘")
         multi_evidence = {
             "mode": "multi_stock",
             "targets": [result.symbol for result in valid_results],
@@ -2863,18 +3230,9 @@ def _render_multi_review_output(
             )
         )
         st.markdown(render_video_script_cards_html(script_profiles), unsafe_allow_html=True)
-        st.dataframe(_centered(_format_video_script_profiles(script_profiles)), use_container_width=True, hide_index=True)
+    update_progress(int(progress_job.get("total", 1)) if progress_job else 1, "完成", "completed")
     for warning in dict.fromkeys(all_warnings):
         st.warning(warning)
-
-    st.markdown("**4. 对比与波段明细**")
-    detail_col1, detail_col2 = st.columns(2)
-    with detail_col1:
-        st.caption("个股主要波段")
-        st.dataframe(_centered(_format_multi_review_segments(results, stock_names)), use_container_width=True, hide_index=True)
-    with detail_col2:
-        st.caption("指数 / 板块对比")
-        st.dataframe(_centered(_format_multi_review_comparisons(comparison_frame)), use_container_width=True, hide_index=True)
 
 @st.cache_data(show_spinner=False)
 def _cached_review_constituents(kind: str, name: str) -> list[str]:
@@ -2912,6 +3270,49 @@ def _review_etf_index_with_fallback(
     if merged.empty:
         return fallback, "新浪 / 腾讯 ETF 名单为空，已使用内置常用 ETF 名称表。"
     return merged, ""
+
+
+def _render_review_etf_index_preview(index: pd.DataFrame) -> None:
+    preview = _format_etf_index_preview(index)
+    if preview.empty:
+        st.warning("ETF 名单为空，无法展示。")
+        return
+    with st.expander(f"当前 ETF 名单：{len(preview):,} 只", expanded=True):
+        st.dataframe(
+            _centered(preview),
+            use_container_width=True,
+            hide_index=True,
+            height=320,
+            column_config={"成交额(亿)": st.column_config.NumberColumn("成交额(亿)", format="%.2f")},
+        )
+        st.download_button(
+            "下载 ETF 名单 CSV",
+            data=preview.to_csv(index=False).encode("utf-8-sig"),
+            file_name="review_etf_index.csv",
+            mime="text/csv",
+            key="review_etf_index_preview_download",
+        )
+
+
+def _format_etf_index_preview(index: pd.DataFrame) -> pd.DataFrame:
+    columns = ["symbol", "name", "category", "amount"]
+    if index.empty:
+        return pd.DataFrame(columns=["代码", "名称", "主题", "成交额(亿)"])
+    frame = index.copy()
+    for column in columns:
+        if column not in frame.columns:
+            frame[column] = "" if column != "amount" else 0.0
+    frame["symbol"] = frame["symbol"].map(normalize_symbol)
+    frame["name"] = frame["name"].fillna("").astype(str).str.strip()
+    frame["category"] = frame["category"].fillna("").astype(str).str.strip()
+    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0.0)
+    frame = frame.loc[frame["symbol"].ne("") & frame["name"].ne("")]
+    if frame.empty:
+        return pd.DataFrame(columns=["代码", "名称", "主题", "成交额(亿)"])
+    result = frame.sort_values(["amount", "symbol"], ascending=[False, True]).loc[:, columns]
+    result = result.rename(columns={"symbol": "代码", "name": "名称", "category": "主题", "amount": "成交额(亿)"})
+    result["成交额(亿)"] = (result["成交额(亿)"] / 100_000_000).round(2)
+    return result.reset_index(drop=True)
 
 def _load_etf_index_from_dual_sources(
     *,
@@ -4680,6 +5081,105 @@ def _format_results(frame: pd.DataFrame, stock_names: dict[str, str] | None = No
     return result
 
 
+def _render_cross_section_traversal_result(
+    result: CrossSectionTraversalResult,
+    *,
+    display_n: int,
+    algorithm: str,
+    tolerance_bars: int,
+) -> None:
+    st.markdown("**4. 窗口期遍历结果**")
+    for column, (label, value) in zip(st.columns(4), _cross_section_traversal_metrics(result.results, window_count=len(result.windows))):
+        column.metric(label, value)
+    st.caption(f"相似算法：{algorithm_label(str(algorithm))}；日期容错：±{int(tolerance_bars)} 根，候选窗口仍只在容错范围内平移匹配。")
+    if not result.windows.empty:
+        with st.expander("查看目标遍历窗口"):
+            st.dataframe(_centered(_format_cross_section_traversal_windows(result.windows)), use_container_width=True, hide_index=True)
+    if result.results.empty:
+        st.warning("遍历完成，但没有找到可用结果。请检查本地数据覆盖、搜索范围、窗口长度和日期容错设置。")
+        return
+
+    display_results = _display_results(result.results, int(display_n))
+    name_count = max(int(display_n), 10)
+    stock_names = _cached_stock_name_map(
+        tuple(unique_symbols(result.results["symbol"].head(name_count).astype(str).tolist()))
+    )
+    st.caption(f"当前展示前 {len(display_results):,} / {len(result.results):,} 条；每个目标窗口最多保留上方设置的命中数量。")
+    st.dataframe(
+        _centered(_format_cross_section_traversal_results(display_results, stock_names)),
+        use_container_width=True,
+        hide_index=True,
+    )
+    symbol_summary = _cross_section_traversal_symbol_summary(result.results, stock_names)
+    if not symbol_summary.empty:
+        st.markdown("**5. 高频命中统计**")
+        st.dataframe(_centered(symbol_summary), use_container_width=True, hide_index=True)
+    if not result.skipped.empty:
+        with st.expander("查看遍历跳过明细"):
+            st.dataframe(_centered(result.skipped), use_container_width=True, hide_index=True)
+    st.download_button(
+        "下载横截面遍历 CSV",
+        data=result.results.to_csv(index=False).encode("utf-8-sig"),
+        file_name="cross_section_traversal.csv",
+        mime="text/csv",
+    )
+
+
+def _cross_section_traversal_metrics(frame: pd.DataFrame, *, window_count: int) -> list[tuple[str, str]]:
+    if frame.empty:
+        return [("遍历窗口", f"{int(window_count):,}"), ("命中记录", "0"), ("命中标的", "0"), ("平均相似度", "-")]
+    similarity = pd.to_numeric(frame.get("综合相似度"), errors="coerce")
+    symbol_count = frame["symbol"].astype(str).nunique() if "symbol" in frame.columns else 0
+    return [
+        ("遍历窗口", f"{int(window_count):,}"),
+        ("命中记录", f"{len(frame):,}"),
+        ("命中标的", f"{int(symbol_count):,}"),
+        ("平均相似度", _percent_text(similarity.mean())),
+    ]
+
+
+def _format_cross_section_traversal_results(frame: pd.DataFrame, stock_names: dict[str, str] | None = None) -> pd.DataFrame:
+    result = _format_results(frame, stock_names)
+    for column in ["目标窗口开始", "目标窗口结束"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    return result
+
+
+def _format_cross_section_traversal_windows(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column in ["目标窗口开始", "目标窗口结束"]:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    return result
+
+
+def _cross_section_traversal_symbol_summary(
+    frame: pd.DataFrame,
+    stock_names: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    if frame.empty or "symbol" not in frame.columns:
+        return pd.DataFrame(columns=["代码", "股票", "命中次数", "平均综合相似度", "最高综合相似度", "平均后10根收益"])
+    records = []
+    names = {normalize_symbol(symbol): name for symbol, name in (stock_names or {}).items()}
+    for symbol, group in frame.groupby("symbol", sort=False):
+        similarity = pd.to_numeric(group.get("综合相似度"), errors="coerce")
+        returns_10 = pd.to_numeric(group.get("t_plus_10_return"), errors="coerce")
+        normalized = normalize_symbol(symbol)
+        records.append(
+            {
+                "代码": normalized,
+                "股票": names.get(normalized, ""),
+                "命中次数": int(len(group)),
+                "平均综合相似度": similarity.mean(),
+                "最高综合相似度": similarity.max(),
+                "平均后10根收益": returns_10.mean(),
+            }
+        )
+    result = pd.DataFrame(records).sort_values(["命中次数", "平均综合相似度"], ascending=False).reset_index(drop=True)
+    return _format_percent_columns(result, ["平均综合相似度", "最高综合相似度", "平均后10根收益"])
+
+
 def _cross_section_overview_metrics(frame: pd.DataFrame) -> list[tuple[str, str]]:
     if frame.empty:
         return [("有效结果", "0"), ("平均相似度", "-"), ("后10根胜率", "-"), ("Top6后10根均值", "-")]
@@ -4728,13 +5228,16 @@ def _history_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
     for column in _forward_return_columns(frame):
         horizon = column.removeprefix("t_plus_").removesuffix("_return")
         values = pd.to_numeric(frame[column], errors="coerce")
-        valid = values.dropna()
+        valid_mask = values.notna()
+        valid = values.loc[valid_mask]
         if valid.empty:
             continue
-        best_index = values.idxmax()
-        worst_index = values.idxmin()
-        drawdowns = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_drawdown"), errors="coerce")
-        favorable = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_favorable"), errors="coerce")
+        best_index = valid.idxmax()
+        worst_index = valid.idxmin()
+        fallback = pd.Series(index=frame.index, dtype="float64")
+        drawdowns = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_drawdown", fallback), errors="coerce").loc[valid_mask]
+        favorable = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_favorable", fallback), errors="coerce").loc[valid_mask]
+        valid_similarity = similarity.loc[valid_mask]
         rows.append(
             {
                 "观察窗口": f"后{horizon}根",
@@ -4745,10 +5248,10 @@ def _history_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
                 "平均最大回撤": float(drawdowns.mean()) if not drawdowns.dropna().empty else float("nan"),
                 "平均最大浮盈": float(favorable.mean()) if not favorable.dropna().empty else float("nan"),
                 "最好窗口": _history_window_label(frame, best_index),
-                "最好收益": float(values.loc[best_index]),
+                "最好收益": float(valid.loc[best_index]),
                 "最差窗口": _history_window_label(frame, worst_index),
-                "最差收益": float(values.loc[worst_index]),
-                "相似度-收益相关": _series_corr(similarity, values),
+                "最差收益": float(valid.loc[worst_index]),
+                "相似度-收益相关": _series_corr(valid_similarity, valid),
             }
         )
     return pd.DataFrame(rows)

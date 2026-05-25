@@ -572,13 +572,16 @@ def _history_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
     for column in _forward_return_columns(frame):
         horizon = column.removeprefix("t_plus_").removesuffix("_return")
         values = pd.to_numeric(frame[column], errors="coerce")
-        valid = values.dropna()
+        valid_mask = values.notna()
+        valid = values.loc[valid_mask]
         if valid.empty:
             continue
-        best_index = values.idxmax()
-        worst_index = values.idxmin()
-        drawdowns = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_drawdown"), errors="coerce")
-        favorable = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_favorable"), errors="coerce")
+        best_index = valid.idxmax()
+        worst_index = valid.idxmin()
+        fallback = pd.Series(index=frame.index, dtype="float64")
+        drawdowns = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_drawdown", fallback), errors="coerce").loc[valid_mask]
+        favorable = pd.to_numeric(frame.get(f"t_plus_{horizon}_max_favorable", fallback), errors="coerce").loc[valid_mask]
+        valid_similarity = similarity.loc[valid_mask]
         rows.append(
             {
                 "观察窗口": f"后{horizon}根",
@@ -589,10 +592,10 @@ def _history_forward_summary(frame: pd.DataFrame) -> pd.DataFrame:
                 "平均最大回撤": float(drawdowns.mean()) if not drawdowns.dropna().empty else float("nan"),
                 "平均最大浮盈": float(favorable.mean()) if not favorable.dropna().empty else float("nan"),
                 "最好窗口": _history_window_label(frame, best_index),
-                "最好收益": float(values.loc[best_index]),
+                "最好收益": float(valid.loc[best_index]),
                 "最差窗口": _history_window_label(frame, worst_index),
-                "最差收益": float(values.loc[worst_index]),
-                "相似度-收益相关": _series_corr(similarity, values),
+                "最差收益": float(valid.loc[worst_index]),
+                "相似度-收益相关": _series_corr(valid_similarity, valid),
             }
         )
     return pd.DataFrame(rows)
