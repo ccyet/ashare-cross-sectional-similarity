@@ -1,17 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files
+
 
 ROOT = Path(SPECPATH).resolve().parents[1]
 APP_NAME = "A股相似阶段"
 ICON_PATH = ROOT / "build" / "macos" / f"{APP_NAME}.icns"
+AKSHARE_DATAS = collect_data_files("akshare")
 
 
 a = Analysis(
     [str(ROOT / "ashare_cross_section_similarity/desktop/app.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[],
+    datas=AKSHARE_DATAS,
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",

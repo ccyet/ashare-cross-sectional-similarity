@@ -155,6 +155,23 @@ def test_desktop_service_runs_history_for_multiple_symbols(tmp_path: Path) -> No
     assert all(not result.results.empty for result in results)
 
 
+def test_desktop_service_resolves_stock_names_for_all_desktop_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = DesktopSearchService(DesktopAppConfig(data_root=tmp_path / "market" / "daily"))
+    bars = pd.DataFrame({"stock_code": ["000001.SZ"], "stock_name": ["平安银行"]})
+    monkeypatch.setattr(service_module, "_stock_names_from_akshare", lambda symbols: {"300750.SZ": "宁德时代"})
+
+    names = service.resolve_stock_names(("300750.SZ", "000001.SZ", "510300.SH"), bars=bars)
+
+    assert names == {
+        "300750.SZ": "宁德时代",
+        "000001.SZ": "平安银行",
+        "510300.SH": "沪深300ETF",
+    }
+
+
 def test_desktop_service_selects_latest_quick_window(tmp_path: Path) -> None:
     data_root = tmp_path / "market" / "daily"
     _write_bars(data_root, "000001.SZ", [10, 11, 12, 13, 14])
@@ -269,6 +286,44 @@ def test_desktop_service_checks_cross_section_coverage_with_tolerance(
     assert calls[0]["symbols"] == ("300750.SZ", "000001.SZ")
     assert calls[0]["start"] == service_module._cross_section_load_start("2024-01-10", 5)
     assert calls[0]["end"] == service_module._cross_section_load_end("2024-01-20", 5)
+
+
+def test_full_daily_update_honors_pause_check_between_batches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = DesktopSearchService(DesktopAppConfig(data_root=tmp_path / "market" / "daily"))
+    download_calls: list[tuple[str, ...]] = []
+    progress_events: list[dict[str, object]] = []
+    pause_states = iter([False, True, True, False])
+    sleeps: list[float] = []
+
+    def fake_update_local_bars(**kwargs: object) -> pd.DataFrame:
+        symbols = tuple(kwargs["symbols"])
+        download_calls.append(symbols)
+        return pd.DataFrame({"symbol": list(symbols), "status": ["success"] * len(symbols)})
+
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        symbols = tuple(kwargs["symbols"])
+        return pd.DataFrame({"symbol": list(symbols), "status": ["missing_file"] * len(symbols)})
+
+    def pause_check() -> bool:
+        return next(pause_states, False)
+
+    monkeypatch.setattr(service_module, "_full_daily_stock_symbols", lambda engine, provider: ["000001.SZ", "600519.SH"])
+    monkeypatch.setattr(service_module, "update_local_bars", fake_update_local_bars)
+    monkeypatch.setattr(service_module, "data_check", fake_data_check)
+
+    service.run_full_daily_update(
+        FullDailyUpdateRequest(start="2024-01-01", end="2024-01-02", batch_size=1, include_indexes=False),
+        progress_callback=progress_events.append,
+        pause_check=pause_check,
+        pause_sleep=sleeps.append,
+    )
+
+    assert download_calls == [("000001.SZ",), ("600519.SH",)]
+    assert sleeps == [0.25, 0.25]
+    assert any(event.get("paused") is True for event in progress_events)
 
 
 def test_desktop_service_runs_cross_section_for_multiple_targets(tmp_path: Path) -> None:

@@ -9,6 +9,8 @@ from ashare_cross_section_similarity.akshare_source import fetch_akshare_bars
 class _FakeAkShare:
     def __init__(self) -> None:
         self.stock_calls: list[dict[str, object]] = []
+        self.tx_calls: list[dict[str, object]] = []
+        self.sina_calls: list[dict[str, object]] = []
         self.index_calls: list[dict[str, object]] = []
 
     def stock_zh_a_hist(self, **kwargs: object) -> pd.DataFrame:
@@ -36,6 +38,68 @@ class _FakeAkShare:
                 "close": [1.05],
                 "volume": [100.0],
                 "amount": [1000.0],
+            }
+        )
+
+
+class _FallbackAkShare(_FakeAkShare):
+    def stock_zh_a_hist(self, **kwargs: object) -> pd.DataFrame:
+        self.stock_calls.append(kwargs)
+        raise RuntimeError("eastmoney unavailable")
+
+    def stock_zh_a_hist_tx(self, **kwargs: object) -> pd.DataFrame:
+        self.tx_calls.append(kwargs)
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02"],
+                "open": [7.83],
+                "close": [7.65],
+                "high": [7.86],
+                "low": [7.65],
+                "amount": [1158366.0],
+            }
+        )
+
+
+class _SinaFallbackAkShare(_FallbackAkShare):
+    def stock_zh_a_hist_tx(self, **kwargs: object) -> pd.DataFrame:
+        self.tx_calls.append(kwargs)
+        raise RuntimeError("tencent unavailable")
+
+    def stock_zh_a_daily(self, **kwargs: object) -> pd.DataFrame:
+        self.sina_calls.append(kwargs)
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02"],
+                "open": [8.15],
+                "high": [8.17],
+                "low": [7.99],
+                "close": [7.99],
+                "volume": [115836645.0],
+                "amount": [1075742000.0],
+            }
+        )
+
+
+class _IndexFallbackAkShare(_FakeAkShare):
+    def __init__(self) -> None:
+        super().__init__()
+        self.index_tx_calls: list[dict[str, object]] = []
+
+    def stock_zh_index_daily_em(self, **kwargs: object) -> pd.DataFrame:
+        self.index_calls.append(kwargs)
+        return pd.DataFrame()
+
+    def stock_zh_index_daily_tx(self, **kwargs: object) -> pd.DataFrame:
+        self.index_tx_calls.append(kwargs)
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-02", "2024-01-11"],
+                "open": [3300.0, 3310.0],
+                "close": [3315.0, 3325.0],
+                "high": [3320.0, 3330.0],
+                "low": [3290.0, 3300.0],
+                "amount": [123456.0, 223456.0],
             }
         )
 
@@ -87,6 +151,67 @@ def test_fetch_akshare_bars_uses_index_endpoint_for_index_proxy() -> None:
 
     assert fake.index_calls == [{"symbol": "399006", "start_date": "20240101", "end_date": "20240131"}]
     assert out["stock_code"].tolist() == ["399006.SZ"]
+
+
+def test_fetch_akshare_bars_falls_back_to_tencent_when_index_eastmoney_is_empty() -> None:
+    fake = _IndexFallbackAkShare()
+
+    out = fetch_akshare_bars(
+        symbols=("000300.SH",),
+        start="2024-01-01",
+        end="2024-01-10",
+        ak_client=fake,
+    )
+
+    assert fake.index_calls == [{"symbol": "000300", "start_date": "20240101", "end_date": "20240110"}]
+    assert fake.index_tx_calls == [{"symbol": "sh000300"}]
+    assert out[["stock_code", "date", "close"]].to_dict("records") == [
+        {"stock_code": "000300.SH", "date": pd.Timestamp("2024-01-02"), "close": 3315.0}
+    ]
+
+
+def test_fetch_akshare_bars_falls_back_to_tencent_when_eastmoney_fails() -> None:
+    fake = _FallbackAkShare()
+
+    out = fetch_akshare_bars(
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-10",
+        ak_client=fake,
+    )
+
+    assert fake.stock_calls
+    assert fake.tx_calls == [
+        {
+            "symbol": "sz000001",
+            "start_date": "20240101",
+            "end_date": "20240110",
+            "adjust": "qfq",
+        }
+    ]
+    assert out[["stock_code", "close"]].to_dict("records") == [{"stock_code": "000001.SZ", "close": 7.65}]
+
+
+def test_fetch_akshare_bars_falls_back_to_sina_when_eastmoney_and_tencent_fail() -> None:
+    fake = _SinaFallbackAkShare()
+
+    out = fetch_akshare_bars(
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-10",
+        ak_client=fake,
+    )
+
+    assert fake.tx_calls
+    assert fake.sina_calls == [
+        {
+            "symbol": "sz000001",
+            "start_date": "20240101",
+            "end_date": "20240110",
+            "adjust": "qfq",
+        }
+    ]
+    assert out[["stock_code", "close"]].to_dict("records") == [{"stock_code": "000001.SZ", "close": 7.99}]
 
 
 def test_fetch_akshare_bars_rejects_intraday_timeframe() -> None:

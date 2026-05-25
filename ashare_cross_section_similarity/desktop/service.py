@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+import time
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -449,6 +450,8 @@ class DesktopSearchService:
         request: FullDailyUpdateRequest,
         *,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        pause_check: Callable[[], bool] | None = None,
+        pause_sleep: Callable[[float], None] | None = None,
     ) -> pd.DataFrame:
         plan = self.plan_full_daily_update(request)
         if not plan.download_symbols:
@@ -456,7 +459,23 @@ class DesktopSearchService:
         frames: list[pd.DataFrame] = []
         batches = _batched(list(plan.download_symbols), max(1, int(request.batch_size)))
         completed = 0
+        sleep = pause_sleep or time.sleep
         for batch_index, batch in enumerate(batches, start=1):
+            pause_announced = False
+            while pause_check is not None and pause_check():
+                if progress_callback is not None and not pause_announced:
+                    progress_callback(
+                        {
+                            "completed": completed,
+                            "total": len(plan.download_symbols),
+                            "batch_index": batch_index,
+                            "batch_count": len(batches),
+                            "current": ", ".join(batch),
+                            "paused": True,
+                        }
+                    )
+                    pause_announced = True
+                sleep(0.25)
             download_result = update_local_bars(
                 symbols=tuple(batch),
                 timeframe="1d",
@@ -580,6 +599,18 @@ class DesktopSearchService:
         if concept.strip():
             values.extend(universe_module.fetch_concept_constituents(concept.strip()))
         return tuple(unique_symbols(values))
+
+    def resolve_stock_names(self, symbols: tuple[str, ...] | list[str], *, bars: pd.DataFrame | None = None) -> dict[str, str]:
+        normalized = tuple(unique_symbols(symbols))
+        if not normalized:
+            return {}
+        names = {
+            **_stock_names_from_etf_index(_fallback_review_etf_index(), normalized),
+            **_stock_names_from_akshare(normalized),
+        }
+        if bars is not None:
+            names.update(_stock_names_from_bars(bars, normalized))
+        return {symbol: names[symbol] for symbol in normalized if names.get(symbol)}
 
     def plan_kline_migration(self, source: str | Path, destination: str | Path, *, overwrite: bool = False) -> pd.DataFrame:
         return plan_kline_migration(source, destination, overwrite=overwrite)
@@ -1127,6 +1158,10 @@ def _stock_names_from_bars(bars: pd.DataFrame, symbols: tuple[str, ...] | list[s
     if bars.empty:
         return {}
     return _stock_name_map_from_table(bars, tuple(unique_symbols(symbols)))
+
+
+def _stock_names_from_etf_index(index: pd.DataFrame, symbols: tuple[str, ...] | list[str]) -> dict[str, str]:
+    return _stock_name_map_from_table(index, tuple(unique_symbols(symbols)))
 
 
 def _stock_name_map_from_table(table: pd.DataFrame, symbols: tuple[str, ...]) -> dict[str, str]:

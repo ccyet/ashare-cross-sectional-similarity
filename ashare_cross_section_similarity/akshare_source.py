@@ -63,22 +63,89 @@ def _load_akshare() -> Any:
 
 def _fetch_one_symbol(ak: Any, *, symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
     normalized = normalize_symbol(symbol)
-    code = normalized.split(".", 1)[0]
     if _is_mainland_index(normalized):
-        raw = ak.stock_zh_index_daily_em(
-            symbol=code,
-            start_date=_akshare_date(start),
-            end_date=_akshare_date(end),
-        )
-    else:
-        raw = ak.stock_zh_a_hist(
+        errors: list[str] = []
+        for source_name, fetcher in _index_fetchers(ak, normalized, start=start, end=end):
+            try:
+                raw = fetcher()
+                frame = _filter_date_range(_normalize_akshare_frame(pd.DataFrame(raw), normalized), start, end)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{source_name}: {exc}")
+                continue
+            if not frame.empty:
+                return frame
+            errors.append(f"{source_name}: 空结果")
+        raise RuntimeError(f"AkShare 未能获取 {normalized} 指数行情；已尝试东财、腾讯、新浪。详情：{' | '.join(errors)}")
+    errors: list[str] = []
+    for source_name, fetcher in _stock_fetchers(ak, normalized, start=start, end=end, adjust=adjust):
+        try:
+            raw = fetcher()
+            frame = _filter_date_range(_normalize_akshare_frame(pd.DataFrame(raw), normalized), start, end)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{source_name}: {exc}")
+            continue
+        if not frame.empty:
+            return frame
+        errors.append(f"{source_name}: 空结果")
+    raise RuntimeError(f"AkShare 未能获取 {normalized} 行情；已尝试东财、腾讯、新浪。详情：{' | '.join(errors)}")
+
+
+def _stock_fetchers(ak: Any, symbol: str, *, start: str, end: str, adjust: str) -> list[tuple[str, Any]]:
+    code = symbol.split(".", 1)[0]
+    prefixed = _market_prefixed_symbol(symbol)
+
+    def eastmoney() -> pd.DataFrame:
+        return ak.stock_zh_a_hist(
             symbol=code,
             period="daily",
             start_date=_akshare_date(start),
             end_date=_akshare_date(end),
             adjust=adjust,
         )
-    return _normalize_akshare_frame(pd.DataFrame(raw), normalized)
+
+    def tencent() -> pd.DataFrame:
+        return ak.stock_zh_a_hist_tx(
+            symbol=prefixed,
+            start_date=_akshare_date(start),
+            end_date=_akshare_date(end),
+            adjust=adjust,
+        )
+
+    def sina() -> pd.DataFrame:
+        return ak.stock_zh_a_daily(
+            symbol=prefixed,
+            start_date=_akshare_date(start),
+            end_date=_akshare_date(end),
+            adjust=adjust,
+        )
+
+    return [("eastmoney", eastmoney), ("tencent", tencent), ("sina", sina)]
+
+
+def _index_fetchers(ak: Any, symbol: str, *, start: str, end: str) -> list[tuple[str, Any]]:
+    code = symbol.split(".", 1)[0]
+    prefixed = _market_prefixed_symbol(symbol)
+
+    def eastmoney() -> pd.DataFrame:
+        return ak.stock_zh_index_daily_em(
+            symbol=code,
+            start_date=_akshare_date(start),
+            end_date=_akshare_date(end),
+        )
+
+    def tencent() -> pd.DataFrame:
+        return ak.stock_zh_index_daily_tx(symbol=prefixed)
+
+    def sina() -> pd.DataFrame:
+        return ak.stock_zh_index_daily(symbol=prefixed)
+
+    return [("eastmoney", eastmoney), ("tencent", tencent), ("sina", sina)]
+
+
+def _market_prefixed_symbol(symbol: str) -> str:
+    code, _, suffix = normalize_symbol(symbol).partition(".")
+    prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(suffix, suffix.lower())
+    return f"{prefix}{code}"
 
 
 def _normalize_akshare_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -98,6 +165,14 @@ def _normalize_akshare_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
         result[column] = pd.to_numeric(result[column], errors="coerce")
     result = result.dropna(subset=["date", "open", "high", "low", "close"])
     return result[CANONICAL_COLUMNS].sort_values("date").reset_index(drop=True)
+
+
+def _filter_date_range(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    return frame.loc[frame["date"].between(start_ts, end_ts)].reset_index(drop=True)
 
 
 def _is_mainland_index(symbol: str) -> bool:

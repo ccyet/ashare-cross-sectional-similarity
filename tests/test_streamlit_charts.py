@@ -62,11 +62,13 @@ from streamlit_app import (
     _review_ai_result_is_current,
     _review_ai_signature,
     _review_output_source_options,
+    _review_target_symbols,
     _run_download_job_step,
     _set_download_job_status,
     _stock_name_map_from_table,
     _symbol_data_hint,
     _symbols_requiring_download,
+    _tdx_sector_index_download_universe,
 )
 
 
@@ -165,6 +167,34 @@ def test_review_ai_body_html_highlights_bracketed_grade_labels() -> None:
 
     assert '<span class="review-ai-point-label">夯爆了</span>' in html
     assert '<span class="review-ai-point-text">159516.SZ半导体设备：弹性冲浪。</span>' in html
+
+
+def test_review_target_symbols_allows_thirty_six_symbols() -> None:
+    raw = "\n".join(f"{index:06d}.SZ" for index in range(1, 38))
+
+    symbols, error = _review_target_symbols(raw)
+
+    assert len(symbols) == 36
+    assert symbols[-1] == "000036.SZ"
+    assert "最多支持 36 个目标代码" in error
+
+
+def test_tdx_sector_index_download_universe_filters_names_and_normalizes_bare_codes() -> None:
+    sector_index = pd.DataFrame(
+        [
+            {"symbol": "880081.SH", "name": "轮动趋势"},
+            {"symbol": "880082.SH", "name": "板块趋势"},
+            {"symbol": "880201.SH", "name": "黑龙江"},
+        ]
+    )
+
+    symbols = _tdx_sector_index_download_universe(
+        sector_index,
+        filter_text="趋势, 880201",
+        extra_symbols="880099",
+    )
+
+    assert symbols == ["880081.SH", "880082.SH", "880201.SH", "880099.SH"]
 
 
 def test_review_ai_body_html_renders_markdown_table() -> None:

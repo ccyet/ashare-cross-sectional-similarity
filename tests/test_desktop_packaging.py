@@ -88,6 +88,18 @@ def test_windows_pyinstaller_spec_wraps_qt_entrypoint_and_exe_name() -> None:
     assert "console=False" in spec
 
 
+def test_pyinstaller_specs_collect_akshare_runtime_data_files() -> None:
+    for spec_path in [
+        Path("packaging/macos/ashare_xsec_sim_qt.spec"),
+        Path("packaging/windows/ashare_xsec_sim_qt.spec"),
+    ]:
+        spec = spec_path.read_text(encoding="utf-8")
+
+        assert "from PyInstaller.utils.hooks import collect_data_files" in spec
+        assert 'collect_data_files("akshare")' in spec
+        assert "datas=AKSHARE_DATAS" in spec
+
+
 def test_packaging_module_import_does_not_require_macos_icon_dependencies() -> None:
     code = """
 import builtins

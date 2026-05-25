@@ -97,6 +97,27 @@ def test_history_candlestick_series_includes_current_and_matched_windows() -> No
     assert 0.25 <= series[0].highlights[0].opacity <= 0.5
 
 
+def test_history_candlestick_series_uses_stock_name_labels_when_available() -> None:
+    bars = _bars("000001.SZ", [10, 11, 12, 11, 13, 20, 19, 18, 17, 16, 30, 33, 36, 33, 39, 40])
+    result = search_history(
+        bars,
+        HistorySearchConfig(
+            symbol="000001.SZ",
+            as_of="2024-01-15",
+            window_size=5,
+            forward_windows=(1,),
+            top_n=1,
+            exclusion_bars=0,
+            nearby_gap_days=0,
+        ),
+    )
+
+    series = history_candlestick_series(result, bars, forward_bars=1, stock_names={"000001.SZ": "平安银行"})
+
+    assert series[0].label.startswith("平安银行（000001.SZ） 当前窗口")
+    assert series[1].label.startswith("平安银行（000001.SZ） 相似 1")
+
+
 def test_history_stat_frames_expose_forward_and_bucket_tables() -> None:
     result = search_history(
         _bars("000001.SZ", [10, 11, 12, 11, 13, 20, 19, 18, 17, 16, 30, 33, 36, 33, 39, 40]),
@@ -197,6 +218,37 @@ def test_cross_section_candlestick_series_uses_target_and_top_matches() -> None:
     assert series[0].highlights[0].label == "指定区间"
     assert series[0].highlights[0].start == pd.Timestamp("2024-01-01")
     assert series[0].highlights[0].end == pd.Timestamp("2024-01-05")
+
+
+def test_cross_section_candlestick_series_uses_stock_name_labels_when_available() -> None:
+    bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 11, 12, 13, 14, 15, 16, 17]),
+            _bars("000001.SZ", [20, 22, 24, 26, 28, 30, 32, 34]),
+        ],
+        ignore_index=True,
+    )
+    result = search_cross_section(
+        bars,
+        CrossSectionSearchConfig(
+            target_symbol="300750.SZ",
+            universe_symbols=("000001.SZ",),
+            start="2024-01-01",
+            end="2024-01-05",
+            top_n=1,
+        ),
+    )
+
+    series = cross_section_candlestick_series(
+        result,
+        bars,
+        max_matches=1,
+        forward_bars=1,
+        stock_names={"300750.SZ": "宁德时代", "000001.SZ": "平安银行"},
+    )
+
+    assert series[0].label.startswith("宁德时代（300750.SZ，目标）")
+    assert series[1].label.startswith("平安银行（000001.SZ）")
 
 
 def test_cross_section_stat_frames_expose_forward_bucket_and_skipped_tables() -> None:

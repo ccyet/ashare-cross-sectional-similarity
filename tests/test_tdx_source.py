@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars, fetch_tdx_stock_symbols
+from ashare_cross_section_similarity.tdx_source import fetch_tdx_bars, fetch_tdx_sector_index_frame, fetch_tdx_stock_symbols
 
 
 class _FakeTq:
@@ -32,6 +32,45 @@ class _FakeTqStockList:
     def get_stock_list(self) -> object:
         self.stock_list_calls += 1
         return self.payload
+
+
+class _FakeTqSectorList:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.initialize_calls: list[str] = []
+        self.sector_list_calls: list[dict[str, object]] = []
+        self.stock_list_calls: list[dict[str, object]] = []
+
+    def initialize(self, caller_path: str) -> None:
+        self.initialize_calls.append(caller_path)
+
+    def get_sector_list(self, **kwargs: object) -> object:
+        self.sector_list_calls.append(kwargs)
+        return self.payload
+
+    def get_stock_list(self, *args: object, **kwargs: object) -> object:
+        self.stock_list_calls.append({"args": args, "kwargs": kwargs})
+        return self.payload
+
+
+class _FakeTqSectorFallback(_FakeTqSectorList):
+    get_sector_list = None
+
+
+class _RefreshRequiredFakeTq(_FakeTq):
+    def __init__(self, payload: dict[str, pd.DataFrame]) -> None:
+        super().__init__(payload)
+        self.refresh_calls: list[tuple[list[str], str]] = []
+        self.refreshed = False
+
+    def refresh_kline(self, stock_list: list[str], period: str) -> str:
+        self.refresh_calls.append((stock_list, period))
+        self.refreshed = True
+        return '{"ErrorId":"0","Msg":"refresh kline cache success."}'
+
+    def get_market_data(self, **kwargs: object) -> dict[str, pd.DataFrame]:
+        self.market_calls.append(kwargs)
+        return self.payload if self.refreshed else {}
 
 
 def test_fetch_tdx_bars_normalizes_official_tqcenter_payload() -> None:
@@ -75,6 +114,33 @@ def test_fetch_tdx_bars_normalizes_official_tqcenter_payload() -> None:
             "amount": 1000.0,
         }
     ]
+
+
+def test_fetch_tdx_bars_refreshes_kline_cache_before_request() -> None:
+    index = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    fake = _RefreshRequiredFakeTq(
+        {
+            "Open": pd.DataFrame({"000001.SZ": [1.0, 1.1]}, index=index),
+            "High": pd.DataFrame({"000001.SZ": [1.2, 1.3]}, index=index),
+            "Low": pd.DataFrame({"000001.SZ": [0.9, 1.0]}, index=index),
+            "Close": pd.DataFrame({"000001.SZ": [1.15, 1.25]}, index=index),
+            "Volume": pd.DataFrame({"000001.SZ": [100.0, 120.0]}, index=index),
+            "Amount": pd.DataFrame({"000001.SZ": [1000.0, 1220.0]}, index=index),
+        }
+    )
+
+    out = fetch_tdx_bars(
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-03",
+        timeframe="1d",
+        adjust="qfq",
+        tq_client=fake,
+    )
+
+    assert fake.refresh_calls == [(["000001.SZ"], "1d")]
+    assert len(out) == 2
+    assert out["close"].tolist() == [1.15, 1.25]
 
 
 def test_fetch_tdx_bars_supports_daily_period_and_lowercase_fields() -> None:
@@ -189,3 +255,30 @@ def test_fetch_tdx_stock_symbols_reports_missing_stock_list_api() -> None:
 
     with pytest.raises(RuntimeError, match="TDX 未能获取股票清单"):
         fetch_tdx_stock_symbols(tq_client=fake)
+
+
+def test_fetch_tdx_sector_index_frame_uses_official_sector_list_contract() -> None:
+    fake = _FakeTqSectorList(
+        [
+            {"Code": "880081.SH", "Name": "轮动趋势"},
+            {"Code": "880082.SH", "Name": "板块趋势"},
+        ]
+    )
+
+    frame = fetch_tdx_sector_index_frame(tq_client=fake)
+
+    assert fake.initialize_calls
+    assert fake.sector_list_calls == [{"list_type": 1}]
+    assert frame.to_dict("records") == [
+        {"symbol": "880081.SH", "name": "轮动趋势"},
+        {"symbol": "880082.SH", "name": "板块趋势"},
+    ]
+
+
+def test_fetch_tdx_sector_index_frame_falls_back_to_documented_stock_list_market() -> None:
+    fake = _FakeTqSectorFallback([{"Code": "880201.SH", "Name": "黑龙江"}])
+
+    frame = fetch_tdx_sector_index_frame(tq_client=fake)
+
+    assert fake.stock_list_calls == [{"args": ("10",), "kwargs": {"list_type": 1}}]
+    assert frame.to_dict("records") == [{"symbol": "880201.SH", "name": "黑龙江"}]

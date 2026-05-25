@@ -73,7 +73,11 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     algorithm_label,
     get_algorithm_status,
 )
-from ashare_cross_section_similarity.tdx_source import fetch_tdx_stock_symbols
+from ashare_cross_section_similarity.tdx_source import (
+    fetch_tdx_sector_index_frame,
+    fetch_tdx_stock_symbols,
+    normalize_tdx_sector_index_symbol,
+)
 from ashare_cross_section_similarity.universe import (
     DEFAULT_ANALYSIS_INDEX_SYMBOLS as DEFAULT_DOWNLOAD_INDEX_SYMBOLS,
     fetch_concept_constituents,
@@ -147,7 +151,7 @@ UNIVERSE_FILE_TYPES = [("搜索范围文件", ("*.csv", "*.xlsx", "*.xls", "*.pa
 KLINE_DATA_FILE_TYPES = [("K线数据文件", KLINE_FILE_PATTERNS), ("所有文件", "*")]
 SIZE_SPREAD_START = "2016-01-01"
 DEFAULT_ANALYSIS_INDEX_SYMBOLS = ("000300.SH", "000852.SH", "399006.SZ")
-REVIEW_MAX_TARGET_SYMBOLS = 20
+REVIEW_MAX_TARGET_SYMBOLS = 36
 SCRIPT_BENCHMARK_SYMBOL = "000300.SH"
 SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
 SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
@@ -232,6 +236,7 @@ def main() -> None:
         _render_data_archive_manager(data_root=data_root)
 
     _render_full_daily_tdx_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
+    _render_tdx_sector_index_update(trend_repo=trend_repo, data_root=data_root, adjust=adjust)
     _render_algorithm_benchmark_entry(data_root=data_root, timeframe=timeframe, adjust=adjust)
 
     history_tab, cross_section_tab, review_tab = st.tabs(["历史时序相似", "横截面相似", "走势复盘"])
@@ -3259,6 +3264,122 @@ def _render_full_daily_tdx_update(*, trend_repo: str, data_root: str, adjust: st
             )
 
 
+def _render_tdx_sector_index_update(*, trend_repo: str, data_root: str, adjust: str) -> None:
+    job_state = st.session_state.get("tdx_sector_index_job")
+    keep_open = isinstance(job_state, dict) and str(job_state.get("status", "")) in {"running", "paused"}
+    with st.expander("TDX 板块指数日 K 更新", expanded=keep_open):
+        st.caption(
+            "按通达信文档使用 get_sector_list(list_type=1) 获取板块指数清单；"
+            "若接口不可用，则使用文档说明的同口径 get_stock_list('10', list_type=1)。"
+        )
+        tdx_path = _render_directory_picker(
+            "通达信 PYPlugins/user 目录",
+            os.environ.get("TDX_TQCENTER_PATH", ""),
+            "tdx_sector_index_tqcenter",
+        )
+        col1, col2, col3, col4 = st.columns(4)
+        start_date = col1.date_input(
+            "起始日期",
+            **_date_input_args("tdx_sector_index_start", DATE_INPUT_MIN),
+        )
+        end_date = col2.date_input(
+            "结束日期",
+            **_date_input_args("tdx_sector_index_end", pd.Timestamp.today().date()),
+        )
+        batch_size = col3.number_input(
+            "每批指数数",
+            min_value=1,
+            max_value=300,
+            value=DOWNLOAD_BATCH_SIZE,
+            step=10,
+            key="tdx_sector_index_batch_size",
+        )
+        skip_available = col4.checkbox("跳过已覆盖", value=True, key="tdx_sector_index_skip_available")
+        filter_text = st.text_input(
+            "名称/代码筛选",
+            value="",
+            key="tdx_sector_index_filter",
+            help="逗号、空格或换行分隔；留空则下载 TDX 返回的全部板块指数。",
+        )
+        extra_symbols = st.text_input(
+            "额外板块指数代码",
+            value="",
+            key="tdx_sector_index_extra_symbols",
+            help="支持 880081.SH 或裸代码 880081；裸 88 开头代码会按 TDX 板块指数口径补为 .SH。",
+        )
+        start = pd.Timestamp(start_date).strftime("%Y-%m-%d")
+        end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+        if error := _date_range_error(start, end):
+            st.error(error)
+            return
+
+        if st.button("通过 TDX 更新板块指数", type="primary", key="tdx_sector_index_start_button"):
+            try:
+                with st.spinner("获取 TDX 板块指数列表并检查本地覆盖..."):
+                    sector_index = fetch_tdx_sector_index_frame(tqcenter_path=tdx_path)
+                    all_symbols = _tdx_sector_index_download_universe(
+                        sector_index,
+                        filter_text=filter_text,
+                        extra_symbols=extra_symbols,
+                    )
+                    download_symbols, checked = _prepare_full_daily_download_symbols(
+                        symbols=all_symbols,
+                        data_root=Path(data_root),
+                        adjust=adjust,
+                        start=start,
+                        end=end,
+                        skip_available=bool(skip_available),
+                    )
+                st.session_state["tdx_sector_index_summary"] = {
+                    "total": len(all_symbols),
+                    "tdx_total": len(sector_index),
+                    "download": len(download_symbols),
+                    "available": int((checked["status"] == "available").sum()) if not checked.empty else 0,
+                    "filter_text": filter_text.strip(),
+                    "start": start,
+                    "end": end,
+                }
+                if download_symbols:
+                    st.session_state["tdx_sector_index_job"] = _create_download_job(
+                        symbols=download_symbols,
+                        timeframe="1d",
+                        adjust=adjust,
+                        start=start,
+                        end=end,
+                        trend_repo=Path(trend_repo),
+                        data_root=Path(data_root),
+                        provider=tdx_path,
+                        download_engine="tdx",
+                        batch_size=int(batch_size),
+                    )
+                else:
+                    st.session_state.pop("tdx_sector_index_job", None)
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"TDX 板块指数更新任务创建失败：{exc}")
+
+        summary = st.session_state.get("tdx_sector_index_summary")
+        if isinstance(summary, dict):
+            filter_label = str(summary.get("filter_text") or "全部")
+            st.info(
+                f"TDX 板块指数 {int(summary.get('tdx_total', 0)):,} 个；"
+                f"本次筛选 {int(summary.get('total', 0)):,} 个；"
+                f"待下载 {int(summary.get('download', 0)):,} 个；"
+                f"筛选 {filter_label}；区间 {summary.get('start')} 至 {summary.get('end')}。"
+            )
+            if int(summary.get("download", 0)) == 0:
+                st.success("当前区间板块指数日线已覆盖，无需下载。")
+
+        update_result = _render_download_job("tdx_sector_index_job")
+        if not update_result.empty:
+            st.download_button(
+                "下载板块指数更新日志",
+                data=update_result.to_csv(index=False).encode("utf-8-sig"),
+                file_name="tdx_sector_index_update_log.csv",
+                mime="text/csv",
+            )
+
+
 def _render_price_upload(*, data_root: str, timeframe: str, adjust: str) -> None:
     with st.expander("上传自定义价格数据"):
         st.caption("支持 CSV/Parquet；必要列：date、open、high、low、close、symbol 或 stock_code。可选：volume、amount。")
@@ -3916,6 +4037,29 @@ def _full_daily_download_universe(
         include_indexes=include_indexes,
         extra_symbols=_split_symbol_text(extra_symbols),
     )
+
+
+def _tdx_sector_index_download_universe(
+    sector_index: pd.DataFrame,
+    *,
+    filter_text: str,
+    extra_symbols: str,
+) -> list[str]:
+    selected: list[str] = []
+    filters = [item.upper() for item in _split_symbol_text(filter_text)]
+    if not sector_index.empty and {"symbol", "name"}.issubset(sector_index.columns):
+        frame = sector_index.copy()
+        frame["symbol"] = frame["symbol"].map(normalize_tdx_sector_index_symbol)
+        frame["name"] = frame["name"].fillna("").astype(str)
+        if filters:
+            mask = pd.Series(False, index=frame.index)
+            for item in filters:
+                mask |= frame["symbol"].astype(str).str.upper().str.contains(item, regex=False)
+                mask |= frame["name"].astype(str).str.upper().str.contains(item, regex=False)
+            frame = frame.loc[mask]
+        selected.extend(frame["symbol"].dropna().astype(str).tolist())
+    selected.extend(normalize_tdx_sector_index_symbol(item) for item in _split_symbol_text(extra_symbols))
+    return unique_symbols(symbol for symbol in selected if symbol)
 
 
 def _split_symbol_text(value: str) -> list[str]:

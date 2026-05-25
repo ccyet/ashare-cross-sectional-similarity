@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import importlib
+import json
 import os
 from pathlib import Path
 import re
@@ -15,9 +16,11 @@ from ashare_cross_section_similarity.universe import normalize_symbol, symbols_f
 
 TDX_TQCENTER_ENV_VAR = "TDX_TQCENTER_PATH"
 TDX_REQUEST_BATCH_SIZE = 100
+TDX_SECTOR_INDEX_MARKET = "10"
 TIMEFRAME_PERIODS = {"1d": "1d", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
 ADJUST_MAP = {"": "none", "qfq": "front", "hfq": "back"}
 REQUIRED_FIELDS = ("Open", "High", "Low", "Close", "Volume", "Amount")
+REFRESHABLE_KLINE_PERIODS = {"1d", "5m", "1m"}
 FIELD_ALIASES = {
     "Open": ("Open", "open"),
     "High": ("High", "high"),
@@ -77,6 +80,7 @@ def fetch_tdx_bars(
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
     frames: list[pd.DataFrame] = []
     for symbol_batch in _batched_symbols(normalized_symbols, TDX_REQUEST_BATCH_SIZE):
+        _refresh_tdx_kline_cache(tq, symbol_batch, period)
         payload = tq.get_market_data(
             field_list=list(REQUIRED_FIELDS),
             stock_list=symbol_batch,
@@ -139,6 +143,46 @@ def fetch_tdx_stock_symbols(*, tqcenter_path: str = "", tq_client: Any | None = 
 
     details = " | ".join(errors)
     raise RuntimeError(f"TDX 未能获取股票清单。请确认 tqcenter 支持股票列表接口。详情: {details}")
+
+
+def fetch_tdx_sector_index_frame(*, tqcenter_path: str = "", tq_client: Any | None = None) -> pd.DataFrame:
+    """Return TDX sector index codes using the documented get_sector_list contract."""
+    tq = tq_client or _load_tq(tqcenter_path)
+    _ensure_initialized(tq)
+
+    errors: list[str] = []
+    sector_list = getattr(tq, "get_sector_list", None)
+    if callable(sector_list):
+        frame = _tdx_code_name_frame_from_callable(
+            "get_sector_list",
+            sector_list,
+            errors,
+            call_variants=(((), {"list_type": 1}), ((), {})),
+        )
+        if not frame.empty:
+            return frame
+
+    stock_list = getattr(tq, "get_stock_list", None)
+    if callable(stock_list):
+        frame = _tdx_code_name_frame_from_callable(
+            "get_stock_list",
+            stock_list,
+            errors,
+            call_variants=(((TDX_SECTOR_INDEX_MARKET,), {"list_type": 1}), ((TDX_SECTOR_INDEX_MARKET,), {})),
+        )
+        if not frame.empty:
+            return frame
+
+    details = " | ".join(errors)
+    raise RuntimeError(
+        "TDX 未能获取板块指数列表。请确认 tqcenter 支持 get_sector_list 或 get_stock_list('10')。"
+        f" 详情: {details}"
+    )
+
+
+def fetch_tdx_sector_index_symbols(*, tqcenter_path: str = "", tq_client: Any | None = None) -> list[str]:
+    frame = fetch_tdx_sector_index_frame(tqcenter_path=tqcenter_path, tq_client=tq_client)
+    return frame["symbol"].dropna().astype(str).tolist()
 
 
 def _load_tq(tqcenter_path: str = "") -> Any:
@@ -279,6 +323,100 @@ def _filter_a_share_stock_symbols(symbols: list[str]) -> list[str]:
     return filtered
 
 
+def _tdx_code_name_frame_from_callable(
+    method_name: str,
+    method: Any,
+    errors: list[str],
+    *,
+    call_variants: tuple[tuple[tuple[object, ...], dict[str, object]], ...],
+) -> pd.DataFrame:
+    for args, kwargs in call_variants:
+        label = _call_label(args, kwargs)
+        try:
+            payload = method(*args, **kwargs)
+        except TypeError as exc:
+            errors.append(f"{method_name}{label}: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{method_name}{label}: {exc}")
+            continue
+        frame = _tdx_code_name_frame(payload)
+        if not frame.empty:
+            return frame
+        errors.append(f"{method_name}{label}: 返回结果未包含板块指数代码")
+    return pd.DataFrame(columns=["symbol", "name"])
+
+
+def _call_label(args: tuple[object, ...], kwargs: dict[str, object]) -> str:
+    parts = [repr(item) for item in args]
+    parts.extend(f"{key}={value!r}" for key, value in kwargs.items())
+    return f"({', '.join(parts)})"
+
+
+def _tdx_code_name_frame(payload: Any) -> pd.DataFrame:
+    records = _tdx_code_name_records(payload)
+    if not records:
+        return pd.DataFrame(columns=["symbol", "name"])
+    frame = pd.DataFrame(records)
+    frame["symbol"] = frame["symbol"].map(normalize_tdx_sector_index_symbol)
+    frame["name"] = frame["name"].fillna("").astype(str).str.strip()
+    frame = frame.loc[frame["symbol"].astype(str).str.match(r"^\d{6}\.[A-Z]{2}$", na=False)]
+    return frame.drop_duplicates("symbol", keep="first").reset_index(drop=True)
+
+
+def _tdx_code_name_records(payload: Any) -> list[dict[str, str]]:
+    if payload is None:
+        return []
+    if isinstance(payload, pd.DataFrame):
+        return _tdx_code_name_records(payload.to_dict("records"))
+    if isinstance(payload, pd.Series):
+        return _tdx_code_name_records(payload.dropna().tolist())
+    if isinstance(payload, str):
+        return [{"symbol": payload, "name": ""}]
+    if isinstance(payload, Mapping):
+        code = _mapping_first_value(payload, ("Code", "code", "stock_code", "symbol", "证券代码", "代码"))
+        name = _mapping_first_value(payload, ("Name", "name", "stock_name", "证券名称", "名称"))
+        if code:
+            return [{"symbol": str(code), "name": str(name or "")}]
+        records: list[dict[str, str]] = []
+        for value in payload.values():
+            if isinstance(value, (pd.DataFrame, pd.Series, Mapping, list, tuple, set, str)):
+                records.extend(_tdx_code_name_records(value))
+        return records
+    if isinstance(payload, (list, tuple, set)):
+        records: list[dict[str, str]] = []
+        for item in payload:
+            records.extend(_tdx_code_name_records(item))
+        return records
+    return []
+
+
+def _mapping_first_value(payload: Mapping[object, object], keys: tuple[str, ...]) -> object:
+    exact = {str(key): value for key, value in payload.items()}
+    lower = {str(key).lower(): value for key, value in payload.items()}
+    for key in keys:
+        if key in exact:
+            return exact[key]
+        if key.lower() in lower:
+            return lower[key.lower()]
+    return ""
+
+
+def normalize_tdx_sector_index_symbol(value: object) -> str:
+    text = str(value).strip().upper().replace("_", ".")
+    if not text:
+        return ""
+    if "." in text:
+        code, exchange = text.split(".", 1)
+        digits = "".join(character for character in code if character.isdigit())
+        code = digits[-6:].zfill(6) if digits else code
+        return f"{code}.{exchange[:2]}"
+    digits = "".join(character for character in text if character.isdigit())
+    if len(digits) >= 6 and digits[-6:].startswith("88"):
+        return f"{digits[-6:]}.SH"
+    return normalize_symbol(text)
+
+
 def _batched_symbols(symbols: list[str], batch_size: int) -> list[list[str]]:
     if batch_size < 1:
         raise ValueError("batch_size 至少需要 1。")
@@ -296,6 +434,42 @@ def _ensure_initialized(tq: Any) -> None:
         raise RuntimeError("TDX 初始化失败。请确认本机通达信终端已启动并登录。") from exc
     _INITIALIZED = True
     _INITIALIZED_CLIENT_ID = client_id
+
+
+def _refresh_tdx_kline_cache(tq: Any, symbols: list[str], period: str) -> None:
+    if period not in REFRESHABLE_KLINE_PERIODS:
+        return
+    refresh = getattr(tq, "refresh_kline", None)
+    if not callable(refresh):
+        return
+    try:
+        result = refresh(list(symbols), period)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"TDX K线缓存刷新失败：{exc}") from exc
+    error = _tdx_refresh_error(result)
+    if error:
+        raise RuntimeError(f"TDX K线缓存刷新失败：{error}")
+
+
+def _tdx_refresh_error(result: object) -> str:
+    if result is None:
+        return "接口无返回"
+    if isinstance(result, Mapping):
+        payload = result
+    elif isinstance(result, str):
+        text = result.strip()
+        if not text:
+            return "接口返回为空"
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+    else:
+        return ""
+    error_id = str(payload.get("ErrorId", "0"))
+    if error_id in {"", "0", "None"}:
+        return ""
+    return str(payload.get("Error") or payload.get("Msg") or payload)
 
 
 def _format_market_time(value: str) -> str:

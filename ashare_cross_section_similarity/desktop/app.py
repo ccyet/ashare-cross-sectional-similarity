@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import multiprocessing
+from pathlib import Path
+import re
+import threading
 from typing import Any
 
 import pandas as pd
@@ -53,12 +57,13 @@ from ashare_cross_section_similarity.desktop.view_model import (
     size_spread_window_stats,
     visible_data_fields,
 )
+from ashare_cross_section_similarity.data import resolve_timeframe_root
 from ashare_cross_section_similarity.llm_client import DEFAULT_LLM_PROVIDER, LLMConfig, provider_presets
 from ashare_cross_section_similarity.similarity_algorithms import ALGORITHM_CHOICES, BASELINE_ALGORITHM, algorithm_label
 
 try:
-    from PySide6.QtCore import QAbstractTableModel, QDate, QModelIndex, QPoint, QRectF, Qt, QThread, Signal
-    from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QWheelEvent
+    from PySide6.QtCore import QAbstractTableModel, QDate, QModelIndex, QPoint, QRectF, QSortFilterProxyModel, Qt, QThread, Signal
+    from PySide6.QtGui import QColor, QCloseEvent, QMouseEvent, QPainter, QPen, QWheelEvent
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
@@ -79,6 +84,7 @@ try:
         QMessageBox,
         QPushButton,
         QPlainTextEdit,
+        QProgressBar,
         QScrollArea,
         QSizePolicy,
         QSpinBox,
@@ -130,6 +136,37 @@ class DataFrameModel(QAbstractTableModel):
         return self._frame.copy()
 
 
+class DataFrameFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._search_text = ""
+        self._status_filter = "全部"
+
+    def set_search_text(self, value: str) -> None:
+        self._search_text = str(value or "").strip().lower()
+        self.invalidateFilter()
+
+    def set_status_filter(self, value: str) -> None:
+        self._status_filter = str(value or "全部").strip()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
+        model = self.sourceModel()
+        if not isinstance(model, DataFrameModel):
+            return super().filterAcceptsRow(source_row, source_parent)
+        frame = model.frame()
+        if source_row >= len(frame):
+            return False
+        row = frame.iloc[source_row]
+        if self._status_filter and self._status_filter != "全部":
+            status = str(row.get("status", row.get("状态", "")) or "")
+            if status != self._status_filter:
+                return False
+        if not self._search_text:
+            return True
+        return self._search_text in " ".join(str(value) for value in row.tolist()).lower()
+
+
 class TaskWorker(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
@@ -161,6 +198,7 @@ class DatePicker(QWidget):
         self.button.setObjectName("datePickButton")
         self.button.clicked.connect(self.open_calendar)
         self.calendar = QCalendarWidget()
+        _configure_calendar(self.calendar)
         self._date = value or QDate.currentDate()
         self._sync_text()
 
@@ -187,10 +225,8 @@ class DatePicker(QWidget):
         dialog.setWindowTitle("选择日期")
         dialog.setModal(True)
         calendar = QCalendarWidget(dialog)
-        calendar.setGridVisible(True)
+        _configure_calendar(calendar)
         calendar.setSelectedDate(self._date)
-        calendar.setMinimumDate(QDate(1990, 1, 1))
-        calendar.setMaximumDate(QDate.currentDate().addYears(2))
         self.calendar = calendar
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -290,23 +326,47 @@ class ReviewCardsWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._layout = QGridLayout(self)
+        self._dialogs: list[QDialog] = []
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(12)
         self._layout.setVerticalSpacing(12)
         self.setObjectName("reviewCards")
         self.set_cards([])
 
-    def set_cards(self, cards: list[ReviewCritiqueCard]) -> None:
+    def set_cards(
+        self,
+        cards: list[ReviewCritiqueCard],
+        *,
+        chart_series: list[CandlestickSeries] | None = None,
+    ) -> None:
         _clear_layout(self._layout)
         if not cards:
             empty = QLabel("暂无锐评卡片")
             empty.setObjectName("mutedText")
             self._layout.addWidget(empty, 0, 0)
             return
+        series_by_symbol = _series_by_symbol(chart_series or [])
         for index, card in enumerate(cards[:9]):
-            self._layout.addWidget(_review_card_widget(card), index // 3, index % 3)
+            self._layout.addWidget(
+                _review_card_widget(
+                    card,
+                    on_expand=lambda item=card, series=series_by_symbol.get(card.symbol, []): self._open_card_dialog(item, series),
+                ),
+                index // 3,
+                index % 3,
+            )
         for column in range(3):
             self._layout.setColumnStretch(column, 1)
+
+    def _open_card_dialog(self, card: ReviewCritiqueCard, chart_series: list[CandlestickSeries]) -> None:
+        dialog = _review_kline_dialog(card, chart_series, self)
+        self._dialogs.append(dialog)
+        dialog.finished.connect(lambda _=0, item=dialog: self._forget_dialog(item))
+        dialog.showMaximized()
+
+    def _forget_dialog(self, dialog: QDialog) -> None:
+        if dialog in self._dialogs:
+            self._dialogs.remove(dialog)
 
 
 class CandlestickChartWidget(QWidget):
@@ -454,6 +514,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 820)
         self._workers: list[TaskWorker] = []
         self._pages: list[_Page] = []
+        self._full_daily_pause_event: threading.Event | None = None
 
         root = QWidget()
         shell = QHBoxLayout(root)
@@ -536,9 +597,12 @@ class MainWindow(QMainWindow):
         self.api_url_input.setCursorPosition(0)
         self.tdx_path_input = QLineEdit("")
         self.tdx_path_input.setMinimumWidth(210)
+        self.tdx_path_input.setPlaceholderText("通达信安装目录或 PYPlugins/user")
+        self.tdx_path_browse_button = _form_button("选择TDX目录", maximum_width=142)
+        self.tdx_path_browse_button.clicked.connect(lambda: self._choose_tdx_directory_into(self.tdx_path_input))
         self.data_mode_input.currentTextChanged.connect(lambda _: self._apply_header_visibility())
         self.data_source_input.currentTextChanged.connect(lambda _: self._apply_header_visibility())
-        browse = QPushButton("选择目录")
+        browse = _form_button("选择目录", maximum_width=118)
         browse.clicked.connect(self._choose_data_root)
 
         self.data_root_label = _field_label("本地行情根目录")
@@ -564,11 +628,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.api_url_input, 3, 1, 1, 2)
         layout.addWidget(self.tdx_path_label, 2, 3)
         layout.addWidget(self.tdx_path_input, 3, 3, 1, 2)
+        layout.addWidget(self.tdx_path_browse_button, 3, 5)
         layout.setColumnStretch(0, 5)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(2, 2)
         layout.setColumnStretch(3, 2)
         layout.setColumnStretch(4, 2)
+        layout.setColumnStretch(5, 0)
         self._apply_header_visibility()
         return header
 
@@ -984,6 +1050,15 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
         layout.addWidget(_page_title("数据管理", "检查本地 K 线覆盖，预览并执行文件迁移。"))
 
+        self.data_root_hint = QLabel("")
+        self.data_root_hint.setObjectName("dataRootHint")
+        self.data_root_hint.setWordWrap(True)
+        layout.addWidget(self.data_root_hint)
+        self.data_root_input.textChanged.connect(lambda _: self._refresh_data_root_hint())
+        self.timeframe_input.currentTextChanged.connect(lambda _: self._refresh_data_root_hint())
+        self.adjust_input.currentTextChanged.connect(lambda _: self._refresh_data_root_hint())
+        self._refresh_data_root_hint()
+
         self.benchmark_command = QPlainTextEdit()
         self.benchmark_command.setReadOnly(True)
         self.benchmark_command.setMaximumHeight(92)
@@ -1001,18 +1076,26 @@ class MainWindow(QMainWindow):
         self.data_symbols = _symbol_text("000852.SH, 000300.SH")
         self.data_start = _date_edit(QDate.currentDate().addMonths(-3))
         self.data_end = _date_edit(QDate.currentDate())
-        self.data_check_button = QPushButton("检查覆盖")
+        self.data_check_button = _form_button("检查覆盖", primary=True)
         self.data_check_button.setObjectName("primaryButton")
         self.data_check_button.clicked.connect(self._run_data_check)
         self.data_download_engine = QComboBox()
         self.data_download_engine.addItems(["akshare", "tdx", "openbb", "trend"])
         self.data_download_provider = QLineEdit("")
-        self.data_download_provider.setPlaceholderText("TDX: PYPlugins/user；OpenBB: akshare")
-        self.data_update_button = QPushButton("下载/更新行情")
+        self.data_download_provider.setPlaceholderText("TDX: 通达信目录或 PYPlugins/user；OpenBB: akshare")
+        self.data_tdx_provider_browse_button = _form_button("选择TDX目录", maximum_width=142)
+        self.data_tdx_provider_browse_button.clicked.connect(lambda: self._choose_tdx_directory_into(self.data_download_provider))
+        self.data_update_button = _form_button("下载/更新行情", primary=True)
         self.data_update_button.setObjectName("primaryButton")
         self.data_update_button.clicked.connect(self._run_data_update)
-        self.data_export_button = QPushButton("导出覆盖 CSV")
+        self.data_export_button = _form_button("导出覆盖 CSV")
         self.data_export_button.clicked.connect(lambda: self._export_table(self.data_coverage_table, "data_coverage.csv"))
+        self.data_coverage_summary = QLabel("0/0 可用")
+        self.data_coverage_summary.setObjectName("coverageSummary")
+        self.data_coverage_detail_button = _form_button("查看明细")
+        self.data_coverage_detail_button.setEnabled(False)
+        self.data_coverage_detail_button.clicked.connect(self._open_data_coverage_detail)
+        self.data_update_progress_bar = _progress_bar()
         _add_form_row(coverage_form, 0, "检查代码", self.data_symbols, "开始日期", self.data_start)
         coverage_form.addWidget(_field_label("结束日期"), 1, 0)
         coverage_form.addWidget(self.data_end, 1, 1)
@@ -1020,25 +1103,36 @@ class MainWindow(QMainWindow):
         coverage_form.addWidget(self.data_download_engine, 1, 3)
         coverage_form.addWidget(_field_label("Provider/路径"), 2, 0)
         coverage_form.addWidget(self.data_download_provider, 2, 1, 1, 3)
+        coverage_form.addWidget(self.data_tdx_provider_browse_button, 2, 4)
         coverage_form.addWidget(self.data_check_button, 3, 0)
         coverage_form.addWidget(self.data_update_button, 3, 1)
         coverage_form.addWidget(self.data_export_button, 3, 2)
-        layout.addWidget(_section_label("本地覆盖检查"))
-        layout.addLayout(coverage_form)
+        coverage_form.addWidget(self.data_coverage_summary, 4, 0, 1, 2)
+        coverage_form.addWidget(self.data_coverage_detail_button, 4, 2)
+        coverage_form.addWidget(self.data_update_progress_bar, 4, 3, 1, 2)
+        coverage_form.setColumnStretch(4, 0)
+        layout.addWidget(
+            _data_operation_panel(
+                "覆盖与补数据",
+                "检查本地 parquet 覆盖；按 AkShare / TDX / OpenBB / trend 下载或修补缺失区间。",
+                coverage_form,
+            )
+        )
 
         self.data_status = QLabel("等待检查")
         self.data_status.setObjectName("mutedText")
         self.data_coverage_chart = BarChartWidget("覆盖状态")
         self.data_coverage_table = _table()
+        self._data_coverage_detail_frame = pd.DataFrame()
 
         price_import_form = QGridLayout()
         self.price_import_file = QLineEdit("")
         self.price_import_file.setPlaceholderText("CSV/Parquet 价格数据文件")
         self.price_import_fallback_symbol = QLineEdit("")
         self.price_import_fallback_symbol.setPlaceholderText("文件无代码列时填写，如 000001")
-        price_file_button = QPushButton("选择价格文件")
+        price_file_button = _form_button("选择价格文件", maximum_width=132)
         price_file_button.clicked.connect(self._choose_price_file)
-        self.price_import_button = QPushButton("导入价格数据")
+        self.price_import_button = _form_button("导入价格数据", primary=True)
         self.price_import_button.setObjectName("primaryButton")
         self.price_import_button.clicked.connect(self._run_price_import)
         price_import_form.addWidget(_field_label("价格文件"), 0, 0)
@@ -1048,8 +1142,13 @@ class MainWindow(QMainWindow):
         price_import_form.addWidget(self.price_import_fallback_symbol, 1, 1, 1, 3)
         price_import_form.addWidget(self.price_import_button, 1, 4)
         price_import_form.setColumnStretch(1, 1)
-        layout.addWidget(_section_label("上传自定义价格数据"))
-        layout.addLayout(price_import_form)
+        layout.addWidget(
+            _data_operation_panel(
+                "自定义价格导入",
+                "导入 CSV 或 Parquet，落到当前数据根目录、周期和复权口径。",
+                price_import_form,
+            )
+        )
 
         self.price_import_status = QLabel("等待导入")
         self.price_import_status.setObjectName("mutedText")
@@ -1059,7 +1158,9 @@ class MainWindow(QMainWindow):
         self.full_daily_start = _date_edit(QDate(1990, 1, 1))
         self.full_daily_end = _date_edit(QDate.currentDate())
         self.full_daily_provider = QLineEdit("")
-        self.full_daily_provider.setPlaceholderText("留空使用顶部 TDX 路径")
+        self.full_daily_provider.setPlaceholderText("留空使用顶部 TDX 路径；也可选择通达信目录")
+        self.full_daily_tdx_browse_button = _form_button("选择TDX目录", maximum_width=142)
+        self.full_daily_tdx_browse_button.clicked.connect(lambda: self._choose_tdx_directory_into(self.full_daily_provider))
         self.full_daily_batch_size = _spin(1, 500, 100)
         self.full_daily_skip_available = QCheckBox("跳过已覆盖")
         self.full_daily_skip_available.setChecked(True)
@@ -1067,17 +1168,27 @@ class MainWindow(QMainWindow):
         self.full_daily_include_indexes.setChecked(True)
         self.full_daily_extra_symbols = QLineEdit("")
         self.full_daily_extra_symbols.setPlaceholderText("额外 ETF/指数，如 159915.SZ")
-        self.full_daily_plan_button = QPushButton("预览全A日线")
+        self.full_daily_plan_button = _form_button("预览全A日线")
         self.full_daily_plan_button.clicked.connect(self._plan_full_daily_update)
-        self.full_daily_run_button = QPushButton("开始全A下载")
+        self.full_daily_run_button = _form_button("开始全A下载", primary=True)
         self.full_daily_run_button.setObjectName("primaryButton")
         self.full_daily_run_button.clicked.connect(self._run_full_daily_update)
+        self.full_daily_pause_button = _form_button("暂停下载")
+        self.full_daily_pause_button.setEnabled(False)
+        self.full_daily_pause_button.clicked.connect(self._toggle_full_daily_pause)
+        self.full_daily_summary = QLabel("0/0 待下载")
+        self.full_daily_summary.setObjectName("coverageSummary")
+        self.full_daily_detail_button = _form_button("查看明细")
+        self.full_daily_detail_button.setEnabled(False)
+        self.full_daily_detail_button.clicked.connect(self._open_full_daily_detail)
+        self.full_daily_progress_bar = _progress_bar()
         full_daily_form.addWidget(_field_label("开始日期"), 0, 0)
         full_daily_form.addWidget(self.full_daily_start, 0, 1)
         full_daily_form.addWidget(_field_label("结束日期"), 0, 2)
         full_daily_form.addWidget(self.full_daily_end, 0, 3)
         full_daily_form.addWidget(_field_label("TDX 路径"), 1, 0)
         full_daily_form.addWidget(self.full_daily_provider, 1, 1, 1, 3)
+        full_daily_form.addWidget(self.full_daily_tdx_browse_button, 1, 4)
         full_daily_form.addWidget(_field_label("批次大小"), 2, 0)
         full_daily_form.addWidget(self.full_daily_batch_size, 2, 1)
         full_daily_form.addWidget(self.full_daily_skip_available, 2, 2)
@@ -1086,14 +1197,25 @@ class MainWindow(QMainWindow):
         full_daily_form.addWidget(self.full_daily_extra_symbols, 3, 1, 1, 3)
         full_daily_form.addWidget(self.full_daily_plan_button, 4, 0)
         full_daily_form.addWidget(self.full_daily_run_button, 4, 1)
+        full_daily_form.addWidget(self.full_daily_pause_button, 4, 2)
+        full_daily_form.addWidget(self.full_daily_summary, 5, 0, 1, 2)
+        full_daily_form.addWidget(self.full_daily_detail_button, 5, 2)
+        full_daily_form.addWidget(self.full_daily_progress_bar, 5, 3, 1, 2)
         full_daily_form.setColumnStretch(1, 1)
         full_daily_form.setColumnStretch(3, 1)
-        layout.addWidget(_section_label("全A日线更新"))
-        layout.addLayout(full_daily_form)
+        full_daily_form.setColumnStretch(4, 0)
+        layout.addWidget(
+            _data_operation_panel(
+                "全A日线批量更新",
+                "使用 TDX 股票清单批次下载日线；先预览覆盖，再按批次执行。",
+                full_daily_form,
+            )
+        )
 
         self.full_daily_status = QLabel("等待预览")
         self.full_daily_status.setObjectName("mutedText")
         self.full_daily_table = _table()
+        self._full_daily_detail_frame = pd.DataFrame()
 
         migration_form = QGridLayout()
         self.migration_source = QLineEdit("")
@@ -1101,18 +1223,18 @@ class MainWindow(QMainWindow):
         self.migration_mode = QComboBox()
         self.migration_mode.addItems(["copy", "move"])
         self.migration_overwrite = QCheckBox("覆盖同名文件")
-        source_file = QPushButton("来源文件")
+        source_file = _form_button("来源文件", maximum_width=108)
         source_file.clicked.connect(lambda: self._choose_file_into(self.migration_source))
-        source_folder = QPushButton("来源目录")
+        source_folder = _form_button("来源目录", maximum_width=108)
         source_folder.clicked.connect(lambda: self._choose_directory_into(self.migration_source, "选择来源目录"))
-        destination_folder = QPushButton("目标目录")
+        destination_folder = _form_button("目标目录", maximum_width=108)
         destination_folder.clicked.connect(lambda: self._choose_directory_into(self.migration_destination, "选择目标目录"))
-        self.migration_preview_button = QPushButton("预览迁移")
+        self.migration_preview_button = _form_button("预览迁移")
         self.migration_preview_button.clicked.connect(self._preview_migration)
-        self.migration_execute_button = QPushButton("执行迁移")
+        self.migration_execute_button = _form_button("执行迁移", primary=True)
         self.migration_execute_button.setObjectName("primaryButton")
         self.migration_execute_button.clicked.connect(self._execute_migration)
-        self.migration_export_button = QPushButton("导出迁移 CSV")
+        self.migration_export_button = _form_button("导出迁移 CSV")
         self.migration_export_button.clicked.connect(lambda: self._export_table(self.migration_table, "kline_migration.csv"))
         migration_form.addWidget(_field_label("来源"), 0, 0)
         migration_form.addWidget(self.migration_source, 0, 1, 1, 3)
@@ -1130,13 +1252,19 @@ class MainWindow(QMainWindow):
         migration_form.setColumnStretch(1, 1)
         migration_form.setColumnStretch(2, 1)
         migration_form.setColumnStretch(3, 1)
-        layout.addWidget(_section_label("K线文件迁移"))
-        layout.addLayout(migration_form)
+        layout.addWidget(
+            _data_operation_panel(
+                "K线文件迁移",
+                "先预览 copy/move 计划，再执行文件迁移，避免误操作。",
+                migration_form,
+            )
+        )
 
         self.migration_status = QLabel("等待预览")
         self.migration_status.setObjectName("mutedText")
         self.migration_table = _table()
         self.data_result_tabs = QTabWidget()
+        self.data_result_tabs.setObjectName("dataResultTabs")
         self.data_result_tabs.addTab(
             _chart_tab((self.data_status, self.data_coverage_chart, self.data_coverage_table)),
             "覆盖",
@@ -1177,12 +1305,27 @@ class MainWindow(QMainWindow):
         field_widgets = {
             "data_source": (self.data_source_label, self.data_source_input),
             "api_url": (self.api_url_label, self.api_url_input),
-            "tdx_path": (self.tdx_path_label, self.tdx_path_input),
+            "tdx_path": (self.tdx_path_label, self.tdx_path_input, self.tdx_path_browse_button),
         }
         for field, widgets in field_widgets.items():
             should_show = field in visible
             for widget in widgets:
                 widget.setVisible(should_show)
+
+    def _refresh_data_root_hint(self) -> None:
+        hint = getattr(self, "data_root_hint", None)
+        if not isinstance(hint, QLabel):
+            return
+        root_text = self.data_root_input.text().strip()
+        timeframe = self.timeframe_input.currentText()
+        adjust = self.adjust_input.currentText()
+        if not root_text:
+            hint.setText("下载前先确认数据存储根目录；当前为空，下载后检查会继续报 missing_file。")
+            return
+        write_root = resolve_timeframe_root(Path(root_text).expanduser(), timeframe)
+        if adjust:
+            write_root = write_root / adjust
+        hint.setText(f"下载前先确认数据存储根目录；parquet 将写入：{write_root}")
 
     def _apply_review_ai_defaults(self) -> None:
         preset = _provider_preset_from_label(self.review_ai_provider.currentText())
@@ -1210,6 +1353,16 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "选择本地行情根目录", self.data_root_input.text())
         if selected:
             self.data_root_input.setText(selected)
+            self._refresh_data_root_hint()
+
+    def _choose_tdx_directory_into(self, target: QLineEdit) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择通达信目录或 PYPlugins/user",
+            target.text() or self.tdx_path_input.text() or self.data_root_input.text(),
+        )
+        if selected:
+            target.setText(selected)
 
     def _choose_directory_into(self, target: QLineEdit, title: str) -> None:
         selected = QFileDialog.getExistingDirectory(self, title, target.text() or self.data_root_input.text())
@@ -1353,15 +1506,22 @@ class MainWindow(QMainWindow):
         if not isinstance(model, DataFrameModel) or model.frame().empty:
             QMessageBox.information(self, "没有可展开数据", "当前表格为空。")
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.resize(1180, 720)
-        expanded_table = _table()
-        expanded_table.setModel(DataFrameModel(model.frame()))
-        expanded_table.resizeColumnsToContents()
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(expanded_table)
-        dialog.exec()
+        self.data_detail_dialog = _dataframe_detail_dialog(model.frame(), title, self)
+        self.data_detail_dialog.exec()
+
+    def _open_data_coverage_detail(self) -> None:
+        if self._data_coverage_detail_frame.empty:
+            QMessageBox.information(self, "没有覆盖明细", "请先检查覆盖。")
+            return
+        self.data_detail_dialog = _dataframe_detail_dialog(self._data_coverage_detail_frame, "覆盖明细", self)
+        self.data_detail_dialog.show()
+
+    def _open_full_daily_detail(self) -> None:
+        if self._full_daily_detail_frame.empty:
+            QMessageBox.information(self, "没有全A明细", "请先预览或下载全A日线。")
+            return
+        self.data_detail_dialog = _dataframe_detail_dialog(self._full_daily_detail_frame, "全A日线明细", self)
+        self.data_detail_dialog.show()
 
     def _refresh_symbols(self) -> None:
         self._run_task(
@@ -1396,6 +1556,7 @@ class MainWindow(QMainWindow):
         histories = service.search_history_many(request)
         symbols = tuple(history.symbol for history in histories)
         bars = service.load_bars(symbols=symbols, start="1900-01-01", end=_today_text())
+        stock_names = service.resolve_stock_names(symbols, bars=bars)
         size_spread_error = ""
         try:
             size_spread_bars = service.load_bars(
@@ -1419,6 +1580,7 @@ class MainWindow(QMainWindow):
             "coverage": coverage,
             "size_spread_bars": size_spread_bars,
             "size_spread_error": size_spread_error,
+            "stock_names": stock_names,
         }
 
     def _run_cross_section(self) -> None:
@@ -1526,25 +1688,30 @@ class MainWindow(QMainWindow):
                 algorithm=request.algorithm,
             )
         )
-        symbols: list[str] = []
+        chart_symbols: list[str] = []
+        name_symbols: list[str] = [*parse_symbol_list(request.target_symbol), *universe_symbols]
         chart_start = pd.Timestamp(request.start)
         for cross_section in cross_sections:
-            symbols.append(cross_section.target_symbol)
+            chart_symbols.append(cross_section.target_symbol)
+            name_symbols.append(cross_section.target_symbol)
             if not cross_section.results.empty and "symbol" in cross_section.results.columns:
-                symbols.extend(str(symbol) for symbol in cross_section.results["symbol"].head(6).tolist())
+                result_symbols = [str(symbol) for symbol in cross_section.results["symbol"].tolist()]
+                name_symbols.extend(result_symbols)
+                chart_symbols.extend(result_symbols[:6])
             if not cross_section.results.empty and "区间开始" in cross_section.results.columns:
                 starts = pd.to_datetime(cross_section.results["区间开始"], errors="coerce").dropna()
                 if not starts.empty:
                     chart_start = min(chart_start, starts.min())
         bars = (
             service.load_bars(
-                symbols=parse_symbol_list(symbols),
+                symbols=parse_symbol_list(chart_symbols),
                 start=chart_start.strftime("%Y-%m-%d"),
                 end=_today_text(),
             )
-            if symbols
+            if chart_symbols
             else pd.DataFrame()
         )
+        stock_names = service.resolve_stock_names(parse_symbol_list(name_symbols), bars=bars)
         coverage = service.cross_section_coverage(
             CrossSectionRequest(
                 target_symbol=request.target_symbol,
@@ -1558,7 +1725,7 @@ class MainWindow(QMainWindow):
                 algorithm=request.algorithm,
             )
         )
-        return {"cross_sections": cross_sections, "bars": bars, "coverage": coverage}
+        return {"cross_sections": cross_sections, "bars": bars, "coverage": coverage, "stock_names": stock_names}
 
     def _run_cross_coverage_operation(
         self,
@@ -1698,6 +1865,8 @@ class MainWindow(QMainWindow):
             start=_date_text(self.data_start),
             end=_date_text(self.data_end),
         )
+        self.data_coverage_summary.setText("检查中")
+        self.data_coverage_detail_button.setEnabled(False)
         self._run_task(
             lambda: self._service().check_coverage(request),
             self._show_data_check_result,
@@ -1713,6 +1882,8 @@ class MainWindow(QMainWindow):
             download_engine=self.data_download_engine.currentText(),
             provider=self.data_download_provider.text().strip(),
         )
+        self.data_update_progress_bar.setRange(0, 0)
+        self.data_update_progress_bar.setFormat("下载中")
         self._run_task(
             lambda: self._service().update_bars(request),
             self._show_data_update_result,
@@ -1780,6 +1951,11 @@ class MainWindow(QMainWindow):
 
     def _plan_full_daily_update(self) -> None:
         request = self._full_daily_request()
+        self.full_daily_summary.setText("预览中")
+        self.full_daily_detail_button.setEnabled(False)
+        self.full_daily_progress_bar.setRange(0, 100)
+        self.full_daily_progress_bar.setValue(0)
+        self.full_daily_progress_bar.setFormat("0/0")
         self._run_task(
             lambda: self._service().plan_full_daily_update(request),
             self._show_full_daily_plan,
@@ -1789,13 +1965,49 @@ class MainWindow(QMainWindow):
 
     def _run_full_daily_update(self) -> None:
         request = self._full_daily_request()
+        self._begin_full_daily_pause_control()
+        self.full_daily_progress_bar.setRange(0, 100)
+        self.full_daily_progress_bar.setValue(0)
+        self.full_daily_progress_bar.setFormat("0/0")
         self._run_task(
-            lambda progress: self._service().run_full_daily_update(request, progress_callback=progress),
+            lambda progress: self._service().run_full_daily_update(
+                request,
+                progress_callback=progress,
+                pause_check=self._is_full_daily_paused,
+            ),
             self._show_full_daily_update_result,
             status_label=self.full_daily_status,
             busy_text="正在下载全A日线...",
             on_progress=self._show_full_daily_progress,
+            on_finished=self._end_full_daily_pause_control,
         )
+
+    def _begin_full_daily_pause_control(self) -> None:
+        self._full_daily_pause_event = threading.Event()
+        self.full_daily_pause_button.setEnabled(True)
+        self.full_daily_pause_button.setText("暂停下载")
+
+    def _end_full_daily_pause_control(self) -> None:
+        if self._full_daily_pause_event is not None:
+            self._full_daily_pause_event.clear()
+        self._full_daily_pause_event = None
+        self.full_daily_pause_button.setEnabled(False)
+        self.full_daily_pause_button.setText("暂停下载")
+
+    def _toggle_full_daily_pause(self) -> None:
+        if self._full_daily_pause_event is None:
+            return
+        if self._full_daily_pause_event.is_set():
+            self._full_daily_pause_event.clear()
+            self.full_daily_pause_button.setText("暂停下载")
+            self.full_daily_status.setText("继续下载：当前批次完成后进入下一批。")
+            return
+        self._full_daily_pause_event.set()
+        self.full_daily_pause_button.setText("继续下载")
+        self.full_daily_status.setText("已暂停：当前批次结束后停止进入下一批。")
+
+    def _is_full_daily_paused(self) -> bool:
+        return bool(self._full_daily_pause_event is not None and self._full_daily_pause_event.is_set())
 
     def _preview_migration(self) -> None:
         self._run_task(
@@ -1830,6 +2042,7 @@ class MainWindow(QMainWindow):
         status_label: QLabel,
         busy_text: str = "正在运行...",
         on_progress: Callable[[Any], None] | None = None,
+        on_finished: Callable[[], None] | None = None,
     ) -> None:
         status_label.setText(busy_text)
         worker = TaskWorker(operation, progress_enabled=on_progress is not None)
@@ -1838,6 +2051,8 @@ class MainWindow(QMainWindow):
         worker.failed.connect(lambda message: self._show_error(message, status_label))
         if on_progress is not None:
             worker.progressed.connect(on_progress)
+        if on_finished is not None:
+            worker.finished.connect(on_finished)
         worker.finished.connect(lambda: self._remove_worker(worker))
         worker.start()
 
@@ -1855,12 +2070,15 @@ class MainWindow(QMainWindow):
         coverage = result.get("coverage") if isinstance(result, dict) else pd.DataFrame()
         size_spread_bars = result.get("size_spread_bars") if isinstance(result, dict) else pd.DataFrame()
         size_spread_error = str(result.get("size_spread_error", "")) if isinstance(result, dict) else ""
+        stock_names = result.get("stock_names", {}) if isinstance(result, dict) else {}
         histories = list(raw_histories) if isinstance(raw_histories, list) else [raw_histories]
         frames = []
         for history in histories:
             frame = history.results.copy() if hasattr(history, "results") else pd.DataFrame()
             if not frame.empty:
-                frame.insert(0, "目标代码", getattr(history, "symbol", ""))
+                target_symbol = str(getattr(history, "symbol", ""))
+                frame.insert(0, "目标代码", target_symbol)
+                frame.insert(1, "目标股票", _stock_name_from_map(stock_names, target_symbol))
             frames.append(frame)
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         self.history_table.setModel(DataFrameModel(frame))
@@ -1868,7 +2086,7 @@ class MainWindow(QMainWindow):
         first_history = histories[0] if histories else None
         self.history_chart.set_series(history_line_series(first_history) if first_history else [])
         self.history_kline_chart.set_series(
-            history_candlestick_series(first_history, chart_bars, forward_bars=10) if first_history else []
+            history_candlestick_series(first_history, chart_bars, forward_bars=10, stock_names=stock_names) if first_history else []
         )
         spread = size_spread_frame(size_spread_bars if isinstance(size_spread_bars, pd.DataFrame) else pd.DataFrame())
         self.history_size_spread_chart.set_series(size_spread_line_series(spread))
@@ -1889,12 +2107,22 @@ class MainWindow(QMainWindow):
         raw_cross_sections = result.get("cross_sections") if isinstance(result, dict) else result
         chart_bars = result.get("bars") if isinstance(result, dict) else pd.DataFrame()
         coverage = result.get("coverage") if isinstance(result, dict) else pd.DataFrame()
+        stock_names = result.get("stock_names", {}) if isinstance(result, dict) else {}
         cross_sections = list(raw_cross_sections) if isinstance(raw_cross_sections, list) else [raw_cross_sections]
         frames = []
         for cross_section in cross_sections:
             frame = cross_section.results.copy() if hasattr(cross_section, "results") else pd.DataFrame()
             if not frame.empty:
-                frame.insert(0, "目标代码", getattr(cross_section, "target_symbol", ""))
+                target_symbol = str(getattr(cross_section, "target_symbol", ""))
+                frame.insert(0, "目标代码", target_symbol)
+                frame.insert(1, "目标股票", _stock_name_from_map(stock_names, target_symbol))
+                if "symbol" in frame.columns:
+                    stock_name_values = frame["symbol"].map(lambda symbol: _stock_name_from_map(stock_names, symbol))
+                    if "股票" in frame.columns:
+                        frame["股票"] = stock_name_values
+                    else:
+                        insert_at = int(frame.columns.get_loc("symbol")) + 1
+                        frame.insert(insert_at, "股票", stock_name_values)
             frames.append(frame)
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         self.cross_table.setModel(DataFrameModel(frame))
@@ -1902,7 +2130,9 @@ class MainWindow(QMainWindow):
         first_cross = cross_sections[0] if cross_sections else None
         self.cross_chart.set_bars(cross_section_score_bars(first_cross) if first_cross else [])
         self.cross_kline_chart.set_series(
-            cross_section_candlestick_series(first_cross, chart_bars, max_matches=6, forward_bars=10) if first_cross else []
+            cross_section_candlestick_series(first_cross, chart_bars, max_matches=6, forward_bars=10, stock_names=stock_names)
+            if first_cross
+            else []
         )
         if first_cross:
             stat_sections = dict(cross_section_stat_frames(first_cross))
@@ -1947,7 +2177,8 @@ class MainWindow(QMainWindow):
         frame = review_segments_frame(reviews, stock_names=stock_names)
         self.review_table.setModel(DataFrameModel(frame))
         self.review_table.resizeColumnsToContents()
-        self.review_chart.set_series(review_candlestick_series(reviews))
+        review_kline_series = review_candlestick_series(reviews)
+        self.review_chart.set_series(review_kline_series)
         self.review_relative_chart.set_series(review_relative_line_series(reviews, comparison_frames))
         self.review_overview_table.setModel(DataFrameModel(review_overview_frame(reviews, stock_names=stock_names)))
         self.review_ranking_table.setModel(
@@ -1966,7 +2197,7 @@ class MainWindow(QMainWindow):
             table.resizeColumnsToContents()
         if ai_result is not None:
             self.review_text.setMarkdown(_ai_result_markdown(ai_result))
-            self.review_cards.set_cards(_ai_script_cards(ai_result))
+            self.review_cards.set_cards(_ai_script_cards(ai_result, stock_names=stock_names), chart_series=review_kline_series)
         else:
             self.review_text.setMarkdown(
                 "\n\n---\n\n".join(review_text(review, comparison_frame, stock_names=stock_names) for review in reviews)
@@ -1977,7 +2208,8 @@ class MainWindow(QMainWindow):
                     comparison_frame,
                     stock_names=stock_names,
                     direction_by_symbol=direction_by_symbol,
-                )
+                ),
+                chart_series=review_kline_series,
             )
         valid_reviews = [review for review in reviews if not getattr(review, "window", pd.DataFrame()).empty]
         avg_return = pd.Series(
@@ -1997,19 +2229,29 @@ class MainWindow(QMainWindow):
 
     def _show_data_check_result(self, frame: object) -> None:
         data = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        self._data_coverage_detail_frame = data.copy()
         self.data_coverage_table.setModel(DataFrameModel(data_status_frame(data)))
         self.data_coverage_table.resizeColumnsToContents()
         self.data_coverage_chart.set_bars(data_status_bars(data))
         available = int((data.get("status", pd.Series(dtype=str)) == "available").sum()) if not data.empty else 0
+        self.data_coverage_summary.setText(f"{available}/{len(data)} 可用")
+        self.data_coverage_detail_button.setEnabled(not data.empty)
         self.data_status.setText(f"完成：检查 {len(data)} 个代码，完整覆盖 {available} 个。")
 
     def _show_data_update_result(self, frame: object) -> None:
         data = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        self._data_coverage_detail_frame = data.copy()
         self.data_coverage_table.setModel(DataFrameModel(data))
         self.data_coverage_table.resizeColumnsToContents()
         self.data_coverage_chart.set_bars(data_status_bars(data))
         status_counts = data.get("status", pd.Series(dtype=str)).astype(str).value_counts().to_dict() if not data.empty else {}
         summary = "，".join(f"{key} {value}" for key, value in status_counts.items()) or "无结果"
+        success = int((data.get("status", pd.Series(dtype=str)).astype(str) == "success").sum()) if not data.empty else 0
+        self.data_coverage_summary.setText(f"{success}/{len(data)} 下载成功")
+        self.data_coverage_detail_button.setEnabled(not data.empty)
+        self.data_update_progress_bar.setRange(0, 1)
+        self.data_update_progress_bar.setValue(1)
+        self.data_update_progress_bar.setFormat(f"{len(data)}/{len(data)}")
         self.data_status.setText(f"完成：{summary}。")
 
     def _show_history_download_result(self, frame: object) -> None:
@@ -2034,21 +2276,31 @@ class MainWindow(QMainWindow):
             frame = data_status_frame(coverage)
         else:
             frame = pd.DataFrame({"symbol": list(download_symbols), "status": ["pending"] * len(download_symbols)})
+        self._full_daily_detail_frame = frame.copy()
         self.full_daily_table.setModel(DataFrameModel(frame))
         self.full_daily_table.resizeColumnsToContents()
         total_count = int(getattr(plan, "total_count", len(frame)))
         stock_count = int(getattr(plan, "stock_count", 0))
         index_count = int(getattr(plan, "index_count", 0))
+        self.full_daily_summary.setText(f"{len(download_symbols)}/{total_count} 待下载")
+        self.full_daily_detail_button.setEnabled(not frame.empty)
         self.full_daily_status.setText(
             f"预览完成：范围 {total_count} 个，待下载 {len(download_symbols)} 个，股票 {stock_count} 个，指数/额外 {index_count} 个。"
         )
 
     def _show_full_daily_update_result(self, frame: object) -> None:
         data = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        self._full_daily_detail_frame = data.copy()
         self.full_daily_table.setModel(DataFrameModel(data_status_frame(data)))
         self.full_daily_table.resizeColumnsToContents()
         status_counts = data.get("status", pd.Series(dtype=str)).astype(str).value_counts().to_dict() if not data.empty else {}
         summary = "，".join(f"{key} {value}" for key, value in status_counts.items()) or "无结果"
+        available = int((data.get("status", pd.Series(dtype=str)).astype(str) == "available").sum()) if not data.empty else 0
+        self.full_daily_summary.setText(f"{available}/{len(data)} 可用")
+        self.full_daily_detail_button.setEnabled(not data.empty)
+        self.full_daily_progress_bar.setRange(0, max(len(data), 1))
+        self.full_daily_progress_bar.setValue(len(data))
+        self.full_daily_progress_bar.setFormat(f"{len(data)}/{len(data)}")
         self.full_daily_status.setText(f"完成：{summary}。")
 
     def _show_full_daily_progress(self, progress: object) -> None:
@@ -2058,9 +2310,14 @@ class MainWindow(QMainWindow):
         batch_index = int(data.get("batch_index", 0) or 0)
         batch_count = int(data.get("batch_count", 0) or 0)
         current = str(data.get("current", "") or "").strip()
-        text = f"全A下载进度：{completed}/{total}；批次 {batch_index}/{batch_count}"
+        prefix = "已暂停" if data.get("paused") is True else "全A下载进度"
+        text = f"{prefix}：{completed}/{total}；批次 {batch_index}/{batch_count}"
         if current:
             text = f"{text}；当前 {current}"
+        self.full_daily_progress_bar.setRange(0, max(total, 1))
+        self.full_daily_progress_bar.setValue(min(completed, max(total, 1)))
+        self.full_daily_progress_bar.setFormat(f"{completed}/{total}")
+        self.full_daily_summary.setText(f"{completed}/{total} 已处理")
         self.full_daily_status.setText(text)
 
     def _show_migration_result(self, frame: object) -> None:
@@ -2071,8 +2328,19 @@ class MainWindow(QMainWindow):
         summary = "，".join(f"{key} {value}" for key, value in status_counts.items()) or "无文件"
         self.migration_status.setText(f"完成：{summary}。")
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._has_running_workers():
+            event.ignore()
+            QMessageBox.information(self, "任务运行中", "后台任务还在运行，请等待完成后再关闭应用。")
+            return
+        super().closeEvent(event)
+
+    def _has_running_workers(self) -> bool:
+        return any(worker.isRunning() for worker in self._workers)
+
 
 def main() -> int:
+    multiprocessing.freeze_support()
     app = QApplication([])
     app.setWindowIcon(create_app_icon())
     window = MainWindow()
@@ -2160,17 +2428,26 @@ def _table_tab(table: QTableView, expand_button: QPushButton) -> QWidget:
 
 def _multi_table_tab(sections: tuple[tuple[str, QTableView], ...]) -> QWidget:
     tab = QWidget()
+    tab.setObjectName("statsTab")
     layout = QVBoxLayout(tab)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
+    layout.setSpacing(8)
     inner_tabs = QTabWidget()
+    inner_tabs.setObjectName("statsWorkbench")
     for title, table in sections:
-        section = QWidget()
+        section = QFrame()
+        section.setObjectName("tablePanel")
         section_layout = QVBoxLayout(section)
-        section_layout.setContentsMargins(0, 0, 0, 0)
-        section_layout.setSpacing(10)
+        section_layout.setContentsMargins(12, 10, 12, 12)
+        section_layout.setSpacing(8)
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel(title)
+        title_label.setObjectName("tablePanelTitle")
+        meta_label = QLabel("横向滚动 / 表头排序 / 展开查看全表")
+        meta_label.setObjectName("tablePanelMeta")
+        toolbar.addWidget(title_label)
+        toolbar.addWidget(meta_label)
         toolbar.addStretch(1)
         expand_button = QPushButton("展开统计")
         expand_button.setObjectName("flatActionButton")
@@ -2188,15 +2465,43 @@ def _open_table_dialog_window(table: QTableView, title: str) -> None:
     if not isinstance(model, DataFrameModel) or model.frame().empty:
         QMessageBox.information(table.window(), "没有可展开数据", "当前表格为空。")
         return
-    dialog = QDialog(table.window())
+    dialog = _dataframe_detail_dialog(model.frame(), title, table.window())
+    dialog.exec()
+
+
+def _dataframe_detail_dialog(frame: pd.DataFrame, title: str, parent: QWidget | None) -> QDialog:
+    dialog = QDialog(parent)
     dialog.setWindowTitle(title)
     dialog.resize(1240, 760)
-    expanded_table = _table()
-    expanded_table.setModel(DataFrameModel(model.frame()))
-    expanded_table.resizeColumnsToContents()
+    source_model = DataFrameModel(frame)
+    proxy = DataFrameFilterProxyModel()
+    source_model.setParent(dialog)
+    proxy.setParent(dialog)
+    proxy.setSourceModel(source_model)
+
+    search = QLineEdit()
+    search.setObjectName("detailSearchInput")
+    search.setPlaceholderText("查找代码、名称、状态或提示")
+    search.textChanged.connect(proxy.set_search_text)
+
+    status_filter = QComboBox()
+    status_filter.setObjectName("detailStatusFilter")
+    statuses = sorted(str(value) for value in frame.get("status", pd.Series(dtype=str)).dropna().unique())
+    status_filter.addItems(["全部", *statuses])
+    status_filter.currentTextChanged.connect(proxy.set_status_filter)
+
+    table = _table()
+    table.setObjectName("detailTable")
+    table.setModel(proxy)
+    table.resizeColumnsToContents()
+
+    toolbar = QHBoxLayout()
+    toolbar.addWidget(search, stretch=1)
+    toolbar.addWidget(status_filter)
     layout = QVBoxLayout(dialog)
-    layout.addWidget(expanded_table)
-    dialog.exec()
+    layout.addLayout(toolbar)
+    layout.addWidget(table, stretch=1)
+    return dialog
 
 
 def _kline_toolbar(combo: QComboBox, chart: CandlestickChartWidget) -> QWidget:
@@ -2274,6 +2579,25 @@ def _module_card(module: OverviewModule, on_open: Callable[[int], None]) -> QWid
     layout.addWidget(action, alignment=Qt.AlignmentFlag.AlignLeft)
     card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     return card
+
+
+def _data_operation_panel(title: str, subtitle: str, form_layout: QGridLayout) -> QWidget:
+    panel = QFrame()
+    panel.setObjectName("dataOperationPanel")
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(16, 14, 16, 16)
+    layout.setSpacing(10)
+
+    title_label = QLabel(title)
+    title_label.setObjectName("dataPanelTitle")
+    subtitle_label = QLabel(subtitle)
+    subtitle_label.setObjectName("dataPanelSubtitle")
+    subtitle_label.setWordWrap(True)
+
+    layout.addWidget(title_label)
+    layout.addWidget(subtitle_label)
+    layout.addLayout(form_layout)
+    return panel
 
 
 def _kline_layout_combo(chart: CandlestickChartWidget) -> QComboBox:
@@ -2355,7 +2679,7 @@ def _review_card_palette(grade: str) -> _ReviewCardPalette:
     return palette[grade_class]
 
 
-def _review_card_widget(card: ReviewCritiqueCard) -> QWidget:
+def _review_card_widget(card: ReviewCritiqueCard, on_expand: Callable[[], None] | None = None) -> QWidget:
     frame = QFrame()
     frame.setObjectName("reviewCritiqueCard")
     palette = _review_card_palette(card.grade)
@@ -2412,7 +2736,69 @@ QLabel#reviewCardGrade {{
         metric.setObjectName("reviewCardMetric")
         metrics.addWidget(metric, index // 2, index % 2)
     layout.addLayout(metrics)
+    if on_expand is not None:
+        expand = _form_button("全屏K线", maximum_width=116)
+        expand.setObjectName("reviewCardExpandButton")
+        expand.clicked.connect(lambda checked=False: on_expand())
+        layout.addWidget(expand, alignment=Qt.AlignmentFlag.AlignLeft)
     return frame
+
+
+def _review_kline_dialog(card: ReviewCritiqueCard, chart_series: list[CandlestickSeries], parent: QWidget) -> QDialog:
+    dialog = QDialog(parent)
+    dialog.setObjectName("reviewKlineDialog")
+    dialog.setWindowTitle(f"K线复盘 - {card.title or card.symbol}")
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setSpacing(12)
+
+    header = QHBoxLayout()
+    title = QLabel(card.title or card.symbol)
+    title.setObjectName("reviewDialogTitle")
+    export = _form_button("导出 PNG", maximum_width=116)
+    export.setObjectName("reviewCardExportPngButton")
+    header.addWidget(title, stretch=1)
+    header.addWidget(export)
+    layout.addLayout(header)
+
+    chart = CandlestickChartWidget("K线复盘")
+    chart.setObjectName("reviewKlineDialogChart")
+    chart.set_expanded(True)
+    chart.set_grid(1, 1)
+    chart.set_series(chart_series)
+    export.clicked.connect(lambda checked=False, source=chart: _export_widget_png(source))
+    layout.addWidget(chart, stretch=1)
+    return dialog
+
+
+def _export_widget_png(widget: QWidget) -> None:
+    path, _ = QFileDialog.getSaveFileName(
+        widget,
+        "导出 PNG",
+        "review_card.png",
+        "PNG 图片 (*.png);;所有文件 (*)",
+    )
+    if not path:
+        return
+    if not str(path).lower().endswith(".png"):
+        path = f"{path}.png"
+    if not _save_widget_png(widget, path):
+        QMessageBox.warning(widget, "导出失败", "PNG 截图保存失败。")
+
+
+def _save_widget_png(widget: QWidget, path: str | Path) -> bool:
+    output = Path(path).expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    return bool(widget.grab().save(str(output), "PNG"))
+
+
+def _series_by_symbol(series: list[CandlestickSeries]) -> dict[str, list[CandlestickSeries]]:
+    result: dict[str, list[CandlestickSeries]] = {}
+    for item in series:
+        symbol = _symbol_from_card_title(item.label)
+        if symbol:
+            result.setdefault(symbol, []).append(item)
+    return result
 
 
 def _clear_layout(layout: QGridLayout | QVBoxLayout | QHBoxLayout) -> None:
@@ -2458,16 +2844,19 @@ def _ai_result_markdown(result: object) -> str:
     return "\n\n".join(lines)
 
 
-def _ai_script_cards(result: object) -> list[ReviewCritiqueCard]:
+def _ai_script_cards(result: object, *, stock_names: dict[str, str] | None = None) -> list[ReviewCritiqueCard]:
     cards = getattr(result, "script_cards", ()) or ()
     output: list[ReviewCritiqueCard] = []
     for card in cards:
-        title = str(getattr(card, "title", "") or "").strip()
+        raw_title = str(getattr(card, "title", "") or "").strip()
+        symbol = _symbol_from_card_title(raw_title)
+        name = _stock_name_from_map(stock_names or {}, symbol)
+        title = f"{name}（{symbol}）" if symbol and name else raw_title
         grade = str(getattr(card, "grade", "") or "").strip()
         body = str(getattr(card, "body", "") or "").strip()
         output.append(
             ReviewCritiqueCard(
-                symbol=title,
+                symbol=symbol or raw_title,
                 title=title,
                 grade=grade,
                 nature="AI 锐评",
@@ -2478,10 +2867,45 @@ def _ai_script_cards(result: object) -> list[ReviewCritiqueCard]:
     return output
 
 
+def _symbol_from_card_title(title: str) -> str:
+    match = re.search(r"(?P<code>\d{6})(?:[._](?P<exchange>SH|SZ|BJ))?", str(title or ""), flags=re.IGNORECASE)
+    if not match:
+        return ""
+    code = match.group("code")
+    exchange = match.group("exchange")
+    return _normalize_card_symbol(f"{code}.{exchange}") if exchange else _normalize_card_symbol(code)
+
+
+def _normalize_card_symbol(value: object) -> str:
+    symbols = parse_symbol_list((value,))
+    return symbols[0] if symbols else ""
+
+
 def _field_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("fieldLabel")
     return label
+
+
+def _form_button(text: str, *, primary: bool = False, maximum_width: int = 160) -> QPushButton:
+    button = QPushButton(text)
+    if primary:
+        button.setObjectName("primaryButton")
+    button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    button.setMaximumWidth(maximum_width)
+    button.setMinimumWidth(min(96, maximum_width))
+    return button
+
+
+def _progress_bar() -> QProgressBar:
+    bar = QProgressBar()
+    bar.setObjectName("cardProgressBar")
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setFormat("0/0")
+    bar.setTextVisible(True)
+    bar.setMinimumHeight(30)
+    return bar
 
 
 def _symbol_text(value: str) -> QPlainTextEdit:
@@ -2532,12 +2956,28 @@ def _date_edit(value: QDate) -> DatePicker:
     return DatePicker(value)
 
 
+def _configure_calendar(calendar: QCalendarWidget) -> None:
+    calendar.setGridVisible(True)
+    calendar.setMinimumDate(QDate(1990, 1, 1))
+    calendar.setMaximumDate(QDate.currentDate().addYears(2))
+    calendar.setMinimumWidth(360)
+    calendar.setMinimumHeight(320)
+
+
 def _date_text(edit: DatePicker) -> str:
     return edit.date_text()
 
 
 def _today_text() -> str:
     return pd.Timestamp.today().strftime("%Y-%m-%d")
+
+
+def _stock_name_from_map(stock_names: object, symbol: object) -> str:
+    names = stock_names if isinstance(stock_names, dict) else {}
+    raw_symbol = str(symbol or "").strip()
+    normalized = parse_symbol_list((raw_symbol,))
+    key = normalized[0] if normalized else raw_symbol
+    return str(names.get(key) or names.get(raw_symbol) or "").strip()
 
 
 def _table() -> QTableView:
@@ -2553,6 +2993,7 @@ def _table() -> QTableView:
     table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    table.horizontalHeader().setMinimumSectionSize(92)
     table.horizontalHeader().setStretchLastSection(False)
     table.verticalHeader().setDefaultSectionSize(32)
     return table
@@ -2802,6 +3243,12 @@ QFrame#moduleCard:hover {
     border-color: #b9c8bd;
     background: #fbfcfa;
 }
+QFrame#dataOperationPanel {
+    background: #ffffff;
+    border: 1px solid #d8ded6;
+    border-left: 4px solid #2d6a4f;
+    border-radius: 4px;
+}
 QLabel#pageTitle {
     color: #17201b;
     font-size: 24px;
@@ -2809,6 +3256,31 @@ QLabel#pageTitle {
 }
 QLabel#pageSubtitle, QLabel#mutedText, QLabel#metricCaption, QLabel#moduleSummary {
     color: #66706a;
+}
+QLabel#dataPanelTitle {
+    color: #17201b;
+    font-size: 16px;
+    font-weight: 850;
+}
+QLabel#dataPanelSubtitle {
+    color: #66706a;
+    font-size: 12px;
+    font-weight: 650;
+}
+QLabel#dataRootHint {
+    background: #f7faf7;
+    border: 1px solid #d8ded6;
+    border-left: 4px solid #6b7f3f;
+    border-radius: 4px;
+    color: #40514a;
+    padding: 9px 11px;
+    font-size: 12px;
+    font-weight: 650;
+}
+QLabel#coverageSummary {
+    color: #17201b;
+    font-size: 20px;
+    font-weight: 850;
 }
 QLabel#fieldLabel, QLabel#metricTitle, QLabel#sectionLabel {
     color: #4d5852;
@@ -2908,11 +3380,47 @@ QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QPlainTextEdit:d
 QPushButton#datePickButton {
     padding: 9px 12px;
 }
+QCalendarWidget {
+    background: #ffffff;
+    color: #17241e;
+}
+QCalendarWidget QToolButton {
+    min-height: 30px;
+    padding: 4px 8px;
+    color: #17241e;
+}
+QCalendarWidget QSpinBox {
+    min-height: 30px;
+    padding: 4px 8px;
+    color: #17241e;
+}
 QTabWidget::pane {
     border: 1px solid #e1e4dd;
     border-radius: 8px;
     background: #ffffff;
     top: -1px;
+}
+QWidget#statsTab {
+    background: #f8fafc;
+}
+QTabWidget#statsWorkbench::pane {
+    border: 1px solid #cbd5e1;
+    border-radius: 0;
+    background: #f8fafc;
+}
+QTabWidget#statsWorkbench QTabBar::tab {
+    background: #e5e7eb;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-bottom: none;
+    border-radius: 0;
+    padding: 7px 14px;
+    margin-right: 0;
+    font-weight: 750;
+}
+QTabWidget#statsWorkbench QTabBar::tab:selected {
+    background: #f8fafc;
+    color: #0f172a;
 }
 QTabBar::tab {
     background: #eef3ed;
@@ -2987,6 +3495,18 @@ QPushButton#primaryButton:hover {
 QPushButton#primaryButton:pressed {
     background: #1d4534;
 }
+QProgressBar#cardProgressBar {
+    background: #eef3ed;
+    border: 1px solid #d5dad2;
+    border-radius: 4px;
+    color: #21342b;
+    font-weight: 750;
+    text-align: center;
+}
+QProgressBar#cardProgressBar::chunk {
+    background: #2d6a4f;
+    border-radius: 4px;
+}
 QPushButton#flatActionButton {
     background: transparent;
     color: #2d6a4f;
@@ -3007,14 +3527,32 @@ QPushButton#klineLayoutShortcut, QPushButton#klineExpandButton {
 QPushButton#klineLayoutShortcut:hover, QPushButton#klineExpandButton:hover {
     background: #eef3ed;
 }
-QTableView#resultTable, QTableView#reviewEtfPopupTable {
-    background: #ffffff;
-    alternate-background-color: #f7f8f5;
-    border: 1px solid #e1e4dd;
-    border-radius: 8px;
-    gridline-color: #e8ebe5;
-    color: #17241e;
-    selection-background-color: #2d6a4f;
+QFrame#tablePanel {
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 0;
+}
+QLabel#tablePanelTitle {
+    color: #0f172a;
+    font-size: 13px;
+    font-weight: 850;
+}
+QLabel#tablePanelMeta {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 650;
+    padding-left: 12px;
+}
+QTableView#resultTable, QTableView#reviewEtfPopupTable, QTableView#detailTable {
+    background: #fbfdff;
+    alternate-background-color: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 0;
+    gridline-color: #d7dee8;
+    color: #0f172a;
+    font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", "PingFang SC", monospace;
+    font-size: 12px;
+    selection-background-color: #2563eb;
     selection-color: #ffffff;
 }
 QWidget#chartWidget {
@@ -3034,6 +3572,11 @@ QLabel#reviewCardTitle {
     color: #17201b;
     font-weight: 800;
     font-size: 15px;
+}
+QLabel#reviewDialogTitle {
+    color: #17201b;
+    font-weight: 850;
+    font-size: 22px;
 }
 QLabel#reviewCardGrade {
     background: #e1ebe3;
@@ -3067,12 +3610,13 @@ QTextEdit#reviewText {
     line-height: 1.45;
 }
 QHeaderView::section {
-    background: #eef1eb;
-    color: #34413a;
+    background: #243447;
+    color: #f8fafc;
     border: none;
-    border-right: 1px solid #dfe4dc;
-    padding: 8px;
-    font-weight: 750;
+    border-right: 1px solid #334155;
+    border-bottom: 1px solid #334155;
+    padding: 7px 8px;
+    font-weight: 800;
 }
 """
 

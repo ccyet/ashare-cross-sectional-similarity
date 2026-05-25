@@ -7,21 +7,41 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTabWidget, QTableView, QTextEdit
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
+    QPushButton,
+    QFrame,
+    QSizePolicy,
+    QTabWidget,
+    QTableView,
+    QTextEdit,
+)
 
+from ashare_cross_section_similarity.desktop import app as app_module
 from ashare_cross_section_similarity.desktop.app import (
+    CandlestickChartWidget,
     DatePicker,
     DataFrameModel,
     MainWindow,
     _multi_table_tab,
     _review_card_palette,
     _review_card_widget,
+    _save_widget_png,
     _style_sheet,
     _table,
     parse_kline_grid,
 )
 from ashare_cross_section_similarity.desktop.view_model import ReviewCritiqueCard
+from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
 from ashare_cross_section_similarity.review import ReviewConfig, analyze_price_review
+from ashare_cross_section_similarity.review_ai import ReviewAIResult, ReviewAIScriptCard
+from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
 
 
 def _app() -> QApplication:
@@ -122,6 +142,48 @@ def test_full_daily_progress_updates_status_text() -> None:
     assert "批次 2/8" in window.full_daily_status.text()
 
 
+def test_data_coverage_summary_and_detail_dialog_are_available_near_action_card() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+    frame = pd.DataFrame(
+        [
+            {"symbol": "000001.SZ", "status": "available", "rows": 10, "message": ""},
+            {"symbol": "600519.SH", "status": "missing_file", "rows": 0, "message": "本地 parquet 不存在"},
+            {"symbol": "300750.SZ", "status": "available", "rows": 8, "message": ""},
+        ]
+    )
+
+    window._show_data_check_result(frame)
+    window.data_coverage_detail_button.click()
+    app.processEvents()
+
+    assert window.data_coverage_summary.text().startswith("2/3")
+    assert window.data_coverage_detail_button.text() == "查看明细"
+    dialog = window.data_detail_dialog
+    assert isinstance(dialog, QDialog)
+    assert dialog.windowTitle() == "覆盖明细"
+    assert dialog.findChild(QLineEdit, "detailSearchInput") is not None
+    assert dialog.findChild(QComboBox, "detailStatusFilter") is not None
+    assert dialog.findChild(QTableView, "detailTable") is not None
+
+
+def test_full_daily_progress_bar_lives_in_download_card() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+
+    assert isinstance(window.full_daily_progress_bar, QProgressBar)
+    assert window.full_daily_pause_button.text() == "暂停下载"
+
+    window._show_full_daily_progress(
+        {"completed": 25, "total": 100, "batch_index": 2, "batch_count": 8, "current": "000001.SZ"}
+    )
+
+    assert window.full_daily_progress_bar.value() == 25
+    assert window.full_daily_progress_bar.format() == "25/100"
+
+
 def test_main_window_exposes_original_search_parameters() -> None:
     app = _app()
     window = MainWindow()
@@ -135,6 +197,144 @@ def test_main_window_exposes_original_search_parameters() -> None:
     assert window.cross_path_weight.value() == 0.7
     assert window.review_min_swing.value() == 5.0
     assert window.review_min_segment.value() == 3
+
+
+def test_data_page_groups_operations_into_clear_hierarchy() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+
+    panels = window.findChildren(QFrame, "dataOperationPanel")
+    titles = [label.text() for label in window.findChildren(QLabel, "dataPanelTitle")]
+    subtitles = [label.text() for label in window.findChildren(QLabel, "dataPanelSubtitle")]
+
+    assert titles == ["覆盖与补数据", "自定义价格导入", "全A日线批量更新", "K线文件迁移"]
+    assert len(panels) == 4
+    assert any("AkShare / TDX / OpenBB / trend" in text for text in subtitles)
+    assert any("TDX" in text and "批次" in text for text in subtitles)
+
+
+def test_data_management_exposes_tdx_browse_actions_and_data_root_hint() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+
+    assert window.tdx_path_browse_button.text() == "选择TDX目录"
+
+
+def test_main_prepares_frozen_runtime_before_qapplication(monkeypatch) -> None:
+    import multiprocessing
+
+    events: list[str] = []
+
+    class FakeApplication:
+        def __init__(self, args: list[str]) -> None:
+            events.append("qapp")
+            assert args == []
+
+        def setWindowIcon(self, icon: object) -> None:  # noqa: N802
+            events.append("set_icon")
+
+        def windowIcon(self) -> object:  # noqa: N802
+            return "window-icon"
+
+        def exec(self) -> int:
+            events.append("exec")
+            return 0
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            events.append("window")
+
+        def setWindowIcon(self, icon: object) -> None:  # noqa: N802
+            events.append("window_icon")
+
+        def show(self) -> None:
+            events.append("show")
+
+    monkeypatch.setattr(multiprocessing, "freeze_support", lambda: events.append("freeze"))
+    monkeypatch.setattr(app_module, "QApplication", FakeApplication)
+    monkeypatch.setattr(app_module, "MainWindow", FakeWindow)
+    monkeypatch.setattr(app_module, "create_app_icon", lambda: "app-icon")
+
+    assert app_module.main() == 0
+    assert events[:2] == ["freeze", "qapp"]
+
+
+def test_close_event_keeps_window_open_while_task_worker_is_running(monkeypatch) -> None:
+    _app()
+    window = MainWindow()
+    messages: list[str] = []
+
+    class RunningWorker:
+        def isRunning(self) -> bool:  # noqa: N802
+            return True
+
+    monkeypatch.setattr(
+        app_module.QMessageBox,
+        "information",
+        lambda parent, title, message: messages.append(f"{title}:{message}"),
+    )
+    window._workers.append(RunningWorker())  # type: ignore[arg-type]
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert messages
+    assert window.data_tdx_provider_browse_button.text() == "选择TDX目录"
+    assert window.full_daily_tdx_browse_button.text() == "选择TDX目录"
+    assert "下载前先确认" in window.data_root_hint.text()
+    assert "parquet" in window.data_root_hint.text()
+
+
+def test_data_management_action_buttons_do_not_stretch_the_page() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+
+    for button in (
+        window.data_check_button,
+        window.data_update_button,
+        window.data_export_button,
+        window.full_daily_plan_button,
+        window.full_daily_run_button,
+        window.full_daily_pause_button,
+    ):
+        assert button.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+        assert button.maximumWidth() <= 180
+
+
+def test_full_daily_pause_button_toggles_batch_pause_state() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+
+    assert window.full_daily_pause_button.text() == "暂停下载"
+    assert not window.full_daily_pause_button.isEnabled()
+
+    window._begin_full_daily_pause_control()
+    window.full_daily_pause_button.click()
+
+    assert window._full_daily_pause_event is not None
+    assert window._full_daily_pause_event.is_set()
+    assert window.full_daily_pause_button.text() == "继续下载"
+    assert "已暂停" in window.full_daily_status.text()
+
+    window.full_daily_pause_button.click()
+
+    assert not window._full_daily_pause_event.is_set()
+    assert window.full_daily_pause_button.text() == "暂停下载"
+
+
+def test_date_picker_calendar_keeps_year_editor_visible() -> None:
+    _app()
+    picker = DatePicker()
+    style = _style_sheet()
+
+    assert picker.calendar.minimumHeight() >= 320
+    assert "QCalendarWidget QSpinBox" in style
+    assert "min-height: 30px;" in style
 
 
 def test_combo_boxes_use_flat_dropdown_style() -> None:
@@ -258,13 +458,93 @@ def test_table_cells_are_centered_and_not_elided() -> None:
 
 
 def test_stat_table_tabs_offer_expandable_full_width_dialog_action() -> None:
+    _app()
     table = _table()
     table.setModel(DataFrameModel(pd.DataFrame({"长字段": ["这是一段需要横向滚动查看的完整内容"]})))
 
     tab = _multi_table_tab((("排序总表", table),))
+    inner_tabs = tab.findChild(QTabWidget, "statsWorkbench")
+    panel = tab.findChild(QTableView, "resultTable").parentWidget()
+    title = tab.findChild(QLabel, "tablePanelTitle")
+    meta = tab.findChild(QLabel, "tablePanelMeta")
     buttons = tab.findChildren(QPushButton)
+    style = _style_sheet()
 
+    assert inner_tabs is not None
+    assert panel is not None and panel.objectName() == "tablePanel"
+    assert title is not None and title.text() == "排序总表"
+    assert meta is not None and "横向滚动" in meta.text()
     assert any(button.text() == "展开统计" for button in buttons)
+    assert "QFrame#tablePanel" in style
+    assert "QLabel#tablePanelMeta" in style
+    assert "QTableView#resultTable" in style and "font-family: \"JetBrains Mono\"" in style
+
+
+def test_history_and_cross_result_tables_and_kline_labels_use_stock_names() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+    history_bars = _bars("300750.SZ", [10, 11, 12, 11, 13, 20, 19, 18, 17, 16, 30, 33, 36, 33, 39, 40])
+    history = search_history(
+        history_bars,
+        HistorySearchConfig(
+            symbol="300750.SZ",
+            as_of="2024-01-15",
+            window_size=5,
+            forward_windows=(1,),
+            top_n=1,
+            exclusion_bars=0,
+            nearby_gap_days=0,
+        ),
+    )
+
+    window._show_history_result(
+        {
+            "histories": [history],
+            "bars": history_bars,
+            "coverage": pd.DataFrame(),
+            "size_spread_bars": pd.DataFrame(),
+            "stock_names": {"300750.SZ": "宁德时代"},
+        }
+    )
+    history_frame = window.history_table.model().frame()
+
+    assert history_frame["目标股票"].tolist() == ["宁德时代"]
+    assert window.history_kline_chart.series[0].label.startswith("宁德时代（300750.SZ） 当前窗口")
+
+    cross_bars = pd.concat(
+        [
+            _bars("300750.SZ", [10, 11, 12, 13, 14, 15, 16]),
+            _bars("000001.SZ", [20, 22, 24, 26, 28, 30, 32]),
+            _bars("600519.SH", [30, 29, 28, 27, 26, 25, 24]),
+        ],
+        ignore_index=True,
+    )
+    cross = search_cross_section(
+        cross_bars,
+        CrossSectionSearchConfig(
+            target_symbol="300750.SZ",
+            universe_symbols=("000001.SZ", "600519.SH"),
+            start="2024-01-01",
+            end="2024-01-05",
+            top_n=1,
+        ),
+    )
+
+    window._show_cross_section_result(
+        {
+            "cross_sections": [cross],
+            "bars": cross_bars,
+            "coverage": pd.DataFrame(),
+            "stock_names": {"300750.SZ": "宁德时代", "000001.SZ": "平安银行", "600519.SH": "贵州茅台"},
+        }
+    )
+    cross_frame = window.cross_table.model().frame()
+
+    assert cross_frame["目标股票"].tolist() == ["宁德时代"]
+    assert cross_frame["股票"].tolist() == ["平安银行"]
+    assert window.cross_kline_chart.series[0].label.startswith("宁德时代（300750.SZ，目标）")
+    assert window.cross_kline_chart.series[1].label.startswith("平安银行（000001.SZ）")
 
 
 def test_review_cards_are_one_per_symbol_and_use_name_direction_mapping() -> None:
@@ -310,6 +590,81 @@ def test_review_cards_are_one_per_symbol_and_use_name_direction_mapping() -> Non
     assert {card.text() for card in cards} == {"宁德时代（300750.SZ）", "贵州茅台（600519.SH）", "平安银行（000001.SZ）"}
     assert set(ranking["股票"]) == {"宁德时代", "贵州茅台", "平安银行"}
     assert set(ranking["所属方向"]) == {"行业:新能源 / 概念:锂电"}
+
+
+def test_ai_review_cards_use_stock_names_when_model_title_is_only_symbol() -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+    review = analyze_price_review(
+        _bars("300750.SZ", [10, 11, 12, 13, 14, 15]),
+        ReviewConfig(symbol="300750.SZ", start="2024-01-01", end="2024-01-06"),
+    )
+    bundle = SimpleNamespace(
+        reviews=[review],
+        comparison_frame=pd.DataFrame(),
+        comparison_frames=[],
+        script_profiles=[],
+        etf_matches=pd.DataFrame(),
+        stock_names={"300750.SZ": "宁德时代"},
+        direction_by_symbol={},
+    )
+    ai_result = ReviewAIResult(
+        review="复盘",
+        analysis="分析",
+        critique="锐评",
+        evidence_refs=("target.symbol",),
+        disclaimer="仅用于研究复盘。",
+        raw="{}",
+        script_cards=(ReviewAIScriptCard(title="300750.SZ", body="强。", grade="人上人"),),
+    )
+
+    window._show_review_result({"bundle": bundle, "ai_result": ai_result})
+    app.processEvents()
+
+    cards = window.review_cards.findChildren(QLabel, "reviewCardTitle")
+    assert [card.text() for card in cards] == ["宁德时代（300750.SZ）"]
+
+
+def test_review_card_opens_fullscreen_kline_not_card_dialog(tmp_path) -> None:
+    app = _app()
+    window = MainWindow()
+    app.processEvents()
+    review = analyze_price_review(
+        _bars("300750.SZ", [10, 11, 12, 13, 14, 15, 16, 17]),
+        ReviewConfig(symbol="300750.SZ", start="2024-01-01", end="2024-01-08"),
+    )
+    bundle = SimpleNamespace(
+        reviews=[review],
+        comparison_frame=pd.DataFrame(),
+        comparison_frames=[],
+        script_profiles=[],
+        etf_matches=pd.DataFrame(),
+        stock_names={"300750.SZ": "宁德时代"},
+        direction_by_symbol={},
+    )
+
+    window._show_review_result({"bundle": bundle})
+    app.processEvents()
+    expand = window.review_cards.findChild(QPushButton, "reviewCardExpandButton")
+    assert expand is not None
+    assert expand.text() == "全屏K线"
+
+    expand.click()
+    app.processEvents()
+
+    dialog = window.review_cards.findChild(QDialog, "reviewKlineDialog")
+    assert isinstance(dialog, QDialog)
+    chart = dialog.findChild(CandlestickChartWidget, "reviewKlineDialogChart")
+    export_button = dialog.findChild(QPushButton, "reviewCardExportPngButton")
+    assert dialog.findChild(QLabel, "reviewCardCritique") is None
+    assert dialog.findChild(QLabel, "reviewCardNature") is None
+    assert chart is not None
+    assert chart.is_expanded()
+    assert export_button is not None and export_button.text() == "导出 PNG"
+    output = tmp_path / "review_kline_dialog_test.png"
+    assert _save_widget_png(chart, output)
+    assert output.exists()
 
 
 def _bars(symbol: str, closes: list[float]) -> pd.DataFrame:

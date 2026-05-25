@@ -140,10 +140,19 @@ def history_candlestick_series(
     *,
     max_matches: int = 6,
     forward_bars: int = 10,
+    stock_names: dict[str, str] | None = None,
 ) -> list[CandlestickSeries]:
     source = _prepared_symbol_bars(bars, result.symbol) if bars is not None else pd.DataFrame()
-    windows: list[tuple[str, pd.DataFrame]] = [("当前窗口", result.current_window)]
-    windows.extend((f"相似 {index}", frame) for index, frame in enumerate(result.historical_windows[:max_matches], start=1))
+    stock_label = _stock_label(result.symbol, stock_names) if stock_names else ""
+
+    def window_label(label: str) -> str:
+        return f"{stock_label} {label}" if stock_label else label
+
+    windows: list[tuple[str, pd.DataFrame]] = [(window_label("当前窗口"), result.current_window)]
+    windows.extend(
+        (window_label(f"相似 {index}"), frame)
+        for index, frame in enumerate(result.historical_windows[:max_matches], start=1)
+    )
     series: list[CandlestickSeries] = []
     for label, window in windows:
         chart_window = _window_with_forward_bars(source, window, forward_bars) if not source.empty else window
@@ -809,8 +818,9 @@ def _dated_label(label: str, window: pd.DataFrame) -> str:
 def _stock_label(symbol: str, stock_names: dict[str, str] | None = None, *, is_target: bool = False) -> str:
     normalized = normalize_symbol(symbol)
     name = (stock_names or {}).get(normalized, "").strip()
-    label = f"{name}（{normalized}）" if name else normalized
-    return f"{label}（目标）" if is_target else label
+    if is_target:
+        return f"{name}（{normalized}，目标）" if name else f"{normalized}（目标）"
+    return f"{name}（{normalized}）" if name else normalized
 
 
 def _script_profile_ending(row: pd.Series) -> str:
