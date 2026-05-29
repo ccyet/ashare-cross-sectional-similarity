@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+research = ["aeon>=1.4", "tslearn>=0.8", "stumpy>=1.14"]
 
 [project.scripts]
 ashare-xsec-sim = "ashare_cross_section_similarity.cli:main"
@@ -28,6 +29,7 @@ packages = ["ashare_cross_section_similarity"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

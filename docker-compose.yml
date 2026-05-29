@@ -1,0 +1,11 @@
+services:
+  ashare-similarity:
+    build: .
+    ports:
+      - "${ASHARE_PORT:-8502}:8501"
+    environment:
+      ASHARE_DATA_ROOT: /data/market/daily
+      ASHARE_TREND_REPO: /trend-backtest
+    volumes:
+      - ${ASHARE_HOST_DATA_DIR:-/Users/a1234/Desktop/trend-backtest/data}:/data
+      - ./outputs:/app/outputs

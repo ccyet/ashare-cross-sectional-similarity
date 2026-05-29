@@ -67,9 +67,7 @@ def window_features(window: pd.DataFrame) -> dict[str, float]:
     down_mask = returns < 0
     total_liquidity = float(liquidity.sum()) if len(liquidity.dropna()) else 0.0
     down_share = float(liquidity.loc[down_mask].sum() / total_liquidity) if total_liquidity else 0.0
-    corr = float(returns.corr(liquidity)) if len(returns.dropna()) >= 2 else 0.0
-    if not np.isfinite(corr):
-        corr = 0.0
+    corr = _safe_corr(returns, liquidity)
     slope = 0.0
     if len(path) >= 2:
         x_values = np.arange(len(path), dtype=float)
@@ -83,3 +81,18 @@ def window_features(window: pd.DataFrame) -> dict[str, float]:
         "量价相关": corr,
         "成交规模": float(np.log1p(liquidity.mean())) if len(liquidity.dropna()) else 0.0,
     }
+
+
+def _safe_corr(left: pd.Series, right: pd.Series) -> float:
+    pairs = pd.concat([left, right], axis=1).dropna()
+    if len(pairs) < 2:
+        return 0.0
+    left_values = pairs.iloc[:, 0].astype(float).to_numpy()
+    right_values = pairs.iloc[:, 1].astype(float).to_numpy()
+    left_centered = left_values - float(left_values.mean())
+    right_centered = right_values - float(right_values.mean())
+    denominator = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+    if denominator == 0 or not np.isfinite(denominator):
+        return 0.0
+    corr = float(np.sum(left_centered * right_centered) / denominator)
+    return corr if np.isfinite(corr) else 0.0

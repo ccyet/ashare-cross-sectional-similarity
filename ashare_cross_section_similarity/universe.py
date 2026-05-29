@@ -6,6 +6,7 @@ from typing import Iterable
 import pandas as pd
 
 SYMBOL_COLUMNS = (
+    "code",
     "stock_code",
     "symbol",
     "ts_code",
@@ -14,6 +15,14 @@ SYMBOL_COLUMNS = (
     "成分券代码",
     "品种代码",
     "股票代码",
+)
+DEFAULT_ANALYSIS_INDEX_SYMBOLS = (
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "000300.SH",
+    "000852.SH",
+    "000905.SH",
 )
 
 
@@ -29,7 +38,9 @@ def normalize_symbol(value: object) -> str:
     if len(digits) < 6:
         return text
     code = digits[-6:]
-    if code.startswith(("6", "5", "9")):
+    if code.startswith("920"):
+        exchange = "BJ"
+    elif code.startswith(("6", "5", "9")):
         exchange = "SH"
     elif code.startswith(("4", "8")):
         exchange = "BJ"
@@ -49,6 +60,19 @@ def unique_symbols(values: Iterable[object]) -> list[str]:
     return symbols
 
 
+def symbols_with_analysis_indexes(
+    symbols: Iterable[object],
+    *,
+    include_indexes: bool = True,
+    extra_symbols: Iterable[object] = (),
+) -> list[str]:
+    values = list(symbols)
+    if include_indexes:
+        values.extend(DEFAULT_ANALYSIS_INDEX_SYMBOLS)
+    values.extend(extra_symbols)
+    return unique_symbols(values)
+
+
 def symbols_from_table(table: pd.DataFrame) -> list[str]:
     if table.empty:
         return []
@@ -56,6 +80,19 @@ def symbols_from_table(table: pd.DataFrame) -> list[str]:
         if column in table.columns:
             return unique_symbols(table[column].dropna().tolist())
     raise ValueError(f"未找到证券代码列，支持列名：{', '.join(SYMBOL_COLUMNS)}")
+
+
+def fetch_all_a_symbols(fetcher: object | None = None) -> list[str]:
+    if fetcher is None:
+        import akshare as ak
+
+        fetcher = ak.stock_info_a_code_name
+    if not callable(fetcher):
+        raise TypeError("fetcher 必须是可调用对象。")
+    symbols = symbols_from_table(fetcher())
+    if not symbols:
+        raise RuntimeError("未获取到全 A 股票列表。")
+    return symbols
 
 
 def load_universe_file(path: str | Path) -> list[str]:
