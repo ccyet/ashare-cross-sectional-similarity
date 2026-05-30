@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -10,6 +11,7 @@ from ashare_cross_section_similarity.downloader import (
     data_check,
     update_local_bars,
 )
+from ashare_cross_section_similarity.data import load_symbol_name_map
 
 
 def test_build_update_command_uses_original_trend_backtest_script(tmp_path: Path) -> None:
@@ -85,6 +87,272 @@ def test_update_local_bars_reports_original_runner_failure(tmp_path: Path) -> No
     assert "provider failed" in result["message"].iloc[0]
 
 
+def test_update_local_bars_can_fetch_and_write_with_openbb_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["600519.SH", "600519.SH"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_openbb_bars",
+        return_value=bars,
+    ) as fetch_openbb_bars:
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            provider="akshare",
+            download_engine="openbb",
+        )
+
+    fetch_openbb_bars.assert_called_once_with(
+        symbols=("600519.SH",),
+        start="2024-01-01",
+        end="2024-01-02",
+        provider="akshare",
+        timeframe="1d",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
+def test_update_local_bars_can_fetch_and_write_with_native_akshare_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["600519.SH", "600519.SH"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_akshare_bars",
+        return_value=bars,
+    ) as fetch_akshare_bars:
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            download_engine="akshare",
+        )
+
+    fetch_akshare_bars.assert_called_once_with(
+        symbols=("600519.SH",),
+        start="2024-01-01",
+        end="2024-01-02",
+        timeframe="1d",
+        adjust="qfq",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
+def test_update_local_bars_can_fetch_and_write_with_tdx_engine(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_tdx_bars",
+        return_value=bars,
+    ) as fetch_tdx_bars:
+        result = update_local_bars(
+            symbols=("000001.SZ",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            provider="/Applications/Tdx/PYPlugins/user",
+            download_engine="tdx",
+        )
+
+    fetch_tdx_bars.assert_called_once_with(
+        symbols=("000001.SZ",),
+        start="2024-01-01",
+        end="2024-01-02",
+        timeframe="1d",
+        adjust="qfq",
+        tqcenter_path="/Applications/Tdx/PYPlugins/user",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "000001.SZ", "status": "success", "rows": 2, "new_rows": 2}
+    ]
+    saved = pd.read_parquet(tmp_path / "market" / "daily" / "qfq" / "000001.SZ.parquet")
+    assert saved["close"].tolist() == [1, 2]
+
+
+def test_update_local_bars_persists_downloaded_symbol_names(tmp_path: Path) -> None:
+    data_root = tmp_path / "market" / "daily"
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "stock_code": ["880081.SH", "880081.SH"],
+            "stock_name": ["通达信趋势", "通达信趋势"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    )
+
+    with patch("ashare_cross_section_similarity.downloader.fetch_tdx_bars", return_value=bars):
+        update_local_bars(
+            symbols=("880081.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=data_root,
+            provider="/Applications/Tdx/PYPlugins/user",
+            download_engine="tdx",
+        )
+
+    assert load_symbol_name_map(data_root, ("880081.SH",)) == {"880081.SH": "通达信趋势"}
+
+
+def test_tdx_engine_fetches_symbol_batch_once(tmp_path: Path) -> None:
+    bars = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-01"],
+            "stock_code": ["000001.SZ", "600519.SH"],
+            "open": [1, 10],
+            "high": [2, 11],
+            "low": [1, 10],
+            "close": [2, 11],
+            "volume": [10, 100],
+            "amount": [100, 1000],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_tdx_bars",
+        return_value=bars,
+    ) as fetch_tdx_bars:
+        result = update_local_bars(
+            symbols=("000001.SZ", "600519.SH"),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            provider="/Applications/Tdx/PYPlugins/user",
+            download_engine="tdx",
+        )
+
+    fetch_tdx_bars.assert_called_once_with(
+        symbols=("000001.SZ", "600519.SH"),
+        start="2024-01-01",
+        end="2024-01-02",
+        timeframe="1d",
+        adjust="qfq",
+        tqcenter_path="/Applications/Tdx/PYPlugins/user",
+    )
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "000001.SZ", "status": "success", "rows": 1, "new_rows": 1},
+        {"symbol": "600519.SH", "status": "success", "rows": 1, "new_rows": 1},
+    ]
+    assert (tmp_path / "market" / "daily" / "qfq" / "000001.SZ.parquet").exists()
+    assert (tmp_path / "market" / "daily" / "qfq" / "600519.SH.parquet").exists()
+
+
+def test_openbb_engine_merges_with_existing_parquet_using_canonical_schema(
+    tmp_path: Path,
+) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01"],
+            "symbol": ["600519.SH"],
+            "open": [1],
+            "high": [1],
+            "low": [1],
+            "close": [1],
+        }
+    ).to_parquet(qfq / "600519.SH.parquet", index=False)
+    bars = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-02")],
+            "stock_code": ["600519.SH"],
+            "open": [2],
+            "high": [2],
+            "low": [2],
+            "close": [2],
+            "volume": [20],
+            "amount": [200],
+        }
+    )
+
+    with patch(
+        "ashare_cross_section_similarity.downloader.fetch_openbb_bars",
+        return_value=bars,
+    ):
+        result = update_local_bars(
+            symbols=("600519.SH",),
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-02",
+            end="2024-01-02",
+            data_root=tmp_path / "market" / "daily",
+            download_engine="openbb",
+        )
+
+    saved = pd.read_parquet(qfq / "600519.SH.parquet")
+    assert result[["symbol", "status", "rows", "new_rows"]].to_dict("records") == [
+        {"symbol": "600519.SH", "status": "success", "rows": 2, "new_rows": 1}
+    ]
+    assert saved.columns.tolist() == [
+        "date",
+        "stock_code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+    ]
+    assert saved["date"].tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+    assert saved["volume"].isna().iloc[0]
+    assert saved["amount"].isna().iloc[0]
+
+
 def test_data_check_reports_missing_and_available_symbols(tmp_path: Path) -> None:
     qfq = tmp_path / "market" / "daily" / "qfq"
     qfq.mkdir(parents=True)
@@ -114,3 +382,92 @@ def test_data_check_reports_missing_and_available_symbols(tmp_path: Path) -> Non
         {"symbol": "000001.SZ", "status": "available", "rows": 2},
         {"symbol": "000002.SZ", "status": "missing_file", "rows": 0},
     ]
+
+
+def test_data_check_reports_partial_window_when_range_is_not_fully_covered(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-05", "2024-01-08"],
+            "stock_code": ["000001.SZ", "000001.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = data_check(
+        symbols=("000001.SZ",),
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-01-01",
+        end="2024-01-10",
+    )
+
+    row = out.iloc[0]
+    assert row["status"] == "partial_window"
+    assert row["rows"] == 2
+    assert row["start"] == pd.Timestamp("2024-01-05")
+    assert row["end"] == pd.Timestamp("2024-01-08")
+    assert row["requested_start"] == pd.Timestamp("2024-01-01")
+    assert row["requested_end"] == pd.Timestamp("2024-01-10")
+    assert row["local_start"] == pd.Timestamp("2024-01-05")
+    assert row["local_end"] == pd.Timestamp("2024-01-08")
+    assert "覆盖不足" in row["message"]
+
+
+def test_data_check_treats_non_trading_boundary_dates_as_covered(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-03-29", "2024-04-01"],
+            "stock_code": ["399006.SZ", "399006.SZ"],
+            "open": [1, 2],
+            "high": [1, 2],
+            "low": [1, 2],
+            "close": [1, 2],
+            "volume": [10, 20],
+            "amount": [100, 200],
+        }
+    ).to_parquet(qfq / "399006.SZ.parquet", index=False)
+
+    out = data_check(
+        symbols=("399006.SZ",),
+        data_root=tmp_path / "market" / "daily",
+        timeframe="1d",
+        adjust="qfq",
+        start="2024-03-29",
+        end="2024-03-31",
+    )
+
+    row = out.iloc[0]
+    assert row["status"] == "available"
+    assert row["rows"] == 1
+    assert row["message"] == ""
+
+
+def test_data_check_reads_only_date_column(tmp_path: Path) -> None:
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True)
+    file_path = qfq / "000001.SZ.parquet"
+    file_path.write_bytes(b"placeholder")
+    frame = pd.DataFrame({"date": ["2024-01-01", "2024-01-02"]})
+
+    with patch("pandas.read_parquet", return_value=frame) as read_parquet:
+        out = data_check(
+            symbols=("000001.SZ",),
+            data_root=tmp_path / "market" / "daily",
+            timeframe="1d",
+            adjust="qfq",
+            start="2024-01-01",
+            end="2024-01-02",
+        )
+
+    read_parquet.assert_called_once_with(file_path, columns=["date"])
+    assert out["status"].tolist() == ["available"]

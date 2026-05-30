@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
+import os
 from pathlib import Path
 import sys
 
-from ashare_cross_section_similarity.data import available_symbols, load_local_bars
+import pandas as pd
+
+from ashare_cross_section_similarity.benchmark import run_benchmark
+from ashare_cross_section_similarity.data import (
+    available_symbols,
+    import_price_frame,
+    load_local_bars,
+    read_price_data_file,
+)
+from ashare_cross_section_similarity.deepseek_client import DeepSeekClient, DeepSeekConfig
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.history import HistorySearchConfig, search_history
-from ashare_cross_section_similarity.similarity import CrossSectionSearchConfig, search_cross_section
+from ashare_cross_section_similarity.review import ReviewConfig, analyze_price_review
+from ashare_cross_section_similarity.review_ai import (
+    build_review_ai_evidence,
+    build_review_ai_messages,
+    parse_review_ai_result,
+)
+from ashare_cross_section_similarity.similarity import (
+    CrossSectionSearchConfig,
+    FORWARD_RETURN_WINDOWS,
+    search_cross_section,
+)
+from ashare_cross_section_similarity.similarity_algorithms import ALGORITHM_CHOICES, BASELINE_ALGORITHM
 from ashare_cross_section_similarity.universe import (
     fetch_concept_constituents,
     fetch_index_constituents,
@@ -23,8 +46,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_download(args)
     if args.command == "check":
         return _run_check(args)
+    if args.command == "import-data":
+        return _run_import_data(args)
+    if args.command == "benchmark":
+        return _run_benchmark(args)
     if args.command == "history":
         return _run_history(args)
+    if args.command == "review":
+        return _run_review(args)
     return _run_search(args)
 
 
@@ -38,8 +67,8 @@ def _run_search(args: argparse.Namespace) -> int:
         timeframe=args.timeframe,
         adjust=args.adjust,
         symbols=symbols_to_load,
-        start=args.start,
-        end=args.end,
+        start=_date_tolerance_load_start(args.start, args.date_tolerance_bars),
+        end=_cross_section_load_end(args.end, args.date_tolerance_bars),
     )
     result = search_cross_section(
         bars,
@@ -51,10 +80,21 @@ def _run_search(args: argparse.Namespace) -> int:
             top_n=args.top_n,
             min_coverage=args.min_coverage,
             path_weight=args.path_weight,
+            date_tolerance_bars=args.date_tolerance_bars,
+            algorithm=args.algorithm,
         ),
     )
+    outcome_columns = [
+        f"t_plus_{horizon}_return"
+        for horizon in FORWARD_RETURN_WINDOWS
+        if f"t_plus_{horizon}_return" in result.results.columns
+    ]
     display_columns = [
         "symbol",
+        "区间开始",
+        "区间结束",
+        "日期偏移",
+        "覆盖率",
         "综合相似度",
         "路径相似度",
         "特征相似度",
@@ -62,6 +102,7 @@ def _run_search(args: argparse.Namespace) -> int:
         "波动率",
         "最大回撤",
         "K线数量",
+        *outcome_columns,
     ]
     print(result.results[display_columns].to_string(index=False) if not result.results.empty else "没有可用结果。")
     if args.output:
@@ -94,6 +135,7 @@ def _run_history(args: argparse.Namespace) -> int:
             exclusion_bars=args.exclusion_bars,
             nearby_gap_days=args.nearby_gap_days,
             path_weight=args.path_weight,
+            algorithm=args.algorithm,
         ),
     )
     outcome_columns = [
@@ -124,6 +166,63 @@ def _run_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_review(args: argparse.Namespace) -> int:
+    bars = load_local_bars(
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+        symbols=[args.target_symbol],
+        start=args.start,
+        end=args.end,
+    )
+    result = analyze_price_review(
+        bars,
+        ReviewConfig(symbol=args.target_symbol, start=args.start, end=args.end),
+    )
+    evidence = build_review_ai_evidence(result, pd.DataFrame(), warnings=list(result.warnings))
+    payload: dict[str, object] = {"evidence": evidence}
+    if not args.evidence_only and result.window.empty:
+        raise SystemExit(
+            "目标标的在所选区间没有本地行情，未调用 DeepSeek。"
+            "请检查代码、周期、复权目录或先使用 --evidence-only 查看证据包。"
+        )
+    if not args.evidence_only:
+        client = DeepSeekClient(
+            DeepSeekConfig(
+                api_key=args.api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+                base_url=args.base_url,
+                model=args.model,
+                thinking=not bool(args.no_thinking),
+            )
+        )
+        ai_result = parse_review_ai_result(client.chat(build_review_ai_messages(evidence)), evidence=evidence)
+        payload["ai_review"] = {
+            "review": ai_result.review,
+            "analysis": ai_result.analysis,
+            "critique": ai_result.critique,
+            "script_cards": [
+                {
+                    "title": card.title,
+                    "body": card.body,
+                    "grade": card.grade,
+                    "tomorrow_check": card.tomorrow_check,
+                }
+                for card in ai_result.script_cards
+            ],
+            "evidence_refs": list(ai_result.evidence_refs),
+            "disclaimer": ai_result.disclaimer,
+        }
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text + "\n", encoding="utf-8")
+        print(f"复盘结果已写入：{output_path}")
+    else:
+        print(text)
+    return 0
+
+
 def _run_download(args: argparse.Namespace) -> int:
     symbols = _resolve_download_symbols(args)
     if not symbols:
@@ -135,7 +234,9 @@ def _run_download(args: argparse.Namespace) -> int:
         start=args.start,
         end=args.end,
         trend_repo=args.trend_repo,
+        data_root=args.data_root,
         provider=args.provider,
+        download_engine=args.download_engine,
     )
     print(result.to_string(index=False))
     if args.output:
@@ -143,7 +244,7 @@ def _run_download(args: argparse.Namespace) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(output_path, index=False)
         print(f"下载日志已写入：{output_path}")
-    failed = int((result["status"] != "success").sum()) if not result.empty else 0
+    failed = int((result["status"] == "failed").sum()) if not result.empty else 0
     return 1 if failed else 0
 
 
@@ -168,9 +269,45 @@ def _run_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_import_data(args: argparse.Namespace) -> int:
+    frame = read_price_data_file(args.input)
+    result = import_price_frame(
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+        frame=frame,
+        fallback_symbol=args.fallback_symbol,
+        source_name=Path(args.input).name,
+    )
+    print(result.to_string(index=False))
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+        print(f"导入日志已写入：{output_path}")
+    return 0
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    algorithms = tuple(item.strip() for item in args.algorithms.split(",") if item.strip())
+    if not algorithms:
+        raise SystemExit("algorithms 至少需要一个算法名。")
+    result = run_benchmark(
+        cases_path=args.cases,
+        algorithms=algorithms,
+        output_dir=args.output,
+        data_root=args.data_root,
+        timeframe=args.timeframe,
+        adjust=args.adjust,
+    )
+    print(result.summary.to_string(index=False))
+    print(f"benchmark CSV/HTML 已写入：{Path(args.output).expanduser()}")
+    return 1 if (not result.summary.empty and (result.summary["status"] == "failed").any()) else 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] not in {"search", "history", "download", "check", "-h", "--help"}:
+    if argv and argv[0] not in {"search", "history", "review", "download", "check", "import-data", "benchmark", "-h", "--help"}:
         argv.insert(0, "search")
     parser = argparse.ArgumentParser(description="A股相似阶段搜集：历史时序、横截面、数据抓取、检查")
     subparsers = parser.add_subparsers(dest="command")
@@ -183,6 +320,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     search_parser.add_argument("--top-n", type=int, default=20)
     search_parser.add_argument("--min-coverage", type=float, default=0.8)
     search_parser.add_argument("--path-weight", type=float, default=0.7)
+    search_parser.add_argument("--algorithm", default=BASELINE_ALGORITHM, choices=ALGORITHM_CHOICES, help="相似算法")
+    search_parser.add_argument(
+        "--date-tolerance-bars",
+        type=int,
+        default=0,
+        help="候选标的窗口允许前后平移的交易日根数；CLI 默认 0，保持严格同日。",
+    )
     search_parser.add_argument("--output", default="", help="CSV 输出路径")
 
     history_parser = subparsers.add_parser("history", help="搜索同一标的的历史相似阶段")
@@ -197,7 +341,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     history_parser.add_argument("--exclusion-bars", type=int, default=20, help="排除当前窗口附近的 K 线数量")
     history_parser.add_argument("--nearby-gap-days", type=int, default=20, help="相邻历史样本最小间隔天数")
     history_parser.add_argument("--path-weight", type=float, default=0.7, help="走势形状在综合相似度中的权重")
+    history_parser.add_argument("--algorithm", default=BASELINE_ALGORITHM, choices=ALGORITHM_CHOICES, help="相似算法")
     history_parser.add_argument("--output", default="", help="CSV 输出路径")
+
+    review_parser = subparsers.add_parser("review", help="生成走势复盘、分析和锐评")
+    _add_common_data_args(review_parser)
+    review_parser.add_argument("--target-symbol", required=True, help="目标代码，如 300750.SZ")
+    review_parser.add_argument("--start", required=True, help="复盘区间开始")
+    review_parser.add_argument("--end", required=True, help="复盘区间结束")
+    review_parser.add_argument("--model", default="deepseek-v4-flash", help="DeepSeek V4 模型名")
+    review_parser.add_argument("--api-key", default="", help="DeepSeek API Key；留空读取 DEEPSEEK_API_KEY")
+    review_parser.add_argument("--base-url", default="https://api.deepseek.com", help="DeepSeek OpenAI-compatible Base URL")
+    review_parser.add_argument("--no-thinking", action="store_true", help="关闭 DeepSeek thinking")
+    review_parser.add_argument("--evidence-only", action="store_true", help="只输出证据包，不调用 DeepSeek")
+    review_parser.add_argument("--output", default="", help="JSON 输出路径")
 
     download_parser = subparsers.add_parser("download", help="抓取行情并落地本地 parquet")
     _add_download_data_args(download_parser)
@@ -206,6 +363,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     check_parser = subparsers.add_parser("check", help="检查本地 parquet 覆盖情况")
     _add_common_data_args(check_parser)
     _add_download_symbol_args(check_parser)
+
+    import_parser = subparsers.add_parser("import-data", help="导入符合规范的 csv/parquet 价格数据")
+    _add_common_data_args(import_parser)
+    import_parser.add_argument("--input", required=True, help="价格数据文件，支持 csv/parquet")
+    import_parser.add_argument(
+        "--fallback-symbol",
+        default="",
+        help="当文件没有 symbol/stock_code 列时使用的单一标的代码",
+    )
+    import_parser.add_argument("--output", default="", help="CSV 导入日志输出路径")
+
+    benchmark_parser = subparsers.add_parser("benchmark", help="运行固定样本算法核验并输出 CSV/HTML 图集")
+    _add_common_data_args(benchmark_parser)
+    benchmark_parser.add_argument("--cases", required=True, help="benchmark cases yaml/json 文件")
+    benchmark_parser.add_argument(
+        "--algorithms",
+        default="baseline_price_feature,return_shape,hybrid_shape_v2",
+        help="逗号分隔算法名",
+    )
+    benchmark_parser.add_argument("--output", default="outputs/research", help="输出目录")
 
     parsed = parser.parse_args(argv)
     if parsed.command is None:
@@ -221,8 +398,15 @@ def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_download_data_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data-root", default="data/market/daily", help="直接下载写入的本地行情根目录")
     parser.add_argument("--timeframe", default="1d", choices=["1d", "30m", "15m", "5m", "1m"])
     parser.add_argument("--adjust", default="qfq")
+    parser.add_argument(
+        "--download-engine",
+        default="trend",
+        choices=["trend", "akshare", "openbb", "tdx"],
+        help="下载引擎：trend 委托原 trend-backtest；akshare/openbb/tdx 直接写入 parquet。",
+    )
 
 
 def _add_universe_args(parser: argparse.ArgumentParser) -> None:
@@ -244,7 +428,11 @@ def _add_download_symbol_args(parser: argparse.ArgumentParser) -> None:
         default=str(default_trend_repo()),
         help="原 trend-backtest 仓库路径，download 会调用其中 scripts/update_data.py",
     )
-    parser.add_argument("--provider", default="", help="传给原 update_data.py 的数据源，如 akshare 或 tdx")
+    parser.add_argument(
+        "--provider",
+        default="",
+        help="下载源；trend 可填 akshare/tdx，openbb 默认 akshare，tdx 可填 PYPlugins/user 路径。",
+    )
 
 
 def _resolve_universe(args: argparse.Namespace) -> list[str]:
@@ -293,3 +481,25 @@ def _parse_int_list(value: str) -> list[int]:
     if any(item <= 0 for item in parsed):
         raise SystemExit("forward-windows 必须为正整数。")
     return parsed
+
+
+def _forward_stats_load_end(end: str | pd.Timestamp) -> str:
+    end_ts = pd.Timestamp(end)
+    today = pd.Timestamp.today().normalize()
+    if end_ts >= today:
+        return end_ts.strftime("%Y-%m-%d")
+    return min(end_ts + pd.Timedelta(days=45), today).strftime("%Y-%m-%d")
+
+
+def _cross_section_load_end(end: str | pd.Timestamp, date_tolerance_bars: int) -> str:
+    return _forward_stats_load_end(pd.Timestamp(end) + pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars)))
+
+
+def _date_tolerance_load_start(start: str | pd.Timestamp, date_tolerance_bars: int) -> str:
+    return (pd.Timestamp(start) - pd.Timedelta(days=_date_tolerance_calendar_days(date_tolerance_bars))).strftime("%Y-%m-%d")
+
+
+def _date_tolerance_calendar_days(date_tolerance_bars: int) -> int:
+    if date_tolerance_bars <= 0:
+        return 0
+    return max(date_tolerance_bars + 2, int(math.ceil(date_tolerance_bars * 2.2)))

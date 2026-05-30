@@ -1,0 +1,39 @@
+cases:
+  - name: history_399006_recent
+    mode: history
+    symbol: 399006.SZ
+    start: 2024-03-04
+    end: 2024-03-31
+    top_n: 10
+    exclusion_bars: 20
+    nearby_gap_days: 20
+  - name: history_000852_recent
+    mode: history
+    symbol: 000852.SH
+    start: 2024-03-04
+    end: 2024-03-31
+    top_n: 10
+    exclusion_bars: 20
+    nearby_gap_days: 20
+  - name: cross_601888_20251219_20260518
+    mode: cross_section
+    target_symbol: 601888.SH
+    start: 2025-12-19
+    end: 2026-05-18
+    universe_symbols:
+      - 000852.SH
+      - 399006.SZ
+      - 688603.SH
+    top_n: 10
+    date_tolerance_bars: 5
+  - name: cross_688603_recent
+    mode: cross_section
+    target_symbol: 688603.SH
+    start: 2026-03-25
+    end: 2026-05-15
+    universe_symbols:
+      - 000852.SH
+      - 399006.SZ
+      - 601888.SH
+    top_n: 10
+    date_tolerance_bars: 5
