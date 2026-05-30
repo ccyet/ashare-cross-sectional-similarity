@@ -629,19 +629,23 @@ def _render_history_tab(
         data_fingerprint=target_fingerprint,
     )
     selected_window = bars.loc[bars["date"].between(pd.Timestamp(start), inclusive_end_timestamp(as_of))] if not bars.empty else bars
+    target_row = target_check.iloc[0] if not target_check.empty else None
+    window_coverage_error = _history_window_coverage_error(target_row, selected_window, start=start, end=as_of)
     if bars.empty:
         st.error("未找到该标的在区间结束前的本地行情。请先下载或检查代码、周期、复权目录。")
         if hint := _symbol_data_hint(symbol, data_root=data_root, timeframe=timeframe, adjust=adjust):
             st.warning(hint)
     else:
-        target_row = target_check.iloc[0] if not target_check.empty else None
         cols = st.columns(4)
         cols[0].metric("可用K线", f"{len(bars):,}")
         cols[1].metric("本地开始", _date_text(target_row.get("local_start") if target_row is not None else bars["date"].min()))
         cols[2].metric("本地结束", _date_text(target_row.get("local_end") if target_row is not None else bars["date"].max()))
         cols[3].metric("选定区间K线", f"{len(selected_window):,} 根")
-        if len(selected_window) < 2:
-            st.warning("选定区间内 K 线数量不足，至少需要 2 根。")
+        if window_coverage_error:
+            st.warning(window_coverage_error)
+    if not target_check.empty:
+        st.caption("本地覆盖 review")
+        st.dataframe(_centered(_format_data_check_status(target_check)), use_container_width=True, hide_index=True)
 
     with st.expander("缺数据时下载或更新"):
         download_start = st.text_input("下载开始", value="2018-01-01", key="history_download_start")
@@ -658,11 +662,24 @@ def _render_history_tab(
                 download_engine=download_engine,
             )
             st.rerun()
-        _render_download_job("history_download_job", target_symbol=normalized_symbol)
+        update_result = _render_download_job("history_download_job", target_symbol=normalized_symbol)
+        job = st.session_state.get("history_download_job")
+        if job is not None and job.get("status") == "completed":
+            target_status = pd.Series(dtype=str)
+            if not update_result.empty and "symbol" in update_result.columns and "status" in update_result.columns:
+                target_status = update_result.loc[update_result["symbol"] == normalized_symbol, "status"].astype(str)
+            if not target_status.empty and target_status.iloc[0] != "available":
+                st.warning(
+                    f"{normalized_symbol} 下载任务已结束，但本地行情仍未覆盖 {start} 至 {as_of}。"
+                    "请检查下载引擎、TDX 路径或数据源实际落地情况。"
+                )
 
     st.markdown("**2. 运行历史搜索**")
     if not st.button("运行历史时序搜索", type="primary", key="history_run"):
         st.info("确认上方有足够 K 线后，点击运行历史时序搜索。")
+        return
+    if window_coverage_error:
+        st.error(window_coverage_error)
         return
 
     try:
@@ -4032,6 +4049,12 @@ def _download_job_summary(job: dict[str, object]) -> dict[str, object]:
     failed = int((statuses == "failed").sum())
     uncovered = int(statuses.isin(DOWNLOAD_REQUIRED_STATUSES).sum())
     status = str(job.get("status", ""))
+    status_label = DOWNLOAD_JOB_STATUS_LABELS.get(status, status or "未开始")
+    if status == "completed":
+        if failed > 0 or uncovered > 0:
+            status_label = "覆盖未完成"
+        else:
+            status_label = "覆盖完成"
     batch_size = max(1, int(job.get("batch_size", DOWNLOAD_BATCH_SIZE)))
     if remaining <= 0:
         batch_label = "无剩余批次"
@@ -4046,7 +4069,7 @@ def _download_job_summary(job: dict[str, object]) -> dict[str, object]:
         "remaining": remaining,
         "failed": failed,
         "uncovered": uncovered,
-        "status_label": DOWNLOAD_JOB_STATUS_LABELS.get(status, status or "未开始"),
+        "status_label": status_label,
         "batch_label": batch_label,
     }
 
@@ -4057,6 +4080,8 @@ def _download_progress_text(completed: int, total: int, symbol: str, row_status:
         return f"正在下载第 {index}/{total} 个：{symbol}"
     if row_status == "failed":
         return f"第 {completed}/{total} 个失败：{symbol}"
+    if row_status in DOWNLOAD_REQUIRED_STATUSES:
+        return f"第 {completed}/{total} 个覆盖不足：{symbol}"
     return f"已完成第 {completed}/{total} 个：{symbol}"
 
 
@@ -4066,12 +4091,13 @@ def _render_download_job(job_key: str, *, target_symbol: str = "") -> pd.DataFra
         return pd.DataFrame()
     status = str(job.get("status", ""))
     summary = _download_job_summary(job)
-    summary_cols = st.columns(5)
+    summary_cols = st.columns(6)
     summary_cols[0].metric("任务状态", str(summary["status_label"]))
     summary_cols[1].metric("总标的", f"{int(summary['total']):,}")
     summary_cols[2].metric("已完成", f"{int(summary['completed']):,}")
     summary_cols[3].metric("失败", f"{int(summary['failed']):,}")
-    summary_cols[4].metric("剩余", f"{int(summary['remaining']):,}")
+    summary_cols[4].metric("覆盖不足", f"{int(summary['uncovered']):,}")
+    summary_cols[5].metric("剩余", f"{int(summary['remaining']):,}")
     st.caption(str(summary["batch_label"]))
 
     button_cols = st.columns([1, 1, 3])
@@ -5118,6 +5144,32 @@ def _parse_horizons(value: str) -> list[int]:
 
 def _date_range_error(start: str | pd.Timestamp, end: str | pd.Timestamp) -> str:
     return "区间开始不能晚于区间结束。" if pd.Timestamp(start) > pd.Timestamp(end) else ""
+
+
+def _history_window_coverage_error(check_row: object, selected_window: pd.DataFrame, *, start: str, end: str) -> str:
+    status = str(_row_value(check_row, "status", ""))
+    if status in DOWNLOAD_REQUIRED_STATUSES:
+        message = str(_row_value(check_row, "message", "") or "").strip()
+        local_start = _date_text(_row_value(check_row, "start", _row_value(check_row, "local_start", None)))
+        local_end = _date_text(_row_value(check_row, "end", _row_value(check_row, "local_end", None)))
+        requested_start = _date_text(_row_value(check_row, "requested_start", start))
+        requested_end = _date_text(_row_value(check_row, "requested_end", end))
+        detail = f"实际覆盖 {local_start} 至 {local_end}" if local_start != "-" or local_end != "-" else "本地无可用覆盖"
+        suffix = f"；{message}" if message else ""
+        return f"本地行情未覆盖完整窗口：请求 {requested_start} 至 {requested_end}，{detail}{suffix}。请先下载或更新数据。"
+    if len(selected_window) < 2:
+        return "选定区间内 K 线数量不足，至少需要 2 根。"
+    return ""
+
+
+def _row_value(row: object, key: str, default: object = None) -> object:
+    if row is None:
+        return default
+    if isinstance(row, pd.Series):
+        return row.get(key, default)
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    return getattr(row, key, default)
 
 
 def _date_text(value: object) -> str:

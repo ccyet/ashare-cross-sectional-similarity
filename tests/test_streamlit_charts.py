@@ -40,6 +40,7 @@ from streamlit_app import (
     _history_forward_summary,
     _history_kline_series,
     _history_quick_window_feedback,
+    _history_window_coverage_error,
     _local_data_fingerprint,
     _size_spread_chart,
     _size_spread_series,
@@ -453,6 +454,47 @@ def test_format_data_check_status_separates_requested_and_local_ranges() -> None
     assert formatted.columns.tolist() == ["symbol", "status", "rows", "请求开始", "请求结束", "本地开始", "本地结束", "message"]
     assert formatted["请求开始"].iloc[0] == "2026-08-11"
     assert formatted["本地开始"].iloc[0] == "2021-05-17"
+
+
+def test_history_window_coverage_error_rejects_partial_local_end() -> None:
+    selected = _bars("000001.SZ", [10, 11, 12], start="2026-03-01")
+    selected["date"] = pd.to_datetime(["2026-03-01", "2026-03-16", "2026-04-26"])
+    check_row = pd.Series(
+        {
+            "symbol": "000001.SZ",
+            "status": "partial_window",
+            "rows": 3,
+            "requested_start": pd.Timestamp("2026-03-01"),
+            "requested_end": pd.Timestamp("2026-05-29"),
+            "local_start": pd.Timestamp("2024-01-01"),
+            "local_end": pd.Timestamp("2026-04-26"),
+            "message": "区间覆盖不足，实际覆盖 2026-03-01 至 2026-04-26",
+        }
+    )
+
+    message = _history_window_coverage_error(check_row, selected, start="2026-03-01", end="2026-05-29")
+
+    assert "本地行情未覆盖完整窗口" in message
+    assert "2026-04-26" in message
+    assert "2026-05-29" in message
+
+
+def test_history_window_coverage_error_allows_available_window() -> None:
+    selected = _bars("000001.SZ", [10, 11, 12], start="2026-03-01")
+    check_row = pd.Series(
+        {
+            "symbol": "000001.SZ",
+            "status": "available",
+            "rows": 3,
+            "requested_start": pd.Timestamp("2026-03-01"),
+            "requested_end": pd.Timestamp("2026-03-03"),
+            "local_start": pd.Timestamp("2024-01-01"),
+            "local_end": pd.Timestamp("2026-03-03"),
+            "message": "",
+        }
+    )
+
+    assert _history_window_coverage_error(check_row, selected, start="2026-03-01", end="2026-03-03") == ""
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:
@@ -1349,6 +1391,61 @@ def test_download_symbols_with_progress_batches_symbols_with_same_start(monkeypa
     )
 
 
+def test_download_symbols_with_progress_marks_noop_update_as_uncovered(monkeypatch) -> None:
+    def fake_update_local_bars(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "status": "delegated",
+                    "rows": 0,
+                    "new_rows": 0,
+                    "message": "原更新脚本执行成功",
+                }
+                for symbol in kwargs["symbols"]
+            ]
+        )
+
+    def fake_data_check(**kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "status": "partial_window",
+                    "rows": 28,
+                    "start": pd.Timestamp("2026-03-01"),
+                    "end": pd.Timestamp("2026-04-26"),
+                    "requested_start": pd.Timestamp("2026-03-01"),
+                    "requested_end": pd.Timestamp("2026-05-29"),
+                    "local_start": pd.Timestamp("2024-01-01"),
+                    "local_end": pd.Timestamp("2026-04-26"),
+                    "message": "区间覆盖不足，实际覆盖 2026-03-01 至 2026-04-26",
+                }
+                for symbol in kwargs["symbols"]
+            ]
+        )
+
+    monkeypatch.setattr("streamlit_app.update_local_bars", fake_update_local_bars)
+    monkeypatch.setattr("streamlit_app.data_check", fake_data_check)
+
+    result = _download_symbols_with_progress(
+        symbols=["000001.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2026-03-01",
+        end="2026-05-29",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="trend",
+    )
+
+    row = result.iloc[0]
+    assert row["status"] == "partial_window"
+    assert row["end"] == pd.Timestamp("2026-04-26")
+    assert "下载命令执行后仍未完整覆盖" in row["message"]
+
+
 def test_download_job_can_pause_between_batches(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -1518,10 +1615,41 @@ def test_download_job_summary_uses_user_facing_counts() -> None:
     }
 
 
+def test_completed_download_job_summary_exposes_uncovered_status() -> None:
+    job = _create_download_job(
+        symbols=["000001.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2026-03-01",
+        end="2026-05-29",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="tdx",
+        batch_size=1,
+    )
+    job["cursor"] = 1
+    job["status"] = "completed"
+    job["rows"] = [
+        {
+            "symbol": "000001.SZ",
+            "status": "partial_window",
+            "rows": 30,
+            "message": "下载命令执行后仍未完整覆盖；区间覆盖不足，实际覆盖 2026-03-01 至 2026-04-26",
+        }
+    ]
+
+    summary = _download_job_summary(job)
+
+    assert summary["uncovered"] == 1
+    assert summary["status_label"] == "覆盖未完成"
+
+
 def test_download_progress_text_describes_current_symbol_and_result() -> None:
     assert _download_progress_text(2, 5, "000003.SZ", "running") == "正在下载第 3/5 个：000003.SZ"
     assert _download_progress_text(3, 5, "000003.SZ", "available") == "已完成第 3/5 个：000003.SZ"
     assert _download_progress_text(3, 5, "000003.SZ", "failed") == "第 3/5 个失败：000003.SZ"
+    assert _download_progress_text(3, 5, "000003.SZ", "partial_window") == "第 3/5 个覆盖不足：000003.SZ"
 
 
 def test_prepare_full_daily_download_symbols_skips_available_daily_bars(monkeypatch) -> None:
