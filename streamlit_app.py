@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -44,7 +45,12 @@ from ashare_cross_section_similarity.data_manager import (
 )
 from ashare_cross_section_similarity.downloader import data_check, default_trend_repo, update_local_bars
 from ashare_cross_section_similarity.features import normalized_close_path, z_normalize
-from ashare_cross_section_similarity.history import HistorySearchConfig, HistorySearchResult, search_history
+from ashare_cross_section_similarity.history import (
+    HistorySearchConfig,
+    HistorySearchResult,
+    explicit_window_end_coverage_error,
+    search_history,
+)
 from ashare_cross_section_similarity.review import (
     ReviewConfig,
     ReviewResult,
@@ -79,6 +85,7 @@ from ashare_cross_section_similarity.similarity_algorithms import (
     get_algorithm_status,
 )
 from ashare_cross_section_similarity.tdx_source import (
+    TDX_TQCENTER_ENV_VAR,
     fetch_tdx_sector_index_frame,
     fetch_tdx_stock_symbols,
     normalize_tdx_sector_index_symbol,
@@ -3967,6 +3974,19 @@ def _create_download_job(
     batch_size: int = DOWNLOAD_BATCH_SIZE,
 ) -> dict[str, object]:
     normalized = unique_symbols(symbols)
+    preflight_error = _download_source_preflight_error(download_engine, provider)
+    rows = []
+    if preflight_error:
+        rows = [
+            {
+                "symbol": symbol,
+                "status": "failed",
+                "rows": 0,
+                "new_rows": 0,
+                "message": preflight_error,
+            }
+            for symbol in normalized
+        ]
     return {
         "symbols": normalized,
         "timeframe": timeframe,
@@ -3978,10 +3998,24 @@ def _create_download_job(
         "provider": provider,
         "download_engine": download_engine,
         "batch_size": batch_size,
-        "cursor": 0,
-        "rows": [],
-        "status": "running" if normalized else "completed",
+        "cursor": len(normalized) if preflight_error else 0,
+        "rows": rows,
+        "status": "completed" if preflight_error or not normalized else "running",
     }
+
+
+def _download_source_preflight_error(download_engine: str, provider: str) -> str:
+    if download_engine != "tdx":
+        return ""
+    configured_path = (provider or os.getenv(TDX_TQCENTER_ENV_VAR, "")).strip()
+    if configured_path:
+        return ""
+    if importlib.util.find_spec("tqcenter") is not None:
+        return ""
+    return (
+        "TDX 下载未连接：请先在下载引擎处配置通达信 PYPlugins/user 目录，"
+        f"或设置 {TDX_TQCENTER_ENV_VAR}；当前环境无法导入 tqcenter。"
+    )
 
 
 def _set_download_job_status(job: dict[str, object], status: str) -> None:
@@ -5157,6 +5191,8 @@ def _history_window_coverage_error(check_row: object, selected_window: pd.DataFr
         detail = f"实际覆盖 {local_start} 至 {local_end}" if local_start != "-" or local_end != "-" else "本地无可用覆盖"
         suffix = f"；{message}" if message else ""
         return f"本地行情未覆盖完整窗口：请求 {requested_start} 至 {requested_end}，{detail}{suffix}。请先下载或更新数据。"
+    if stale_end_error := explicit_window_end_coverage_error(selected_window, end):
+        return stale_end_error
     if len(selected_window) < 2:
         return "选定区间内 K 线数量不足，至少需要 2 根。"
     return ""

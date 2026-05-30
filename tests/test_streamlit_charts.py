@@ -27,6 +27,7 @@ from streamlit_app import (
     _directory_picker_entries,
     _download_job_summary,
     _download_progress_text,
+    _download_source_preflight_error,
     _download_symbols_with_progress,
     _file_picker_entries,
     _format_cross_section_stats,
@@ -495,6 +496,29 @@ def test_history_window_coverage_error_allows_available_window() -> None:
     )
 
     assert _history_window_coverage_error(check_row, selected, start="2026-03-01", end="2026-03-03") == ""
+
+
+def test_history_window_coverage_error_rejects_stale_selected_window_even_if_check_is_available() -> None:
+    selected = _bars("000001.SZ", [10, 11, 12], start="2026-03-01")
+    selected["date"] = pd.to_datetime(["2026-03-01", "2026-03-16", "2026-04-24"])
+    check_row = pd.Series(
+        {
+            "symbol": "000001.SZ",
+            "status": "available",
+            "rows": 3,
+            "requested_start": pd.Timestamp("2026-03-01"),
+            "requested_end": pd.Timestamp("2026-05-29"),
+            "local_start": pd.Timestamp("2024-01-01"),
+            "local_end": pd.Timestamp("2026-05-29"),
+            "message": "",
+        }
+    )
+
+    message = _history_window_coverage_error(check_row, selected, start="2026-03-01", end="2026-05-29")
+
+    assert "本地行情未覆盖选定窗口结束" in message
+    assert "2026-04-24" in message
+    assert "2026-05-29" in message
 
 
 def test_cross_section_result_metrics_are_one_row_pair() -> None:
@@ -1594,7 +1618,7 @@ def test_download_job_summary_uses_user_facing_counts() -> None:
         end="2024-01-31",
         trend_repo=Path("/tmp/trend"),
         data_root=Path("/tmp/data"),
-        provider="",
+        provider="/Applications/Tdx/PYPlugins/user",
         download_engine="tdx",
         batch_size=2,
     )
@@ -1643,6 +1667,36 @@ def test_completed_download_job_summary_exposes_uncovered_status() -> None:
 
     assert summary["uncovered"] == 1
     assert summary["status_label"] == "覆盖未完成"
+
+
+def test_create_download_job_fails_fast_when_tdx_source_is_not_connected(monkeypatch) -> None:
+    monkeypatch.delenv("TDX_TQCENTER_PATH", raising=False)
+    monkeypatch.setattr("streamlit_app.importlib.util.find_spec", lambda name: None)
+
+    job = _create_download_job(
+        symbols=["000001.SZ"],
+        timeframe="1d",
+        adjust="qfq",
+        start="2026-03-01",
+        end="2026-05-29",
+        trend_repo=Path("/tmp/trend"),
+        data_root=Path("/tmp/data"),
+        provider="",
+        download_engine="tdx",
+        batch_size=1,
+    )
+
+    assert job["status"] == "completed"
+    assert job["cursor"] == 1
+    assert job["rows"][0]["status"] == "failed"
+    assert "TDX 下载未连接" in job["rows"][0]["message"]
+
+
+def test_download_source_preflight_accepts_importable_tdx(monkeypatch) -> None:
+    monkeypatch.delenv("TDX_TQCENTER_PATH", raising=False)
+    monkeypatch.setattr("streamlit_app.importlib.util.find_spec", lambda name: object() if name == "tqcenter" else None)
+
+    assert _download_source_preflight_error("tdx", "") == ""
 
 
 def test_download_progress_text_describes_current_symbol_and_result() -> None:

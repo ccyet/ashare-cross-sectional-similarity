@@ -127,6 +127,27 @@ def test_search_history_uses_explicit_window_start_instead_of_backsolving() -> N
     assert result.results["窗口开始"].iloc[0] == pd.Timestamp("2024-01-01")
 
 
+def test_search_history_rejects_stale_explicit_window_end() -> None:
+    bars = _bars("000001.SZ", list(range(1, 115)))
+    bars["date"] = pd.date_range("2026-01-01", periods=len(bars), freq="D")
+    bars = bars.loc[bars["date"] <= pd.Timestamp("2026-04-24")].copy()
+
+    with pytest.raises(ValueError, match="本地行情未覆盖选定窗口结束"):
+        search_history(
+            bars,
+            HistorySearchConfig(
+                symbol="000001.SZ",
+                as_of="2026-05-29",
+                window_size=20,
+                window_start="2026-03-01",
+                forward_windows=(1,),
+                top_n=1,
+                exclusion_bars=0,
+                nearby_gap_days=0,
+            ),
+        )
+
+
 def test_search_history_rejects_too_short_explicit_window() -> None:
     bars = _bars("000001.SZ", [10, 11, 12])
 

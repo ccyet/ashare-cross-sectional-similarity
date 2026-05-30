@@ -19,6 +19,8 @@ from ashare_cross_section_similarity.similarity_algorithms import (
 from ashare_cross_section_similarity.similarity import _prepare_bars, _score_results
 from ashare_cross_section_similarity.universe import normalize_symbol
 
+EXPLICIT_WINDOW_MAX_END_GAP_DAYS = 10
+
 
 @dataclass(frozen=True)
 class HistorySearchConfig:
@@ -144,10 +146,28 @@ def _current_history_window(
     selected = prepared.loc[prepared["date"].between(start, as_of)]
     if len(selected) < 2:
         raise ValueError("选定区间内 K 线数量不足，至少需要 2 根。")
+    if error := explicit_window_end_coverage_error(selected, config.as_of):
+        raise ValueError(error)
     current_start = int(selected.index[0])
     as_of_index = int(selected.index[-1])
     current_window = selected.reset_index(drop=True)
     return current_window, current_start, as_of_index, int(len(current_window))
+
+
+def explicit_window_end_coverage_error(window: pd.DataFrame, as_of: str | pd.Timestamp) -> str:
+    if window.empty or "date" not in window.columns:
+        return ""
+    requested_end = pd.Timestamp(as_of).normalize()
+    actual_end = pd.Timestamp(window["date"].max()).normalize()
+    gap_days = int((requested_end - actual_end).days)
+    if gap_days <= EXPLICIT_WINDOW_MAX_END_GAP_DAYS:
+        return ""
+    return (
+        "本地行情未覆盖选定窗口结束："
+        f"请求结束 {requested_end.strftime('%Y-%m-%d')}，"
+        f"实际最后一根 K 线 {actual_end.strftime('%Y-%m-%d')}，"
+        f"相差 {gap_days} 天。请先下载或更新数据。"
+    )
 
 
 def _candidate_starts(
