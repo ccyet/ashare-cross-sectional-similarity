@@ -162,7 +162,7 @@ SIZE_SPREAD_SMALL_SYMBOL = "000852.SH"
 SIZE_SPREAD_LARGE_SYMBOL = "000300.SH"
 SIZE_SPREAD_SYMBOLS = (SIZE_SPREAD_SMALL_SYMBOL, SIZE_SPREAD_LARGE_SYMBOL)
 DATE_INPUT_MIN = date(1990, 1, 1)
-DATE_INPUT_MAX = date(2100, 12, 31)
+DATE_INPUT_MAX = date(2030, 12, 31)
 
 
 def _app_theme_css() -> str:
@@ -564,8 +564,8 @@ def _render_history_tab(
     st.caption("选定一个标的和一段自定义区间，系统只在这个标的自己的历史里找相似阶段。")
     col1, col2, col3, col4 = st.columns(4)
     symbol = col1.text_input("目标代码", value="399006.SZ", key="history_symbol")
-    start_input = _date_input_args("history_start_date", date(2024, 3, 4))
-    end_input = _date_input_args("history_end_date", date(2024, 3, 31))
+    start_input = _date_input_args("history_start_date", date(2026, 3, 4))
+    end_input = _date_input_args("history_end_date", date(2026, 3, 31))
     start_date = col2.date_input("区间开始", **start_input)
     end_date = col3.date_input("区间结束", **end_input)
     top_n = col4.number_input("展示数量", min_value=1, max_value=50, value=10, step=1, key="history_top_n")
@@ -782,8 +782,8 @@ def _render_cross_section_tab(
     if st.session_state.get("cross_quick_message_symbol") != normalized_target:
         st.session_state.pop("cross_quick_message", None)
         st.session_state["cross_quick_message_symbol"] = normalized_target
-    start_input = _date_input_args("cross_start_date", date(2024, 1, 1))
-    end_input = _date_input_args("cross_end_date", date(2024, 3, 31))
+    start_input = _date_input_args("cross_start_date", date(2026, 1, 1))
+    end_input = _date_input_args("cross_end_date", date(2026, 3, 31))
     start_date = col2.date_input("区间开始", **start_input)
     end_date = col3.date_input("区间结束", **end_input)
     quick_cols = st.columns(6)
