@@ -28,8 +28,93 @@ def test_parse_download_command() -> None:
     assert args.command == "download"
     assert args.symbols == "000001.SZ,600519.SH"
     assert args.timeframe == "1d"
+    assert args.download_engine == "trend"
     assert args.trend_repo == "/tmp/trend-backtest"
     assert args.provider == "tdx"
+
+
+def test_parse_search_date_tolerance_defaults_to_zero() -> None:
+    args = _parse_args(
+        [
+            "search",
+            "--target-symbol",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+        ]
+    )
+
+    assert args.command == "search"
+    assert args.date_tolerance_bars == 0
+
+
+def test_parse_search_date_tolerance_argument() -> None:
+    args = _parse_args(
+        [
+            "search",
+            "--target-symbol",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--date-tolerance-bars",
+            "5",
+        ]
+    )
+
+    assert args.date_tolerance_bars == 5
+
+
+def test_parse_openbb_download_command() -> None:
+    args = _parse_args(
+        [
+            "download",
+            "--download-engine",
+            "openbb",
+            "--data-root",
+            "/tmp/market/daily",
+            "--symbols",
+            "600519.SH",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--provider",
+            "akshare",
+        ]
+    )
+
+    assert args.command == "download"
+    assert args.download_engine == "openbb"
+    assert args.data_root == "/tmp/market/daily"
+    assert args.provider == "akshare"
+
+
+def test_parse_tdx_download_command() -> None:
+    args = _parse_args(
+        [
+            "download",
+            "--download-engine",
+            "tdx",
+            "--data-root",
+            "/tmp/market/daily",
+            "--symbols",
+            "000001.SZ",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--provider",
+            "/Applications/Tdx/PYPlugins/user",
+        ]
+    )
+
+    assert args.command == "download"
+    assert args.download_engine == "tdx"
+    assert args.provider == "/Applications/Tdx/PYPlugins/user"
 
 
 def test_parse_check_command() -> None:
@@ -47,6 +132,25 @@ def test_parse_check_command() -> None:
 
     assert args.command == "check"
     assert args.symbols == "000001.SZ"
+
+
+def test_parse_import_data_command() -> None:
+    args = _parse_args(
+        [
+            "import-data",
+            "--input",
+            "/tmp/prices.csv",
+            "--data-root",
+            "/tmp/market/daily",
+            "--fallback-symbol",
+            "000001.SZ",
+        ]
+    )
+
+    assert args.command == "import-data"
+    assert args.input == "/tmp/prices.csv"
+    assert args.data_root == "/tmp/market/daily"
+    assert args.fallback_symbol == "000001.SZ"
 
 
 def test_parse_search_command() -> None:
